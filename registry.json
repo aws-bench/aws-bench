@@ -6,91 +6,91 @@
     "tasks": [
       {
         "name": "bedrock-agentcore-runtime-missing-logs",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/api-and-observability/bedrock-agentcore-runtime-missing-logs"
       },
       {
         "name": "bedrock-kb-embedding-model-cfn-deps",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/api-and-observability/bedrock-kb-embedding-model-cfn-deps"
       },
       {
         "name": "cloudfront-distribution-origin-error-diagnosis",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/api-and-observability/cloudfront-distribution-origin-error-diagnosis"
       },
       {
         "name": "cloudfront-oac-s-forbidden-troubleshoot",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/api-and-observability/cloudfront-oac-s-forbidden-troubleshoot"
       },
       {
         "name": "debug-api-gateway-iam-authorization",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/api-and-observability/debug-api-gateway-iam-authorization"
       },
       {
         "name": "debug-websocket-api-backend-response",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/api-and-observability/debug-websocket-api-backend-response"
       },
       {
         "name": "diagnose-alb-five-xx-errors",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/api-and-observability/diagnose-alb-five-xx-errors"
       },
       {
         "name": "diagnose-alb-opensearch-bad-gateway",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/api-and-observability/diagnose-alb-opensearch-bad-gateway"
       },
       {
         "name": "diagnose-cloudwatch-alarm-firing",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/api-and-observability/diagnose-cloudwatch-alarm-firing"
       },
       {
         "name": "diagnose-onyx-lambda-processing-failure",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/api-and-observability/diagnose-onyx-lambda-processing-failure"
       },
       {
         "name": "diagnose-xray-service-latency-cause",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/api-and-observability/diagnose-xray-service-latency-cause"
       },
       {
         "name": "find-missing-step-functions-state-machine",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/api-and-observability/find-missing-step-functions-state-machine"
       },
       {
         "name": "lambda-sqs-reconciliation-no-output",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/api-and-observability/lambda-sqs-reconciliation-no-output"
       },
       {
         "name": "opensearch-check-document-request-status-logs",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/api-and-observability/opensearch-check-document-request-status-logs"
       },
       {
         "name": "opensearch-cognito-alb-timeout-diagnosis",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/api-and-observability/opensearch-cognito-alb-timeout-diagnosis"
       }
@@ -98,19 +98,19 @@
     "scenarios": [
       {
         "name": "api-and-observability",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
-        "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
+        "git_commit_id": "3c5e9dcce9a1211cfd3d4484ffa587bcb2d0763e",
         "path": "scenarios/api-and-observability"
       }
     ],
     "extra_instruction_paths": [
       {
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "shared/steering/aws-awareness.md"
       },
       {
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "shared/steering/concise-answer.md"
       }
@@ -119,7 +119,7 @@
       {
         "type": "uv-script",
         "kwargs": {
-          "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+          "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
           "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
           "script_path": "metric/metric.py"
         }
@@ -133,163 +133,163 @@
     "tasks": [
       {
         "name": "amplify-deploy-frontend-from-s3",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/compute-and-data/amplify-deploy-frontend-from-s3"
       },
       {
         "name": "analyze-b2b-commerce-summary-and-lifecycle",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/compute-and-data/analyze-b2b-commerce-summary-and-lifecycle"
       },
       {
         "name": "appstream-stack-with-streaming-vpce",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
-        "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
+        "git_commit_id": "eab9b3934989ead214e7a5f790ff712024ad2a67",
         "path": "tasks/compute-and-data/appstream-stack-with-streaming-vpce"
       },
       {
         "name": "athena-table-cloudfront-logs",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/compute-and-data/athena-table-cloudfront-logs"
       },
       {
         "name": "create-athena-tables-from-s3",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/compute-and-data/create-athena-tables-from-s3"
       },
       {
         "name": "create-dynamodb-tables-from-csv",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/compute-and-data/create-dynamodb-tables-from-csv"
       },
       {
         "name": "create-eks-cluster",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/compute-and-data/create-eks-cluster"
       },
       {
         "name": "create-emr-cluster-multi-master",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/compute-and-data/create-emr-cluster-multi-master"
       },
       {
         "name": "create-medialive-channel",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
-        "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
+        "git_commit_id": "eab9b3934989ead214e7a5f790ff712024ad2a67",
         "path": "tasks/compute-and-data/create-medialive-channel"
       },
       {
         "name": "create-s3-bucket-with-config",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
-        "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
+        "git_commit_id": "eab9b3934989ead214e7a5f790ff712024ad2a67",
         "path": "tasks/compute-and-data/create-s3-bucket-with-config"
       },
       {
         "name": "create-s3-tables-with-compaction",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
-        "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
+        "git_commit_id": "eab9b3934989ead214e7a5f790ff712024ad2a67",
         "path": "tasks/compute-and-data/create-s3-tables-with-compaction"
       },
       {
         "name": "create-vpc-valkey-dynamodb",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
-        "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
+        "git_commit_id": "eab9b3934989ead214e7a5f790ff712024ad2a67",
         "path": "tasks/compute-and-data/create-vpc-valkey-dynamodb"
       },
       {
         "name": "deploy-ec2-instance-with-ebs",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/compute-and-data/deploy-ec2-instance-with-ebs"
       },
       {
         "name": "dynamodb-strip-ec2-fields-from-prod",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/compute-and-data/dynamodb-strip-ec2-fields-from-prod"
       },
       {
         "name": "ec2-image-builder-pipeline",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/compute-and-data/ec2-image-builder-pipeline"
       },
       {
         "name": "expand-elasticsearch-cfn-template",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/compute-and-data/expand-elasticsearch-cfn-template"
       },
       {
         "name": "install-efs-csi-fips",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/compute-and-data/install-efs-csi-fips"
       },
       {
         "name": "invalidate-cloudfront-cache",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/compute-and-data/invalidate-cloudfront-cache"
       },
       {
         "name": "ipam-pool-and-vpc",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/compute-and-data/ipam-pool-and-vpc"
       },
       {
         "name": "kinesis-flink-studio-realtime",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/compute-and-data/kinesis-flink-studio-realtime"
       },
       {
         "name": "lambda-versioned-alias-update",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/compute-and-data/lambda-versioned-alias-update"
       },
       {
         "name": "manage-buckets-eks-sagemaker",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/compute-and-data/manage-buckets-eks-sagemaker"
       },
       {
         "name": "managed-ad-with-ldaps-and-resets",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
-        "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
+        "git_commit_id": "eab9b3934989ead214e7a5f790ff712024ad2a67",
         "path": "tasks/compute-and-data/managed-ad-with-ldaps-and-resets"
       },
       {
         "name": "move-s3-contents-and-cleanup",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/compute-and-data/move-s3-contents-and-cleanup"
       },
       {
         "name": "move-s3-contents-within-bucket",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/compute-and-data/move-s3-contents-within-bucket"
       },
       {
         "name": "serverless-stripe-api-with-stream",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/compute-and-data/serverless-stripe-api-with-stream"
       },
       {
         "name": "sync-s3-buckets-with-metadata",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/compute-and-data/sync-s3-buckets-with-metadata"
       }
@@ -297,19 +297,19 @@
     "scenarios": [
       {
         "name": "compute-and-data",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
-        "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
+        "git_commit_id": "3a1661a070eb25649ec8e5bc987a210e324469d5",
         "path": "scenarios/compute-and-data"
       }
     ],
     "extra_instruction_paths": [
       {
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "shared/steering/aws-awareness.md"
       },
       {
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "shared/steering/concise-answer.md"
       }
@@ -318,7 +318,7 @@
       {
         "type": "uv-script",
         "kwargs": {
-          "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+          "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
           "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
           "script_path": "metric/metric.py"
         }
@@ -332,181 +332,181 @@
     "tasks": [
       {
         "name": "analyze-s-intelligent-tiering-configs",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/databases-and-storage/analyze-s-intelligent-tiering-configs"
       },
       {
         "name": "check-codebuild-project-nodejs-version",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/databases-and-storage/check-codebuild-project-nodejs-version"
       },
       {
         "name": "check-s-bucket-access-profiles",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/databases-and-storage/check-s-bucket-access-profiles"
       },
       {
         "name": "check-s-vector-bucket-indexes-exist",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/databases-and-storage/check-s-vector-bucket-indexes-exist"
       },
       {
         "name": "cloudformation-top-stacks-resource-breakdown",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/databases-and-storage/cloudformation-top-stacks-resource-breakdown"
       },
       {
         "name": "compare-s-bucket-structure-sizes",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/databases-and-storage/compare-s-bucket-structure-sizes"
       },
       {
         "name": "count-cfn-stacks-with-s-buckets",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/databases-and-storage/count-cfn-stacks-with-s-buckets"
       },
       {
         "name": "count-old-s-buckets",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/databases-and-storage/count-old-s-buckets"
       },
       {
         "name": "count-sns-topic-sqs-subscribers",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/databases-and-storage/count-sns-topic-sqs-subscribers"
       },
       {
         "name": "count-windows-server-managed-nodes",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/databases-and-storage/count-windows-server-managed-nodes"
       },
       {
         "name": "dynamodb-query-workflow-status-analysis",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/databases-and-storage/dynamodb-query-workflow-status-analysis"
       },
       {
         "name": "dynamodb-scan-and-fetch-record",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/databases-and-storage/dynamodb-scan-and-fetch-record"
       },
       {
         "name": "dynamodb-scan-filter-by-attribute",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/databases-and-storage/dynamodb-scan-filter-by-attribute"
       },
       {
         "name": "dynamodb-tables-resource-based-policy",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/databases-and-storage/dynamodb-tables-resource-based-policy"
       },
       {
         "name": "estimate-ec-running-instance-costs",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/databases-and-storage/estimate-ec-running-instance-costs"
       },
       {
         "name": "get-s-bucket-ownership-controls",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/databases-and-storage/get-s-bucket-ownership-controls"
       },
       {
         "name": "glue-database-tables-schema-details",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/databases-and-storage/glue-database-tables-schema-details"
       },
       {
         "name": "investigate-athena-table-creation-origin",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/databases-and-storage/investigate-athena-table-creation-origin"
       },
       {
         "name": "list-buckets-with-lifecycle-policy",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/databases-and-storage/list-buckets-with-lifecycle-policy"
       },
       {
         "name": "list-dynamodb-kinesis-streams-all-regions",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/databases-and-storage/list-dynamodb-kinesis-streams-all-regions"
       },
       {
         "name": "list-dynamodb-tables-all-regions",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/databases-and-storage/list-dynamodb-tables-all-regions"
       },
       {
         "name": "list-s-bucket-subdirectories",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/databases-and-storage/list-s-bucket-subdirectories"
       },
       {
         "name": "list-waf-webacl-findings",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/databases-and-storage/list-waf-webacl-findings"
       },
       {
         "name": "query-dynamodb-filtered-records-count",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/databases-and-storage/query-dynamodb-filtered-records-count"
       },
       {
         "name": "report-unencrypted-s-buckets",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/databases-and-storage/report-unencrypted-s-buckets"
       },
       {
         "name": "retrieve-s-csv-object-contents",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/databases-and-storage/retrieve-s-csv-object-contents"
       },
       {
         "name": "retrieve-s-text-file-contents",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/databases-and-storage/retrieve-s-text-file-contents"
       },
       {
         "name": "s-download-csv-identify-columns",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/databases-and-storage/s-download-csv-identify-columns"
       },
       {
         "name": "s-object-versions-and-metadata",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/databases-and-storage/s-object-versions-and-metadata"
       },
       {
         "name": "scan-dynamodb-table-by-status",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/databases-and-storage/scan-dynamodb-table-by-status"
       }
@@ -514,19 +514,19 @@
     "scenarios": [
       {
         "name": "databases-and-storage",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
-        "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
+        "git_commit_id": "3a1661a070eb25649ec8e5bc987a210e324469d5",
         "path": "scenarios/databases-and-storage"
       }
     ],
     "extra_instruction_paths": [
       {
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "shared/steering/aws-awareness.md"
       },
       {
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "shared/steering/concise-answer.md"
       }
@@ -535,7 +535,7 @@
       {
         "type": "uv-script",
         "kwargs": {
-          "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+          "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
           "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
           "script_path": "metric/metric.py"
         }
@@ -549,55 +549,55 @@
     "tasks": [
       {
         "name": "describe-cloudformation-stack-resources",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/ec2-multiregion/describe-cloudformation-stack-resources"
       },
       {
         "name": "describe-ec-instances-cross-region-connectivity",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/ec2-multiregion/describe-ec-instances-cross-region-connectivity"
       },
       {
         "name": "ec-instances-without-default-vpc",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/ec2-multiregion/ec-instances-without-default-vpc"
       },
       {
         "name": "find-ec-instances-in-public-subnets",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/ec2-multiregion/find-ec-instances-in-public-subnets"
       },
       {
         "name": "list-ec-instances-all-regions",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/ec2-multiregion/list-ec-instances-all-regions"
       },
       {
         "name": "list-ec-instances-all-regions-1",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/ec2-multiregion/list-ec-instances-all-regions-1"
       },
       {
         "name": "list-ec-instances-by-vpc-across-regions",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/ec2-multiregion/list-ec-instances-by-vpc-across-regions"
       },
       {
         "name": "list-ec-private-ips-all-regions",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/ec2-multiregion/list-ec-private-ips-all-regions"
       },
       {
         "name": "list-unused-security-groups-all-regions",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/ec2-multiregion/list-unused-security-groups-all-regions"
       }
@@ -605,19 +605,19 @@
     "scenarios": [
       {
         "name": "ec2-multiregion",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
-        "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
+        "git_commit_id": "3a1661a070eb25649ec8e5bc987a210e324469d5",
         "path": "scenarios/ec2-multiregion"
       }
     ],
     "extra_instruction_paths": [
       {
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "shared/steering/aws-awareness.md"
       },
       {
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "shared/steering/concise-answer.md"
       }
@@ -626,7 +626,7 @@
       {
         "type": "uv-script",
         "kwargs": {
-          "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+          "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
           "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
           "script_path": "metric/metric.py"
         }
@@ -640,67 +640,67 @@
     "tasks": [
       {
         "name": "analyze-stepfunctions-job-poller-loop",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/reference-architectures/analyze-stepfunctions-job-poller-loop"
       },
       {
         "name": "audit-cognito-account-recovery",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/reference-architectures/audit-cognito-account-recovery"
       },
       {
         "name": "diagnose-batch-job-no-logs",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/reference-architectures/diagnose-batch-job-no-logs"
       },
       {
         "name": "diagnose-glue-pipeline-not-running",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/reference-architectures/diagnose-glue-pipeline-not-running"
       },
       {
         "name": "diagnose-rabbitmq-consumer-failure",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/reference-architectures/diagnose-rabbitmq-consumer-failure"
       },
       {
         "name": "diagnose-rekognition-reupload-stale",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/reference-architectures/diagnose-rekognition-reupload-stale"
       },
       {
         "name": "diagnose-s3-event-notification-break",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/reference-architectures/diagnose-s3-event-notification-break"
       },
       {
         "name": "diagnose-sftp-alarm-not-firing",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/reference-architectures/diagnose-sftp-alarm-not-firing"
       },
       {
         "name": "review-aurora-production-readiness",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/reference-architectures/review-aurora-production-readiness"
       },
       {
         "name": "review-backup-plan-cross-region",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/reference-architectures/review-backup-plan-cross-region"
       },
       {
         "name": "trace-ec2-ssh-access-path",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/reference-architectures/trace-ec2-ssh-access-path"
       }
@@ -708,19 +708,19 @@
     "scenarios": [
       {
         "name": "reference-architectures",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
-        "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
+        "git_commit_id": "3a1661a070eb25649ec8e5bc987a210e324469d5",
         "path": "scenarios/reference-architectures"
       }
     ],
     "extra_instruction_paths": [
       {
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "shared/steering/aws-awareness.md"
       },
       {
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "shared/steering/concise-answer.md"
       }
@@ -729,7 +729,7 @@
       {
         "type": "uv-script",
         "kwargs": {
-          "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+          "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
           "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
           "script_path": "metric/metric.py"
         }
@@ -743,79 +743,79 @@
     "tasks": [
       {
         "name": "check-lambda-layers-s-code",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/serverless-apps/check-lambda-layers-s-code"
       },
       {
         "name": "check-s-buckets-public-access",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/serverless-apps/check-s-buckets-public-access"
       },
       {
         "name": "check-s-lifecycle-tag-filter-rules",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/serverless-apps/check-s-lifecycle-tag-filter-rules"
       },
       {
         "name": "ecs-services-custom-configurations-check",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/serverless-apps/ecs-services-custom-configurations-check"
       },
       {
         "name": "ecs-services-ecr-access-check",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/serverless-apps/ecs-services-ecr-access-check"
       },
       {
         "name": "find-lambda-functions-tagged-blueprint",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/serverless-apps/find-lambda-functions-tagged-blueprint"
       },
       {
         "name": "find-metric-streams-excluding-namespace",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/serverless-apps/find-metric-streams-excluding-namespace"
       },
       {
         "name": "find-sns-triggered-lambda-functions",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/serverless-apps/find-sns-triggered-lambda-functions"
       },
       {
         "name": "list-s-buckets-website-hosting",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/serverless-apps/list-s-buckets-website-hosting"
       },
       {
         "name": "list-s-buckets-with-metrics-tag-filters",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/serverless-apps/list-s-buckets-with-metrics-tag-filters"
       },
       {
         "name": "list-s-cross-account-analytics-exports",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/serverless-apps/list-s-cross-account-analytics-exports"
       },
       {
         "name": "list-s-inventory-configs-with-prefix",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/serverless-apps/list-s-inventory-configs-with-prefix"
       },
       {
         "name": "s-bucket-metrics-tag-filter-check",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/serverless-apps/s-bucket-metrics-tag-filter-check"
       }
@@ -823,19 +823,19 @@
     "scenarios": [
       {
         "name": "serverless-apps",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
-        "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
+        "git_commit_id": "3a1661a070eb25649ec8e5bc987a210e324469d5",
         "path": "scenarios/serverless-apps"
       }
     ],
     "extra_instruction_paths": [
       {
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "shared/steering/aws-awareness.md"
       },
       {
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "shared/steering/concise-answer.md"
       }
@@ -844,7 +844,7 @@
       {
         "type": "uv-script",
         "kwargs": {
-          "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+          "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
           "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
           "script_path": "metric/metric.py"
         }
@@ -858,49 +858,49 @@
     "tasks": [
       {
         "name": "connect-create-customer-profiles",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/streaming-and-iot/connect-create-customer-profiles"
       },
       {
         "name": "ecs-on-ec2-with-cloudmap",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/streaming-and-iot/ecs-on-ec2-with-cloudmap"
       },
       {
         "name": "health-eventbridge-csv-export",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/streaming-and-iot/health-eventbridge-csv-export"
       },
       {
         "name": "iot-thing-restrict-vpce-ipv4",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/streaming-and-iot/iot-thing-restrict-vpce-ipv4"
       },
       {
         "name": "iotsitewise-windfarm-rollup-models",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
-        "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
+        "git_commit_id": "eab9b3934989ead214e7a5f790ff712024ad2a67",
         "path": "tasks/streaming-and-iot/iotsitewise-windfarm-rollup-models"
       },
       {
         "name": "kds-firehose-iceberg-athena",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/streaming-and-iot/kds-firehose-iceberg-athena"
       },
       {
         "name": "neptune-bulk-load-and-shortest-path",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/streaming-and-iot/neptune-bulk-load-and-shortest-path"
       },
       {
         "name": "s3-csv-to-xlsx-lambda-pipeline",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/streaming-and-iot/s3-csv-to-xlsx-lambda-pipeline"
       }
@@ -908,19 +908,19 @@
     "scenarios": [
       {
         "name": "streaming-and-iot",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
-        "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
+        "git_commit_id": "3a1661a070eb25649ec8e5bc987a210e324469d5",
         "path": "scenarios/streaming-and-iot"
       }
     ],
     "extra_instruction_paths": [
       {
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "shared/steering/aws-awareness.md"
       },
       {
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "shared/steering/concise-answer.md"
       }
@@ -929,7 +929,7 @@
       {
         "type": "uv-script",
         "kwargs": {
-          "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+          "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
           "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
           "script_path": "metric/metric.py"
         }
@@ -943,127 +943,127 @@
     "tasks": [
       {
         "name": "asg-instance-health-check-failure",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/troubleshooting-multiservice/asg-instance-health-check-failure"
       },
       {
         "name": "asg-secondary-network-interface-attach-failure",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/troubleshooting-multiservice/asg-secondary-network-interface-attach-failure"
       },
       {
         "name": "check-vpc-flow-log-destinations",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/troubleshooting-multiservice/check-vpc-flow-log-destinations"
       },
       {
         "name": "diagnose-asg-instance-issues",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/troubleshooting-multiservice/diagnose-asg-instance-issues"
       },
       {
         "name": "diagnose-auto-scaling-group-launch-failure",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/troubleshooting-multiservice/diagnose-auto-scaling-group-launch-failure"
       },
       {
         "name": "diagnose-ecs-cluster-no-traffic",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/troubleshooting-multiservice/diagnose-ecs-cluster-no-traffic"
       },
       {
         "name": "diagnose-ecs-service-no-running-tasks-1",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/troubleshooting-multiservice/diagnose-ecs-service-no-running-tasks-1"
       },
       {
         "name": "diagnose-emr-cluster-performance-issues",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/troubleshooting-multiservice/diagnose-emr-cluster-performance-issues"
       },
       {
         "name": "diagnose-redshift-cluster-health-issues",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/troubleshooting-multiservice/diagnose-redshift-cluster-health-issues"
       },
       {
         "name": "diagnose-step-functions-failing-executions",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/troubleshooting-multiservice/diagnose-step-functions-failing-executions"
       },
       {
         "name": "ec-instance-security-vulnerability-scan",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/troubleshooting-multiservice/ec-instance-security-vulnerability-scan"
       },
       {
         "name": "ec-secrets-manager-exit-code-error",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/troubleshooting-multiservice/ec-secrets-manager-exit-code-error"
       },
       {
         "name": "ecs-elasticache-transit-gateway-connectivity",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/troubleshooting-multiservice/ecs-elasticache-transit-gateway-connectivity"
       },
       {
         "name": "ecs-service-deployment-failure-diagnosis",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/troubleshooting-multiservice/ecs-service-deployment-failure-diagnosis"
       },
       {
         "name": "eventbridge-ecs-task-trigger-debugging",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/troubleshooting-multiservice/eventbridge-ecs-task-trigger-debugging"
       },
       {
         "name": "fix-cloudformation-update-failed-stack",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/troubleshooting-multiservice/fix-cloudformation-update-failed-stack"
       },
       {
         "name": "glue-job-wrong-deployment-region",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/troubleshooting-multiservice/glue-job-wrong-deployment-region"
       },
       {
         "name": "lambda-appconfig-stale-value-troubleshoot",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/troubleshooting-multiservice/lambda-appconfig-stale-value-troubleshoot"
       },
       {
         "name": "troubleshoot-asg-ssh-connectivity",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/troubleshooting-multiservice/troubleshoot-asg-ssh-connectivity"
       },
       {
         "name": "troubleshoot-glue-job-table-read-failure",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/troubleshooting-multiservice/troubleshoot-glue-job-table-read-failure"
       },
       {
         "name": "verify-ec-traffic-routes-through-network-firewall",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/troubleshooting-multiservice/verify-ec-traffic-routes-through-network-firewall"
       }
@@ -1071,19 +1071,19 @@
     "scenarios": [
       {
         "name": "troubleshooting-multiservice",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
-        "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
+        "git_commit_id": "3a1661a070eb25649ec8e5bc987a210e324469d5",
         "path": "scenarios/troubleshooting-multiservice"
       }
     ],
     "extra_instruction_paths": [
       {
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "shared/steering/aws-awareness.md"
       },
       {
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "shared/steering/concise-answer.md"
       }
@@ -1092,7 +1092,7 @@
       {
         "type": "uv-script",
         "kwargs": {
-          "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+          "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
           "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
           "script_path": "metric/metric.py"
         }
@@ -1106,55 +1106,55 @@
     "tasks": [
       {
         "name": "describe-cloudformation-stack-resources",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/ec2-multiregion/describe-cloudformation-stack-resources"
       },
       {
         "name": "describe-ec-instances-cross-region-connectivity",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/ec2-multiregion/describe-ec-instances-cross-region-connectivity"
       },
       {
         "name": "ec-instances-without-default-vpc",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/ec2-multiregion/ec-instances-without-default-vpc"
       },
       {
         "name": "find-ec-instances-in-public-subnets",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/ec2-multiregion/find-ec-instances-in-public-subnets"
       },
       {
         "name": "list-ec-instances-all-regions",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/ec2-multiregion/list-ec-instances-all-regions"
       },
       {
         "name": "list-ec-instances-all-regions-1",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/ec2-multiregion/list-ec-instances-all-regions-1"
       },
       {
         "name": "list-ec-instances-by-vpc-across-regions",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/ec2-multiregion/list-ec-instances-by-vpc-across-regions"
       },
       {
         "name": "list-ec-private-ips-all-regions",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/ec2-multiregion/list-ec-private-ips-all-regions"
       },
       {
         "name": "list-unused-security-groups-all-regions",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/ec2-multiregion/list-unused-security-groups-all-regions"
       }
@@ -1162,19 +1162,19 @@
     "scenarios": [
       {
         "name": "ec2-multiregion",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
-        "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
+        "git_commit_id": "3a1661a070eb25649ec8e5bc987a210e324469d5",
         "path": "scenarios/ec2-multiregion"
       }
     ],
     "extra_instruction_paths": [
       {
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "shared/steering/aws-awareness.md"
       },
       {
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "shared/steering/concise-answer.md"
       }
@@ -1183,7 +1183,7 @@
       {
         "type": "uv-script",
         "kwargs": {
-          "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+          "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
           "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
           "script_path": "metric/metric.py"
         }
@@ -1197,283 +1197,283 @@
     "tasks": [
       {
         "name": "analyze-stepfunctions-job-poller-loop",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/reference-architectures/analyze-stepfunctions-job-poller-loop"
       },
       {
         "name": "audit-cognito-account-recovery",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/reference-architectures/audit-cognito-account-recovery"
       },
       {
         "name": "diagnose-batch-job-no-logs",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/reference-architectures/diagnose-batch-job-no-logs"
       },
       {
         "name": "diagnose-glue-pipeline-not-running",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/reference-architectures/diagnose-glue-pipeline-not-running"
       },
       {
         "name": "diagnose-rekognition-reupload-stale",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/reference-architectures/diagnose-rekognition-reupload-stale"
       },
       {
         "name": "review-backup-plan-cross-region",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/reference-architectures/review-backup-plan-cross-region"
       },
       {
         "name": "diagnose-rabbitmq-consumer-failure",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/reference-architectures/diagnose-rabbitmq-consumer-failure"
       },
       {
         "name": "diagnose-sftp-alarm-not-firing",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/reference-architectures/diagnose-sftp-alarm-not-firing"
       },
       {
         "name": "trace-ec2-ssh-access-path",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/reference-architectures/trace-ec2-ssh-access-path"
       },
       {
         "name": "review-aurora-production-readiness",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/reference-architectures/review-aurora-production-readiness"
       },
       {
         "name": "diagnose-s3-event-notification-break",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/reference-architectures/diagnose-s3-event-notification-break"
       },
       {
         "name": "bedrock-kb-embedding-model-cfn-deps",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/api-and-observability/bedrock-kb-embedding-model-cfn-deps"
       },
       {
         "name": "debug-websocket-api-backend-response",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/api-and-observability/debug-websocket-api-backend-response"
       },
       {
         "name": "opensearch-check-document-request-status-logs",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/api-and-observability/opensearch-check-document-request-status-logs"
       },
       {
         "name": "bedrock-agentcore-runtime-missing-logs",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/api-and-observability/bedrock-agentcore-runtime-missing-logs"
       },
       {
         "name": "cloudfront-oac-s-forbidden-troubleshoot",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/api-and-observability/cloudfront-oac-s-forbidden-troubleshoot"
       },
       {
         "name": "diagnose-alb-five-xx-errors",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/api-and-observability/diagnose-alb-five-xx-errors"
       },
       {
         "name": "diagnose-cloudwatch-alarm-firing",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/api-and-observability/diagnose-cloudwatch-alarm-firing"
       },
       {
         "name": "diagnose-onyx-lambda-processing-failure",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/api-and-observability/diagnose-onyx-lambda-processing-failure"
       },
       {
         "name": "opensearch-cognito-alb-timeout-diagnosis",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/api-and-observability/opensearch-cognito-alb-timeout-diagnosis"
       },
       {
         "name": "find-missing-step-functions-state-machine",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/api-and-observability/find-missing-step-functions-state-machine"
       },
       {
         "name": "diagnose-xray-service-latency-cause",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/api-and-observability/diagnose-xray-service-latency-cause"
       },
       {
         "name": "lambda-sqs-reconciliation-no-output",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/api-and-observability/lambda-sqs-reconciliation-no-output"
       },
       {
         "name": "cloudfront-distribution-origin-error-diagnosis",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/api-and-observability/cloudfront-distribution-origin-error-diagnosis"
       },
       {
         "name": "debug-api-gateway-iam-authorization",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/api-and-observability/debug-api-gateway-iam-authorization"
       },
       {
         "name": "diagnose-alb-opensearch-bad-gateway",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/api-and-observability/diagnose-alb-opensearch-bad-gateway"
       },
       {
         "name": "asg-secondary-network-interface-attach-failure",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/troubleshooting-multiservice/asg-secondary-network-interface-attach-failure"
       },
       {
         "name": "diagnose-asg-instance-issues",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/troubleshooting-multiservice/diagnose-asg-instance-issues"
       },
       {
         "name": "diagnose-ecs-cluster-no-traffic",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/troubleshooting-multiservice/diagnose-ecs-cluster-no-traffic"
       },
       {
         "name": "troubleshoot-asg-ssh-connectivity",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/troubleshooting-multiservice/troubleshoot-asg-ssh-connectivity"
       },
       {
         "name": "check-vpc-flow-log-destinations",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/troubleshooting-multiservice/check-vpc-flow-log-destinations"
       },
       {
         "name": "ecs-service-deployment-failure-diagnosis",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/troubleshooting-multiservice/ecs-service-deployment-failure-diagnosis"
       },
       {
         "name": "eventbridge-ecs-task-trigger-debugging",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/troubleshooting-multiservice/eventbridge-ecs-task-trigger-debugging"
       },
       {
         "name": "asg-instance-health-check-failure",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/troubleshooting-multiservice/asg-instance-health-check-failure"
       },
       {
         "name": "diagnose-ecs-service-no-running-tasks-1",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/troubleshooting-multiservice/diagnose-ecs-service-no-running-tasks-1"
       },
       {
         "name": "diagnose-redshift-cluster-health-issues",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/troubleshooting-multiservice/diagnose-redshift-cluster-health-issues"
       },
       {
         "name": "ec-instance-security-vulnerability-scan",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/troubleshooting-multiservice/ec-instance-security-vulnerability-scan"
       },
       {
         "name": "ec-secrets-manager-exit-code-error",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/troubleshooting-multiservice/ec-secrets-manager-exit-code-error"
       },
       {
         "name": "fix-cloudformation-update-failed-stack",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/troubleshooting-multiservice/fix-cloudformation-update-failed-stack"
       },
       {
         "name": "glue-job-wrong-deployment-region",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/troubleshooting-multiservice/glue-job-wrong-deployment-region"
       },
       {
         "name": "troubleshoot-glue-job-table-read-failure",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/troubleshooting-multiservice/troubleshoot-glue-job-table-read-failure"
       },
       {
         "name": "ecs-elasticache-transit-gateway-connectivity",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/troubleshooting-multiservice/ecs-elasticache-transit-gateway-connectivity"
       },
       {
         "name": "lambda-appconfig-stale-value-troubleshoot",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/troubleshooting-multiservice/lambda-appconfig-stale-value-troubleshoot"
       },
       {
         "name": "verify-ec-traffic-routes-through-network-firewall",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/troubleshooting-multiservice/verify-ec-traffic-routes-through-network-firewall"
       },
       {
         "name": "diagnose-emr-cluster-performance-issues",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/troubleshooting-multiservice/diagnose-emr-cluster-performance-issues"
       },
       {
         "name": "diagnose-auto-scaling-group-launch-failure",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/troubleshooting-multiservice/diagnose-auto-scaling-group-launch-failure"
       },
       {
         "name": "diagnose-step-functions-failing-executions",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/troubleshooting-multiservice/diagnose-step-functions-failing-executions"
       }
@@ -1481,31 +1481,31 @@
     "scenarios": [
       {
         "name": "reference-architectures",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
-        "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
+        "git_commit_id": "3a1661a070eb25649ec8e5bc987a210e324469d5",
         "path": "scenarios/reference-architectures"
       },
       {
         "name": "api-and-observability",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
-        "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
+        "git_commit_id": "3c5e9dcce9a1211cfd3d4484ffa587bcb2d0763e",
         "path": "scenarios/api-and-observability"
       },
       {
         "name": "troubleshooting-multiservice",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
-        "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
+        "git_commit_id": "3a1661a070eb25649ec8e5bc987a210e324469d5",
         "path": "scenarios/troubleshooting-multiservice"
       }
     ],
     "extra_instruction_paths": [
       {
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "shared/steering/aws-awareness.md"
       },
       {
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "shared/steering/concise-answer.md"
       }
@@ -1514,7 +1514,7 @@
       {
         "type": "uv-script",
         "kwargs": {
-          "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+          "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
           "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
           "script_path": "metric/metric.py"
         }
@@ -1528,469 +1528,469 @@
     "tasks": [
       {
         "name": "connect-create-customer-profiles",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/streaming-and-iot/connect-create-customer-profiles"
       },
       {
         "name": "ecs-on-ec2-with-cloudmap",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/streaming-and-iot/ecs-on-ec2-with-cloudmap"
       },
       {
         "name": "health-eventbridge-csv-export",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/streaming-and-iot/health-eventbridge-csv-export"
       },
       {
         "name": "iot-thing-restrict-vpce-ipv4",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/streaming-and-iot/iot-thing-restrict-vpce-ipv4"
       },
       {
         "name": "iotsitewise-windfarm-rollup-models",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
-        "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
+        "git_commit_id": "eab9b3934989ead214e7a5f790ff712024ad2a67",
         "path": "tasks/streaming-and-iot/iotsitewise-windfarm-rollup-models"
       },
       {
         "name": "kds-firehose-iceberg-athena",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/streaming-and-iot/kds-firehose-iceberg-athena"
       },
       {
         "name": "neptune-bulk-load-and-shortest-path",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/streaming-and-iot/neptune-bulk-load-and-shortest-path"
       },
       {
         "name": "s3-csv-to-xlsx-lambda-pipeline",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/streaming-and-iot/s3-csv-to-xlsx-lambda-pipeline"
       },
       {
         "name": "amplify-deploy-frontend-from-s3",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/compute-and-data/amplify-deploy-frontend-from-s3"
       },
       {
         "name": "analyze-b2b-commerce-summary-and-lifecycle",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/compute-and-data/analyze-b2b-commerce-summary-and-lifecycle"
       },
       {
         "name": "appstream-stack-with-streaming-vpce",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
-        "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
+        "git_commit_id": "eab9b3934989ead214e7a5f790ff712024ad2a67",
         "path": "tasks/compute-and-data/appstream-stack-with-streaming-vpce"
       },
       {
         "name": "athena-table-cloudfront-logs",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/compute-and-data/athena-table-cloudfront-logs"
       },
       {
         "name": "create-athena-tables-from-s3",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/compute-and-data/create-athena-tables-from-s3"
       },
       {
         "name": "create-dynamodb-tables-from-csv",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/compute-and-data/create-dynamodb-tables-from-csv"
       },
       {
         "name": "create-eks-cluster",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/compute-and-data/create-eks-cluster"
       },
       {
         "name": "create-emr-cluster-multi-master",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/compute-and-data/create-emr-cluster-multi-master"
       },
       {
         "name": "create-medialive-channel",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
-        "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
+        "git_commit_id": "eab9b3934989ead214e7a5f790ff712024ad2a67",
         "path": "tasks/compute-and-data/create-medialive-channel"
       },
       {
         "name": "create-s3-bucket-with-config",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
-        "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
+        "git_commit_id": "eab9b3934989ead214e7a5f790ff712024ad2a67",
         "path": "tasks/compute-and-data/create-s3-bucket-with-config"
       },
       {
         "name": "create-s3-tables-with-compaction",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
-        "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
+        "git_commit_id": "eab9b3934989ead214e7a5f790ff712024ad2a67",
         "path": "tasks/compute-and-data/create-s3-tables-with-compaction"
       },
       {
         "name": "create-vpc-valkey-dynamodb",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
-        "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
+        "git_commit_id": "eab9b3934989ead214e7a5f790ff712024ad2a67",
         "path": "tasks/compute-and-data/create-vpc-valkey-dynamodb"
       },
       {
         "name": "deploy-ec2-instance-with-ebs",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/compute-and-data/deploy-ec2-instance-with-ebs"
       },
       {
         "name": "dynamodb-strip-ec2-fields-from-prod",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/compute-and-data/dynamodb-strip-ec2-fields-from-prod"
       },
       {
         "name": "ec2-image-builder-pipeline",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/compute-and-data/ec2-image-builder-pipeline"
       },
       {
         "name": "expand-elasticsearch-cfn-template",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/compute-and-data/expand-elasticsearch-cfn-template"
       },
       {
         "name": "install-efs-csi-fips",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/compute-and-data/install-efs-csi-fips"
       },
       {
         "name": "invalidate-cloudfront-cache",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/compute-and-data/invalidate-cloudfront-cache"
       },
       {
         "name": "ipam-pool-and-vpc",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/compute-and-data/ipam-pool-and-vpc"
       },
       {
         "name": "kinesis-flink-studio-realtime",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/compute-and-data/kinesis-flink-studio-realtime"
       },
       {
         "name": "lambda-versioned-alias-update",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/compute-and-data/lambda-versioned-alias-update"
       },
       {
         "name": "manage-buckets-eks-sagemaker",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/compute-and-data/manage-buckets-eks-sagemaker"
       },
       {
         "name": "managed-ad-with-ldaps-and-resets",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
-        "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
+        "git_commit_id": "eab9b3934989ead214e7a5f790ff712024ad2a67",
         "path": "tasks/compute-and-data/managed-ad-with-ldaps-and-resets"
       },
       {
         "name": "move-s3-contents-and-cleanup",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/compute-and-data/move-s3-contents-and-cleanup"
       },
       {
         "name": "move-s3-contents-within-bucket",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/compute-and-data/move-s3-contents-within-bucket"
       },
       {
         "name": "serverless-stripe-api-with-stream",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/compute-and-data/serverless-stripe-api-with-stream"
       },
       {
         "name": "sync-s3-buckets-with-metadata",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/compute-and-data/sync-s3-buckets-with-metadata"
       },
       {
         "name": "check-lambda-layers-s-code",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/serverless-apps/check-lambda-layers-s-code"
       },
       {
         "name": "check-s-buckets-public-access",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/serverless-apps/check-s-buckets-public-access"
       },
       {
         "name": "check-s-lifecycle-tag-filter-rules",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/serverless-apps/check-s-lifecycle-tag-filter-rules"
       },
       {
         "name": "ecs-services-custom-configurations-check",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/serverless-apps/ecs-services-custom-configurations-check"
       },
       {
         "name": "ecs-services-ecr-access-check",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/serverless-apps/ecs-services-ecr-access-check"
       },
       {
         "name": "find-lambda-functions-tagged-blueprint",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/serverless-apps/find-lambda-functions-tagged-blueprint"
       },
       {
         "name": "find-metric-streams-excluding-namespace",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/serverless-apps/find-metric-streams-excluding-namespace"
       },
       {
         "name": "find-sns-triggered-lambda-functions",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/serverless-apps/find-sns-triggered-lambda-functions"
       },
       {
         "name": "list-s-buckets-website-hosting",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/serverless-apps/list-s-buckets-website-hosting"
       },
       {
         "name": "list-s-buckets-with-metrics-tag-filters",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/serverless-apps/list-s-buckets-with-metrics-tag-filters"
       },
       {
         "name": "list-s-cross-account-analytics-exports",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/serverless-apps/list-s-cross-account-analytics-exports"
       },
       {
         "name": "list-s-inventory-configs-with-prefix",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/serverless-apps/list-s-inventory-configs-with-prefix"
       },
       {
         "name": "s-bucket-metrics-tag-filter-check",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/serverless-apps/s-bucket-metrics-tag-filter-check"
       },
       {
         "name": "analyze-s-intelligent-tiering-configs",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/databases-and-storage/analyze-s-intelligent-tiering-configs"
       },
       {
         "name": "check-codebuild-project-nodejs-version",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/databases-and-storage/check-codebuild-project-nodejs-version"
       },
       {
         "name": "check-s-bucket-access-profiles",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/databases-and-storage/check-s-bucket-access-profiles"
       },
       {
         "name": "check-s-vector-bucket-indexes-exist",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/databases-and-storage/check-s-vector-bucket-indexes-exist"
       },
       {
         "name": "cloudformation-top-stacks-resource-breakdown",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/databases-and-storage/cloudformation-top-stacks-resource-breakdown"
       },
       {
         "name": "compare-s-bucket-structure-sizes",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/databases-and-storage/compare-s-bucket-structure-sizes"
       },
       {
         "name": "count-cfn-stacks-with-s-buckets",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/databases-and-storage/count-cfn-stacks-with-s-buckets"
       },
       {
         "name": "count-old-s-buckets",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/databases-and-storage/count-old-s-buckets"
       },
       {
         "name": "count-sns-topic-sqs-subscribers",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/databases-and-storage/count-sns-topic-sqs-subscribers"
       },
       {
         "name": "count-windows-server-managed-nodes",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/databases-and-storage/count-windows-server-managed-nodes"
       },
       {
         "name": "dynamodb-query-workflow-status-analysis",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/databases-and-storage/dynamodb-query-workflow-status-analysis"
       },
       {
         "name": "dynamodb-scan-and-fetch-record",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/databases-and-storage/dynamodb-scan-and-fetch-record"
       },
       {
         "name": "dynamodb-scan-filter-by-attribute",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/databases-and-storage/dynamodb-scan-filter-by-attribute"
       },
       {
         "name": "dynamodb-tables-resource-based-policy",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/databases-and-storage/dynamodb-tables-resource-based-policy"
       },
       {
         "name": "estimate-ec-running-instance-costs",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/databases-and-storage/estimate-ec-running-instance-costs"
       },
       {
         "name": "get-s-bucket-ownership-controls",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/databases-and-storage/get-s-bucket-ownership-controls"
       },
       {
         "name": "glue-database-tables-schema-details",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/databases-and-storage/glue-database-tables-schema-details"
       },
       {
         "name": "investigate-athena-table-creation-origin",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/databases-and-storage/investigate-athena-table-creation-origin"
       },
       {
         "name": "list-buckets-with-lifecycle-policy",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/databases-and-storage/list-buckets-with-lifecycle-policy"
       },
       {
         "name": "list-dynamodb-kinesis-streams-all-regions",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/databases-and-storage/list-dynamodb-kinesis-streams-all-regions"
       },
       {
         "name": "list-dynamodb-tables-all-regions",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/databases-and-storage/list-dynamodb-tables-all-regions"
       },
       {
         "name": "list-s-bucket-subdirectories",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/databases-and-storage/list-s-bucket-subdirectories"
       },
       {
         "name": "list-waf-webacl-findings",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/databases-and-storage/list-waf-webacl-findings"
       },
       {
         "name": "query-dynamodb-filtered-records-count",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/databases-and-storage/query-dynamodb-filtered-records-count"
       },
       {
         "name": "report-unencrypted-s-buckets",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/databases-and-storage/report-unencrypted-s-buckets"
       },
       {
         "name": "retrieve-s-csv-object-contents",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/databases-and-storage/retrieve-s-csv-object-contents"
       },
       {
         "name": "retrieve-s-text-file-contents",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/databases-and-storage/retrieve-s-text-file-contents"
       },
       {
         "name": "s-download-csv-identify-columns",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/databases-and-storage/s-download-csv-identify-columns"
       },
       {
         "name": "s-object-versions-and-metadata",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/databases-and-storage/s-object-versions-and-metadata"
       },
       {
         "name": "scan-dynamodb-table-by-status",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/databases-and-storage/scan-dynamodb-table-by-status"
       }
@@ -1998,37 +1998,37 @@
     "scenarios": [
       {
         "name": "streaming-and-iot",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
-        "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
+        "git_commit_id": "3a1661a070eb25649ec8e5bc987a210e324469d5",
         "path": "scenarios/streaming-and-iot"
       },
       {
         "name": "compute-and-data",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
-        "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
+        "git_commit_id": "3a1661a070eb25649ec8e5bc987a210e324469d5",
         "path": "scenarios/compute-and-data"
       },
       {
         "name": "serverless-apps",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
-        "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
+        "git_commit_id": "3a1661a070eb25649ec8e5bc987a210e324469d5",
         "path": "scenarios/serverless-apps"
       },
       {
         "name": "databases-and-storage",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
-        "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
+        "git_commit_id": "3a1661a070eb25649ec8e5bc987a210e324469d5",
         "path": "scenarios/databases-and-storage"
       }
     ],
     "extra_instruction_paths": [
       {
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "shared/steering/aws-awareness.md"
       },
       {
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "shared/steering/concise-answer.md"
       }
@@ -2037,7 +2037,7 @@
       {
         "type": "uv-script",
         "kwargs": {
-          "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+          "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
           "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
           "script_path": "metric/metric.py"
         }
@@ -2051,805 +2051,805 @@
     "tasks": [
       {
         "name": "bedrock-agentcore-runtime-missing-logs",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/api-and-observability/bedrock-agentcore-runtime-missing-logs"
       },
       {
         "name": "bedrock-kb-embedding-model-cfn-deps",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/api-and-observability/bedrock-kb-embedding-model-cfn-deps"
       },
       {
         "name": "cloudfront-distribution-origin-error-diagnosis",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/api-and-observability/cloudfront-distribution-origin-error-diagnosis"
       },
       {
         "name": "cloudfront-oac-s-forbidden-troubleshoot",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/api-and-observability/cloudfront-oac-s-forbidden-troubleshoot"
       },
       {
         "name": "debug-api-gateway-iam-authorization",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/api-and-observability/debug-api-gateway-iam-authorization"
       },
       {
         "name": "debug-websocket-api-backend-response",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/api-and-observability/debug-websocket-api-backend-response"
       },
       {
         "name": "diagnose-alb-five-xx-errors",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/api-and-observability/diagnose-alb-five-xx-errors"
       },
       {
         "name": "diagnose-alb-opensearch-bad-gateway",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/api-and-observability/diagnose-alb-opensearch-bad-gateway"
       },
       {
         "name": "diagnose-cloudwatch-alarm-firing",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/api-and-observability/diagnose-cloudwatch-alarm-firing"
       },
       {
         "name": "diagnose-onyx-lambda-processing-failure",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/api-and-observability/diagnose-onyx-lambda-processing-failure"
       },
       {
         "name": "diagnose-xray-service-latency-cause",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/api-and-observability/diagnose-xray-service-latency-cause"
       },
       {
         "name": "find-missing-step-functions-state-machine",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/api-and-observability/find-missing-step-functions-state-machine"
       },
       {
         "name": "lambda-sqs-reconciliation-no-output",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/api-and-observability/lambda-sqs-reconciliation-no-output"
       },
       {
         "name": "opensearch-check-document-request-status-logs",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/api-and-observability/opensearch-check-document-request-status-logs"
       },
       {
         "name": "opensearch-cognito-alb-timeout-diagnosis",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/api-and-observability/opensearch-cognito-alb-timeout-diagnosis"
       },
       {
         "name": "amplify-deploy-frontend-from-s3",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/compute-and-data/amplify-deploy-frontend-from-s3"
       },
       {
         "name": "analyze-b2b-commerce-summary-and-lifecycle",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/compute-and-data/analyze-b2b-commerce-summary-and-lifecycle"
       },
       {
         "name": "appstream-stack-with-streaming-vpce",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
-        "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
+        "git_commit_id": "eab9b3934989ead214e7a5f790ff712024ad2a67",
         "path": "tasks/compute-and-data/appstream-stack-with-streaming-vpce"
       },
       {
         "name": "athena-table-cloudfront-logs",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/compute-and-data/athena-table-cloudfront-logs"
       },
       {
         "name": "create-athena-tables-from-s3",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/compute-and-data/create-athena-tables-from-s3"
       },
       {
         "name": "create-dynamodb-tables-from-csv",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/compute-and-data/create-dynamodb-tables-from-csv"
       },
       {
         "name": "create-eks-cluster",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/compute-and-data/create-eks-cluster"
       },
       {
         "name": "create-emr-cluster-multi-master",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/compute-and-data/create-emr-cluster-multi-master"
       },
       {
         "name": "create-medialive-channel",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
-        "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
+        "git_commit_id": "eab9b3934989ead214e7a5f790ff712024ad2a67",
         "path": "tasks/compute-and-data/create-medialive-channel"
       },
       {
         "name": "create-s3-bucket-with-config",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
-        "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
+        "git_commit_id": "eab9b3934989ead214e7a5f790ff712024ad2a67",
         "path": "tasks/compute-and-data/create-s3-bucket-with-config"
       },
       {
         "name": "create-s3-tables-with-compaction",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
-        "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
+        "git_commit_id": "eab9b3934989ead214e7a5f790ff712024ad2a67",
         "path": "tasks/compute-and-data/create-s3-tables-with-compaction"
       },
       {
         "name": "create-vpc-valkey-dynamodb",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
-        "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
+        "git_commit_id": "eab9b3934989ead214e7a5f790ff712024ad2a67",
         "path": "tasks/compute-and-data/create-vpc-valkey-dynamodb"
       },
       {
         "name": "deploy-ec2-instance-with-ebs",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/compute-and-data/deploy-ec2-instance-with-ebs"
       },
       {
         "name": "dynamodb-strip-ec2-fields-from-prod",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/compute-and-data/dynamodb-strip-ec2-fields-from-prod"
       },
       {
         "name": "ec2-image-builder-pipeline",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/compute-and-data/ec2-image-builder-pipeline"
       },
       {
         "name": "expand-elasticsearch-cfn-template",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/compute-and-data/expand-elasticsearch-cfn-template"
       },
       {
         "name": "install-efs-csi-fips",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/compute-and-data/install-efs-csi-fips"
       },
       {
         "name": "invalidate-cloudfront-cache",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/compute-and-data/invalidate-cloudfront-cache"
       },
       {
         "name": "ipam-pool-and-vpc",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/compute-and-data/ipam-pool-and-vpc"
       },
       {
         "name": "kinesis-flink-studio-realtime",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/compute-and-data/kinesis-flink-studio-realtime"
       },
       {
         "name": "lambda-versioned-alias-update",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/compute-and-data/lambda-versioned-alias-update"
       },
       {
         "name": "manage-buckets-eks-sagemaker",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/compute-and-data/manage-buckets-eks-sagemaker"
       },
       {
         "name": "managed-ad-with-ldaps-and-resets",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
-        "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
+        "git_commit_id": "eab9b3934989ead214e7a5f790ff712024ad2a67",
         "path": "tasks/compute-and-data/managed-ad-with-ldaps-and-resets"
       },
       {
         "name": "move-s3-contents-and-cleanup",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/compute-and-data/move-s3-contents-and-cleanup"
       },
       {
         "name": "move-s3-contents-within-bucket",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/compute-and-data/move-s3-contents-within-bucket"
       },
       {
         "name": "serverless-stripe-api-with-stream",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/compute-and-data/serverless-stripe-api-with-stream"
       },
       {
         "name": "sync-s3-buckets-with-metadata",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/compute-and-data/sync-s3-buckets-with-metadata"
       },
       {
         "name": "analyze-s-intelligent-tiering-configs",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/databases-and-storage/analyze-s-intelligent-tiering-configs"
       },
       {
         "name": "check-codebuild-project-nodejs-version",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/databases-and-storage/check-codebuild-project-nodejs-version"
       },
       {
         "name": "check-s-bucket-access-profiles",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/databases-and-storage/check-s-bucket-access-profiles"
       },
       {
         "name": "check-s-vector-bucket-indexes-exist",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/databases-and-storage/check-s-vector-bucket-indexes-exist"
       },
       {
         "name": "cloudformation-top-stacks-resource-breakdown",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/databases-and-storage/cloudformation-top-stacks-resource-breakdown"
       },
       {
         "name": "compare-s-bucket-structure-sizes",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/databases-and-storage/compare-s-bucket-structure-sizes"
       },
       {
         "name": "count-cfn-stacks-with-s-buckets",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/databases-and-storage/count-cfn-stacks-with-s-buckets"
       },
       {
         "name": "count-old-s-buckets",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/databases-and-storage/count-old-s-buckets"
       },
       {
         "name": "count-sns-topic-sqs-subscribers",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/databases-and-storage/count-sns-topic-sqs-subscribers"
       },
       {
         "name": "count-windows-server-managed-nodes",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/databases-and-storage/count-windows-server-managed-nodes"
       },
       {
         "name": "dynamodb-query-workflow-status-analysis",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/databases-and-storage/dynamodb-query-workflow-status-analysis"
       },
       {
         "name": "dynamodb-scan-and-fetch-record",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/databases-and-storage/dynamodb-scan-and-fetch-record"
       },
       {
         "name": "dynamodb-scan-filter-by-attribute",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/databases-and-storage/dynamodb-scan-filter-by-attribute"
       },
       {
         "name": "dynamodb-tables-resource-based-policy",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/databases-and-storage/dynamodb-tables-resource-based-policy"
       },
       {
         "name": "estimate-ec-running-instance-costs",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/databases-and-storage/estimate-ec-running-instance-costs"
       },
       {
         "name": "get-s-bucket-ownership-controls",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/databases-and-storage/get-s-bucket-ownership-controls"
       },
       {
         "name": "glue-database-tables-schema-details",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/databases-and-storage/glue-database-tables-schema-details"
       },
       {
         "name": "investigate-athena-table-creation-origin",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/databases-and-storage/investigate-athena-table-creation-origin"
       },
       {
         "name": "list-buckets-with-lifecycle-policy",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/databases-and-storage/list-buckets-with-lifecycle-policy"
       },
       {
         "name": "list-dynamodb-kinesis-streams-all-regions",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/databases-and-storage/list-dynamodb-kinesis-streams-all-regions"
       },
       {
         "name": "list-dynamodb-tables-all-regions",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/databases-and-storage/list-dynamodb-tables-all-regions"
       },
       {
         "name": "list-s-bucket-subdirectories",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/databases-and-storage/list-s-bucket-subdirectories"
       },
       {
         "name": "list-waf-webacl-findings",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/databases-and-storage/list-waf-webacl-findings"
       },
       {
         "name": "query-dynamodb-filtered-records-count",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/databases-and-storage/query-dynamodb-filtered-records-count"
       },
       {
         "name": "report-unencrypted-s-buckets",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/databases-and-storage/report-unencrypted-s-buckets"
       },
       {
         "name": "retrieve-s-csv-object-contents",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/databases-and-storage/retrieve-s-csv-object-contents"
       },
       {
         "name": "retrieve-s-text-file-contents",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/databases-and-storage/retrieve-s-text-file-contents"
       },
       {
         "name": "s-download-csv-identify-columns",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/databases-and-storage/s-download-csv-identify-columns"
       },
       {
         "name": "s-object-versions-and-metadata",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/databases-and-storage/s-object-versions-and-metadata"
       },
       {
         "name": "scan-dynamodb-table-by-status",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/databases-and-storage/scan-dynamodb-table-by-status"
       },
       {
         "name": "describe-cloudformation-stack-resources",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/ec2-multiregion/describe-cloudformation-stack-resources"
       },
       {
         "name": "describe-ec-instances-cross-region-connectivity",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/ec2-multiregion/describe-ec-instances-cross-region-connectivity"
       },
       {
         "name": "ec-instances-without-default-vpc",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/ec2-multiregion/ec-instances-without-default-vpc"
       },
       {
         "name": "find-ec-instances-in-public-subnets",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/ec2-multiregion/find-ec-instances-in-public-subnets"
       },
       {
         "name": "list-ec-instances-all-regions",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/ec2-multiregion/list-ec-instances-all-regions"
       },
       {
         "name": "list-ec-instances-all-regions-1",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/ec2-multiregion/list-ec-instances-all-regions-1"
       },
       {
         "name": "list-ec-instances-by-vpc-across-regions",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/ec2-multiregion/list-ec-instances-by-vpc-across-regions"
       },
       {
         "name": "list-ec-private-ips-all-regions",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/ec2-multiregion/list-ec-private-ips-all-regions"
       },
       {
         "name": "list-unused-security-groups-all-regions",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/ec2-multiregion/list-unused-security-groups-all-regions"
       },
       {
         "name": "analyze-stepfunctions-job-poller-loop",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/reference-architectures/analyze-stepfunctions-job-poller-loop"
       },
       {
         "name": "audit-cognito-account-recovery",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/reference-architectures/audit-cognito-account-recovery"
       },
       {
         "name": "diagnose-batch-job-no-logs",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/reference-architectures/diagnose-batch-job-no-logs"
       },
       {
         "name": "diagnose-glue-pipeline-not-running",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/reference-architectures/diagnose-glue-pipeline-not-running"
       },
       {
         "name": "diagnose-rabbitmq-consumer-failure",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/reference-architectures/diagnose-rabbitmq-consumer-failure"
       },
       {
         "name": "diagnose-rekognition-reupload-stale",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/reference-architectures/diagnose-rekognition-reupload-stale"
       },
       {
         "name": "diagnose-s3-event-notification-break",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/reference-architectures/diagnose-s3-event-notification-break"
       },
       {
         "name": "diagnose-sftp-alarm-not-firing",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/reference-architectures/diagnose-sftp-alarm-not-firing"
       },
       {
         "name": "review-aurora-production-readiness",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/reference-architectures/review-aurora-production-readiness"
       },
       {
         "name": "review-backup-plan-cross-region",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/reference-architectures/review-backup-plan-cross-region"
       },
       {
         "name": "trace-ec2-ssh-access-path",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/reference-architectures/trace-ec2-ssh-access-path"
       },
       {
         "name": "check-lambda-layers-s-code",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/serverless-apps/check-lambda-layers-s-code"
       },
       {
         "name": "check-s-buckets-public-access",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/serverless-apps/check-s-buckets-public-access"
       },
       {
         "name": "check-s-lifecycle-tag-filter-rules",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/serverless-apps/check-s-lifecycle-tag-filter-rules"
       },
       {
         "name": "ecs-services-custom-configurations-check",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/serverless-apps/ecs-services-custom-configurations-check"
       },
       {
         "name": "ecs-services-ecr-access-check",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/serverless-apps/ecs-services-ecr-access-check"
       },
       {
         "name": "find-lambda-functions-tagged-blueprint",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/serverless-apps/find-lambda-functions-tagged-blueprint"
       },
       {
         "name": "find-metric-streams-excluding-namespace",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/serverless-apps/find-metric-streams-excluding-namespace"
       },
       {
         "name": "find-sns-triggered-lambda-functions",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/serverless-apps/find-sns-triggered-lambda-functions"
       },
       {
         "name": "list-s-buckets-website-hosting",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/serverless-apps/list-s-buckets-website-hosting"
       },
       {
         "name": "list-s-buckets-with-metrics-tag-filters",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/serverless-apps/list-s-buckets-with-metrics-tag-filters"
       },
       {
         "name": "list-s-cross-account-analytics-exports",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/serverless-apps/list-s-cross-account-analytics-exports"
       },
       {
         "name": "list-s-inventory-configs-with-prefix",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/serverless-apps/list-s-inventory-configs-with-prefix"
       },
       {
         "name": "s-bucket-metrics-tag-filter-check",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/serverless-apps/s-bucket-metrics-tag-filter-check"
       },
       {
         "name": "connect-create-customer-profiles",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/streaming-and-iot/connect-create-customer-profiles"
       },
       {
         "name": "ecs-on-ec2-with-cloudmap",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/streaming-and-iot/ecs-on-ec2-with-cloudmap"
       },
       {
         "name": "health-eventbridge-csv-export",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/streaming-and-iot/health-eventbridge-csv-export"
       },
       {
         "name": "iot-thing-restrict-vpce-ipv4",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/streaming-and-iot/iot-thing-restrict-vpce-ipv4"
       },
       {
         "name": "iotsitewise-windfarm-rollup-models",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
-        "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
+        "git_commit_id": "eab9b3934989ead214e7a5f790ff712024ad2a67",
         "path": "tasks/streaming-and-iot/iotsitewise-windfarm-rollup-models"
       },
       {
         "name": "kds-firehose-iceberg-athena",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/streaming-and-iot/kds-firehose-iceberg-athena"
       },
       {
         "name": "neptune-bulk-load-and-shortest-path",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/streaming-and-iot/neptune-bulk-load-and-shortest-path"
       },
       {
         "name": "s3-csv-to-xlsx-lambda-pipeline",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/streaming-and-iot/s3-csv-to-xlsx-lambda-pipeline"
       },
       {
         "name": "asg-instance-health-check-failure",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/troubleshooting-multiservice/asg-instance-health-check-failure"
       },
       {
         "name": "asg-secondary-network-interface-attach-failure",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/troubleshooting-multiservice/asg-secondary-network-interface-attach-failure"
       },
       {
         "name": "check-vpc-flow-log-destinations",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/troubleshooting-multiservice/check-vpc-flow-log-destinations"
       },
       {
         "name": "diagnose-asg-instance-issues",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/troubleshooting-multiservice/diagnose-asg-instance-issues"
       },
       {
         "name": "diagnose-auto-scaling-group-launch-failure",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/troubleshooting-multiservice/diagnose-auto-scaling-group-launch-failure"
       },
       {
         "name": "diagnose-ecs-cluster-no-traffic",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/troubleshooting-multiservice/diagnose-ecs-cluster-no-traffic"
       },
       {
         "name": "diagnose-ecs-service-no-running-tasks-1",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/troubleshooting-multiservice/diagnose-ecs-service-no-running-tasks-1"
       },
       {
         "name": "diagnose-emr-cluster-performance-issues",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/troubleshooting-multiservice/diagnose-emr-cluster-performance-issues"
       },
       {
         "name": "diagnose-redshift-cluster-health-issues",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/troubleshooting-multiservice/diagnose-redshift-cluster-health-issues"
       },
       {
         "name": "diagnose-step-functions-failing-executions",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/troubleshooting-multiservice/diagnose-step-functions-failing-executions"
       },
       {
         "name": "ec-instance-security-vulnerability-scan",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/troubleshooting-multiservice/ec-instance-security-vulnerability-scan"
       },
       {
         "name": "ec-secrets-manager-exit-code-error",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/troubleshooting-multiservice/ec-secrets-manager-exit-code-error"
       },
       {
         "name": "ecs-elasticache-transit-gateway-connectivity",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/troubleshooting-multiservice/ecs-elasticache-transit-gateway-connectivity"
       },
       {
         "name": "ecs-service-deployment-failure-diagnosis",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/troubleshooting-multiservice/ecs-service-deployment-failure-diagnosis"
       },
       {
         "name": "eventbridge-ecs-task-trigger-debugging",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/troubleshooting-multiservice/eventbridge-ecs-task-trigger-debugging"
       },
       {
         "name": "fix-cloudformation-update-failed-stack",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/troubleshooting-multiservice/fix-cloudformation-update-failed-stack"
       },
       {
         "name": "glue-job-wrong-deployment-region",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/troubleshooting-multiservice/glue-job-wrong-deployment-region"
       },
       {
         "name": "lambda-appconfig-stale-value-troubleshoot",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/troubleshooting-multiservice/lambda-appconfig-stale-value-troubleshoot"
       },
       {
         "name": "troubleshoot-asg-ssh-connectivity",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/troubleshooting-multiservice/troubleshoot-asg-ssh-connectivity"
       },
       {
         "name": "troubleshoot-glue-job-table-read-failure",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/troubleshooting-multiservice/troubleshoot-glue-job-table-read-failure"
       },
       {
         "name": "verify-ec-traffic-routes-through-network-firewall",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
         "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
         "path": "tasks/troubleshooting-multiservice/verify-ec-traffic-routes-through-network-firewall"
       }
@@ -2857,50 +2857,50 @@
     "scenarios": [
       {
         "name": "api-and-observability",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
-        "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
+        "git_commit_id": "3c5e9dcce9a1211cfd3d4484ffa587bcb2d0763e",
         "path": "scenarios/api-and-observability"
       },
       {
         "name": "compute-and-data",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
-        "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
+        "git_commit_id": "3a1661a070eb25649ec8e5bc987a210e324469d5",
         "path": "scenarios/compute-and-data"
       },
       {
         "name": "databases-and-storage",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
-        "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
+        "git_commit_id": "3a1661a070eb25649ec8e5bc987a210e324469d5",
         "path": "scenarios/databases-and-storage"
       },
       {
         "name": "ec2-multiregion",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
-        "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
+        "git_commit_id": "3a1661a070eb25649ec8e5bc987a210e324469d5",
         "path": "scenarios/ec2-multiregion"
       },
       {
         "name": "reference-architectures",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
-        "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
+        "git_commit_id": "3a1661a070eb25649ec8e5bc987a210e324469d5",
         "path": "scenarios/reference-architectures"
       },
       {
         "name": "serverless-apps",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
-        "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
+        "git_commit_id": "3a1661a070eb25649ec8e5bc987a210e324469d5",
         "path": "scenarios/serverless-apps"
       },
       {
         "name": "streaming-and-iot",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
-        "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
+        "git_commit_id": "3a1661a070eb25649ec8e5bc987a210e324469d5",
         "path": "scenarios/streaming-and-iot"
       },
       {
         "name": "troubleshooting-multiservice",
-        "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
-        "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
+        "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
+        "git_commit_id": "3a1661a070eb25649ec8e5bc987a210e324469d5",
         "path": "scenarios/troubleshooting-multiservice"
       }
     ],
@@ -2908,7 +2908,7 @@
       {
         "type": "uv-script",
         "kwargs": {
-          "git_url": "git@github.com:aws-bench/aws-bench-datasets.git",
+          "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
           "git_commit_id": "023e7485be29d0e239c81f08d95b0cf11d0802cb",
           "script_path": "metric/metric.py"
         }
