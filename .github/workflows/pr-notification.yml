@@ -3,6 +3,8 @@ on:
   pull_request:
     types: [opened]
 
+permissions: {}
+
 jobs:
   notify:
     runs-on: ubuntu-latest
