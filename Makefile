@@ -1,4 +1,4 @@
-.PHONY: ready check lint format format-check test typecheck fix registry-bump
+.PHONY: ready check lint format format-check test typecheck fix registry-bump docs docs-serve
 
 # Path to a local aws-bench-datasets checkout (override with DATASETS_PATH=...)
 DATASETS_PATH ?= ../aws-bench-datasets
@@ -19,6 +19,12 @@ test:
 	uv run pytest --cov
 
 check: lint format-check typecheck test
+
+docs:
+	uv run --group docs mkdocs build --strict
+
+docs-serve:
+	uv run --group docs mkdocs serve
 
 fix:
 	uv run ruff check --fix .

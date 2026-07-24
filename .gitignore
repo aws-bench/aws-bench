@@ -29,6 +29,7 @@ task-jobs/
 .claude/
 .kiro/
 .agents/
+site/
 
 .mcp.json
 bedrock.env

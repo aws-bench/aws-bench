@@ -1,0 +1,51 @@
+site_name: aws-bench
+site_url: https://aws-bench.readthedocs.io/
+site_author: "Amazon Web Services"
+
+repo_name: "aws-bench/aws_bench"
+repo_url: "https://github.com/aws-bench/aws-bench"
+
+theme:
+  name: material
+  icon:
+    repo: fontawesome/brands/github
+  features:
+    - search.suggest
+    - search.highlight
+    - navigation.expand
+    - navigation.tracking
+    - toc.follow
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      toggle:
+        icon: material/weather-sunny
+        name: Switch to light mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      toggle:
+        icon: material/weather-night
+        name: Switch to dark mode
+
+plugins:
+  autorefs: {}
+  mkdocstrings:
+    handlers:
+      python:
+        paths: [.]
+        inventories:
+          - https://docs.python.org/3/objects.inv
+          - https://docs.pydantic.dev/latest/objects.inv
+        options:
+          members_order: source
+          separate_signature: true
+          filters: ["!^_"]
+          show_root_heading: true
+          show_if_no_docstring: true
+          show_signature_annotations: true
+  search: {}
+
+nav:
+  - Home: getting-started.md
+  - Framework Development: framework-development.md
+  - Datasets Development: datasets-development.md

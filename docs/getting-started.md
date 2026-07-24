@@ -20,7 +20,7 @@ It is focused on **running the benchmark with the provided datasets**. Authoring
 - [Troubleshooting](#troubleshooting)
 - [Environment health and stale state](#environment-health-and-stale-state)
 - [Appendix: Amazon Bedrock model access](#appendix-amazon-bedrock-model-access)
-- [Appendix: Docker Compose v2 + buildx](#appendix-docker-compose-v2--buildx)
+- [Appendix: Docker Compose v2 + buildx](#appendix-docker-compose-v2-buildx)
 
 ## What is aws-bench?
 
@@ -74,7 +74,7 @@ All env commands are **idempotent** — safe to re-run if interrupted.
 | **OS** | macOS or Linux |
 | **Python** | 3.12+ |
 | **Package manager** | [uv](https://docs.astral.sh/uv/getting-started/installation/) |
-| **Container runtime** | Docker with the Compose v2 plugin **and** buildx ≥ 0.17.0 (see [appendix](#appendix-docker-compose-v2--buildx)) |
+| **Container runtime** | Docker with the Compose v2 plugin **and** buildx ≥ 0.17.0 (see [appendix](#appendix-docker-compose-v2-buildx)) |
 | **AWS account** | An account you control with permission to create an AWS Organization and member accounts. aws-bench provisions **disposable** test accounts under it. |
 
 ## Configure AWS access
@@ -277,8 +277,8 @@ Aggregated results are in `jobs/<timestamp>/result.json`.
 | Problem | Solution |
 |---------|----------|
 | Quota gate blocks `env setup` | Re-run `env init --wait-for-quotas`, or check the AWS Service Quotas console for pending requests |
-| `env setup` fails with Docker errors | Ensure the Docker daemon is running (`docker ps`) and the Compose v2 + buildx plugins are installed ([appendix](#appendix-docker-compose-v2--buildx)) |
-| `compose build requires buildx 0.17.0 or later` | Upgrade buildx to ≥ 0.17.0 ([appendix](#appendix-docker-compose-v2--buildx)) |
+| `env setup` fails with Docker errors | Ensure the Docker daemon is running (`docker ps`) and the Compose v2 + buildx plugins are installed ([appendix](#appendix-docker-compose-v2-buildx)) |
+| `compose build requires buildx 0.17.0 or later` | Upgrade buildx to ≥ 0.17.0 ([appendix](#appendix-docker-compose-v2-buildx)) |
 | Bedrock `ResourceNotFoundException` | Model access isn't enabled/propagated — see the [Bedrock appendix](#appendix-amazon-bedrock-model-access) |
 | Bedrock bearer token expired | Re-run `eval $(uv run aws-bench env creds --eval)` |
 
@@ -416,4 +416,4 @@ curl -fSL "https://github.com/docker/buildx/releases/download/${BX}/buildx-${BX}
 
 ---
 
-Ready to go deeper? See the [README](../README.md) for an overview, or the [aws-bench-datasets](https://github.com/aws-bench/aws-bench-datasets) repository for the tasks and scenarios themselves.
+Ready to go deeper? See the [README](https://github.com/aws-bench/aws-bench#readme) for an overview, or the [aws-bench-datasets](https://github.com/aws-bench/aws-bench-datasets) repository for the tasks and scenarios themselves.

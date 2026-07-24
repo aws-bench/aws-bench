@@ -16,7 +16,9 @@ classifiers = [
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
+    "Typing :: Typed",
 ]
+
 dependencies = [
     "boto3>=1.42.0",
     "docker>=7.1.0",
@@ -45,6 +47,11 @@ mlflow = [
 ]
 
 [dependency-groups]
+docs = [
+    "mkdocs-material>=9.5.0",
+    "mkdocstrings[python]>=0.26.0",
+    "mkdocs-autorefs>=1.2.0",
+]
 dev = [
     "commitizen>=4.2.2",
     "moto[all]>=5.0.0",
@@ -60,7 +67,7 @@ dev = [
 ]
 
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling>=1.26"]
 build-backend = "hatchling.build"
 
 [tool.hatch.metadata]
