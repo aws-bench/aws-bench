@@ -17,6 +17,7 @@ from aws_bench.resource_management.cleanup.models import (
     SnapshotResources,
     StackDeletionResult,
     StackDeletionStatus,
+    StackResource,
 )
 from aws_bench.resource_management.exceptions import SnapshotNotFoundError
 from aws_bench.resource_management.snapshot.models import SnapshotStage
@@ -304,6 +305,60 @@ def test_cleanup_stack_success(manager):
         assert summary.regions[0].region == "us-west-2"
         assert summary.regions[0].stacks_deleted == 1
         assert summary.regions[0].stacks_failed_count == 0
+        # A clean delete abandons nothing.
+        assert summary.regions[0].orphan_count == 0
+        assert summary.orphaned_resources == {}
+
+
+def test_cleanup_stack_surfaces_abandoned_as_orphans(manager):
+    """A FORCE_DELETE-abandoned resource is surfaced as an orphan on the single-stack path.
+
+    The single-stack path runs no orphan scan, so the abandoned resources riding on
+    StackDeletionResult are the only record — they must land in orphaned_resources with
+    orphan_count == len(abandoned) so reset can fail closed.
+    """
+    mock_deleter = MagicMock()
+    mock_result = StackDeletionResult(
+        stack_name="my-stack",
+        status=StackDeletionStatus.SUCCESS,
+        abandoned_resources=[
+            StackResource(
+                logical_id="Igw",
+                physical_id="igw-abandoned",
+                resource_type="AWS::EC2::InternetGateway",
+                status="DELETE_FAILED",
+            ),
+            # No physical id — falls back to the logical id.
+            StackResource(
+                logical_id="Bucket",
+                physical_id="",
+                resource_type="AWS::S3::Bucket",
+                status="DELETE_FAILED",
+            ),
+        ],
+    )
+    mock_deleter.delete_stack = AsyncMock(return_value=mock_result)
+
+    with (
+        patch.object(
+            manager, "_find_stack_region", new_callable=AsyncMock, return_value="us-west-2"
+        ),
+        patch.object(manager, "_write_metadata"),
+        patch(
+            "aws_bench.resource_management.cleanup.manager.StackDeleter",
+            return_value=mock_deleter,
+        ),
+        patch.object(manager, "_log_summary"),
+        patch.object(manager, "_save_summary"),
+    ):
+        summary = asyncio.run(manager.cleanup_stack("my-stack"))
+
+        assert summary.regions[0].stacks_deleted == 1
+        assert summary.regions[0].orphan_count == 2
+        assert summary.orphaned_resources == {
+            "AWS::EC2::InternetGateway": ["igw-abandoned"],
+            "AWS::S3::Bucket": ["Bucket"],
+        }
 
 
 def test_cleanup_stack_not_found(manager):

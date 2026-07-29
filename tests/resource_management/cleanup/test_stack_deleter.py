@@ -951,8 +951,33 @@ def test_force_delete_failed_stack_success_flips_to_success(deleter):
         }
     ]
     result = StackDeletionResult(stack_name="my-stack", status=StackDeletionStatus.FAILED)
-    with patch.object(
-        deleter, "_poll_deletion", new_callable=AsyncMock, return_value="DELETE_COMPLETE"
+    # Drive the sweep so Bucket stays a stuck survivor: it verifies EXISTS and the
+    # cleaner fails to delete it. abandoned_resources then carries only that survivor.
+    failed_resource = Resource(type="AWS::S3::Bucket", identifier="my-bucket")
+    with (
+        patch.object(
+            deleter, "_poll_deletion", new_callable=AsyncMock, return_value="DELETE_COMPLETE"
+        ),
+        patch.object(
+            deleter._verifier,
+            "verify_resources",
+            new_callable=AsyncMock,
+            return_value=[
+                ResourceVerificationResult(
+                    logical_id="Bucket",
+                    physical_id="my-bucket",
+                    resource_type="AWS::S3::Bucket",
+                    cfn_status="DELETE_FAILED",
+                    existence_status=ExistenceStatus.EXISTS,
+                )
+            ],
+        ),
+        patch.object(
+            deleter._cleaner,
+            "cleanup",
+            new_callable=AsyncMock,
+            return_value={failed_resource: DeletionFailureEvent(status_message="AccessDenied")},
+        ),
     ):
         asyncio.run(deleter._force_delete_failed_stack("my-stack", result))
 
@@ -963,6 +988,11 @@ def test_force_delete_failed_stack_success_flips_to_success(deleter):
     assert result.reason == ""
     assert "Bucket" in deleter._manifest["my-stack"]["force_deleted"]
     assert "Fn" not in deleter._manifest["my-stack"]["force_deleted"]
+    # Only the survivor the sweep could not delete rides on the result as an orphan;
+    # everything the sweep reaped is excluded so it does not false-positive.
+    assert [r.logical_id for r in result.abandoned_resources] == ["Bucket"]
+    assert result.abandoned_resources[0].resource_type == "AWS::S3::Bucket"
+    assert result.abandoned_resources[0].physical_id == "my-bucket"
 
 
 def test_force_delete_failed_stack_no_op_when_not_delete_failed(deleter):
@@ -1045,6 +1075,7 @@ def test_force_delete_failed_stack_finalizes_when_no_resources_remain(deleter):
     assert result.status == StackDeletionStatus.SUCCESS
     assert result.reason == ""
     assert "force_deleted" not in deleter._manifest.get("my-stack", {})
+    assert result.abandoned_resources == []
 
 
 # -- _sweep_force_abandoned --

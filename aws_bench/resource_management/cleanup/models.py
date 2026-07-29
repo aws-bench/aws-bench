@@ -152,6 +152,10 @@ class StackDeletionResult:
     status: StackDeletionStatus
     reason: str = ""
     resources: list[StackResource] = field(default_factory=list)
+    # Resources FORCE_DELETE_STACK could not delete and left live in the account.
+    # The single-stack cleanup path runs no orphan scan, so this is the only record
+    # of them and must be surfaced, not dropped.
+    abandoned_resources: list[StackResource] = field(default_factory=list)
     deferred: bool = False
     """The stack did not delete this run, but its only remaining blockers are
     eventually-deletable (subnet/VPC pinned by requester-managed ENIs that AWS

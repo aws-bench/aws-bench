@@ -449,12 +449,14 @@ class StackDeleter:
         ``DeleteStack(DeletionMode="FORCE_DELETE_STACK")`` deletes the stack,
         abandoning any resource it cannot delete (with none left, it is a plain
         delete — the "state just lagging" case). On ``DELETE_COMPLETE`` the result
-        flips to SUCCESS; abandoned logical IDs are WARNING-logged and recorded in
-        the manifest (``force_deleted``), then :meth:`_sweep_force_abandoned`
-        best-effort deletes whatever actually survived — so every caller (bulk,
-        single-stack ``cleanup_stack``, reset) reaps the leftovers, not just the
-        bulk path's Phase 3 scan. Never raises: a ``ClientError`` is logged,
-        result left FAILED.
+        flips to SUCCESS; abandoned logical IDs are recorded in the manifest
+        (``force_deleted``), then :meth:`_sweep_force_abandoned` best-effort deletes
+        whatever actually survived — so every caller (bulk, single-stack
+        ``cleanup_stack``, reset) reaps the leftovers, not just the bulk path's
+        Phase 3 scan. Resources the sweep could not delete are surfaced on
+        ``result.abandoned_resources`` so the single-stack/reset path (which runs no
+        orphan scan) can fail closed instead of absorbing them into a fresh baseline.
+        Never raises: a ``ClientError`` is logged, result left FAILED.
 
         ``force_deleted`` keeps its DELETE_FAILED-only contract, but the sweep
         receives the full pre-force snapshot: a resource blocked *behind* a
@@ -501,9 +503,13 @@ class StackDeleter:
             len(abandoned),
             ", ".join(abandoned),
         )
-        await self._sweep_force_abandoned(stack_name, snapshot)
+        # Surface only the survivors the sweep could NOT delete as orphans — the raw
+        # DELETE_FAILED list would false-positive on everything the sweep reaped.
+        result.abandoned_resources = await self._sweep_force_abandoned(stack_name, snapshot)
 
-    async def _sweep_force_abandoned(self, stack_name: str, snapshot: list[StackResource]) -> None:
+    async def _sweep_force_abandoned(
+        self, stack_name: str, snapshot: list[StackResource]
+    ) -> list[StackResource]:
         """Best-effort deletion of resources a ``FORCE_DELETE_STACK`` left behind.
 
         ``snapshot`` is the stack's resource list captured just before the
@@ -522,11 +528,15 @@ class StackDeleter:
         manifest: ``force_abandoned_swept`` (deleted here) and
         ``force_abandoned_sweep_failures`` (still stuck; the next deploy's
         "already exists" failure is then the honest signal).
+
+        Returns the still-stuck survivors so the single-stack/reset caller can
+        surface them as orphans. A best-effort crash returns ``[]`` (never raises),
+        so a sweep that dies under-reports rather than failing the delete.
         """
         try:
             candidates = [r for r in snapshot if r.status != DELETE_COMPLETE]
             if not candidates:
-                return
+                return []
             verified = await self._verifier.verify_resources(candidates)
             by_key = {(r.logical_id, r.physical_id): r for r in candidates}
             survivors = [
@@ -536,7 +546,7 @@ class StackDeleter:
                 and (v.logical_id, v.physical_id) in by_key
             ]
             if not survivors:
-                return
+                return []
             logger.debug(
                 "Stack '%s': sweeping %d resource(s) surviving force-delete: %s",
                 stack_name,
@@ -551,6 +561,7 @@ class StackDeleter:
             )
             failed_ids = {f.identifier for f in failures}
             swept = [r.logical_id for r in survivors if r.physical_id not in failed_ids]
+            stuck = [r for r in survivors if r.physical_id in failed_ids]
             async with self._manifest_lock:
                 entry = self._manifest.setdefault(stack_name, {})
                 if swept:
@@ -564,6 +575,7 @@ class StackDeleter:
                     len(failures),
                     ", ".join(sorted(failed_ids)),
                 )
+            return stuck
         except (asyncio.CancelledError, OperationCancelled):
             raise
         except Exception as e:  # noqa: BLE001 — sweep is best-effort by contract
@@ -572,6 +584,7 @@ class StackDeleter:
                 stack_name,
                 e,
             )
+            return []
 
     def _build_result(
         self, stack_name: str, status: str, resources: list[StackResource]
