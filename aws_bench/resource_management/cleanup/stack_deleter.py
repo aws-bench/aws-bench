@@ -25,6 +25,7 @@ from botocore.exceptions import ClientError
 from aws_bench.exceptions import OperationCancelled
 from aws_bench.logging.logger import get_logger
 from aws_bench.resource_management.cleanup.handlers.cross_service import (
+    clear_vpc_public_address_wedge,
     reap_ipam_child_pools,
     reap_vpc_enis,
     reap_vpc_security_groups,
@@ -648,7 +649,13 @@ class StackDeleter:
     async def _reap_and_retry_networking(
         self, stack_name: str, result: StackDeletionResult
     ) -> None:
-        """Reap leftover VPC ENIs blocking deletion, then retry DeleteStack once."""
+        """Clear the NAT/EIP/IGW wedge and reap blocking ENIs, then retry DeleteStack once.
+
+        The single-stack path runs no pre-delete hooks, so the wedge is otherwise never
+        cleared here. Teardown runs before the ENI reap: a NAT gateway holds its own ENI
+        (awaited to ``deleted``) and EIP, so clearing it first keeps the reap and
+        DetachInternetGateway from tripping on it.
+        """
         if result.status != StackDeletionStatus.FAILED:
             return
         vpc_ids = self._collect_resource_physical_ids(result.resources, "AWS::EC2::VPC")
@@ -656,37 +663,49 @@ class StackDeleter:
             return
 
         logger.debug(
-            "Stack '%s' failed with %d VPC(s); reaping blocking ENIs before retry",
+            "Stack '%s' failed with %d VPC(s); clearing NAT/EIP/IGW wedge and reaping ENIs "
+            "before retry",
             stack_name,
             len(vpc_ids),
         )
-        # Uses the reaper's default 5-min budget — just long enough to force-clear
-        # customer/available ENIs and catch a fast requester-managed release. We no
-        # longer wait out the full 20-40 min for requester-managed ENIs: if only
-        # those remain, the stack is deferred (see _defer_if_requester_eni_only) and
-        # a later run reaps them once the owner releases, rather than idling here.
-        reap = await asyncio.to_thread(
-            reap_vpc_enis,
-            self._session,
-            vpc_ids,
-            region=self._region,
+        # Clear the NAT/EIP/IGW wedge first: a NAT gateway holds its own ENI and EIP, so
+        # tearing it down before the reap keeps DetachInternetGateway from tripping on a
+        # mapped public address. The ENI reap then uses its default 5-min budget — long
+        # enough to force-clear customer/available ENIs and catch a fast requester-managed
+        # release. We no longer wait out the full 20-40 min for requester-managed ENIs: if
+        # only those remain, the stack is deferred (see _defer_if_requester_eni_only) and a
+        # later run reaps them once the owner releases, rather than idling here.
+        wedge = await asyncio.to_thread(
+            clear_vpc_public_address_wedge, self._session, vpc_ids, region=self._region
         )
+        reap = await asyncio.to_thread(reap_vpc_enis, self._session, vpc_ids, region=self._region)
         async with self._manifest_lock:
-            self._manifest.setdefault(stack_name, {})["eni_reap"] = {
+            entry = self._manifest.setdefault(stack_name, {})
+            entry["nat_eip_igw_teardown"] = {
+                "vpc_ids": vpc_ids,
+                "nat_deleted": wedge.nat_deleted,
+                "eips_released": wedge.eips_released,
+                "igws_deleted": wedge.igws_deleted,
+                "remaining": wedge.remaining,
+            }
+            entry["eni_reap"] = {
                 "vpc_ids": vpc_ids,
                 "deleted": reap.deleted,
                 "detached": reap.detached,
                 "remaining": reap.remaining,
             }
-        if not reap.reaped_any and reap.remaining:
-            # Nothing was clearable — only requester-managed ENIs remain. Their
-            # owning service releases them asynchronously (~20-40 min after the
-            # owner's own delete), well past this run's bounded wait, so retrying
-            # DeleteStack now would just stall again. If the stack's only remaining
-            # blockers are the subnet/VPC/SG those ENIs pin, it is eventually-
-            # deletable, not stuck: defer it so the run isn't failed for a state
-            # that self-heals. Otherwise leave it FAILED for force-delete.
-            await self._defer_if_requester_eni_only(stack_name, result, reap.remaining)
+        made_progress = wedge.cleared_any or reap.reaped_any
+        has_orphans = bool(wedge.remaining or reap.remaining)
+        if not made_progress and has_orphans:
+            # Nothing was clearable and something is still outstanding, so a retry would
+            # just stall again. If only requester-managed ENIs remain, the owning service
+            # releases them asynchronously (~20-40 min after the owner's own delete), well
+            # past this run's bounded wait; when the stack's only blockers are the
+            # subnet/VPC/SG those ENIs pin, it is eventually-deletable, not stuck, so defer
+            # it rather than fail the run. An unclearable wedge orphan alone just stalls a
+            # retry, so return without re-driving either way.
+            if reap.remaining:
+                await self._defer_if_requester_eni_only(stack_name, result, reap.remaining)
             return
 
         # ENIs are freed, but a leftover NON-default security group (one a managed
