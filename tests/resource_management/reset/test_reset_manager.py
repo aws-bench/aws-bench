@@ -474,38 +474,108 @@ def test_reset_account_flags_redeploy_when_stack_deleted(temp_output_dir, sample
         }
     }
 
-    with patch(
-        "aws_bench.resource_management.verify.manager.SnapshotManager.load_snapshot"
-    ) as mock_load:
-        with patch(
+    with (
+        patch(
+            "aws_bench.resource_management.verify.manager.SnapshotManager.load_snapshot"
+        ) as mock_load,
+        patch(
             "aws_bench.resource_management.verify.manager.VerifyManager.verify_account_state"
-        ) as mock_verify:
-            with patch(
-                "aws_bench.resource_management.reset.stack_restorer.StackRestorer.restore_stack"
-            ) as mock_restore:
-                mock_load.return_value = sample_snapshot
+        ) as mock_verify,
+        patch(
+            "aws_bench.resource_management.verify.manager.VerifyManager.find_orphan_resources",
+            return_value=None,
+        ) as mock_orphan,
+        patch(
+            "aws_bench.resource_management.reset.stack_restorer.StackRestorer.restore_stack"
+        ) as mock_restore,
+    ):
+        mock_load.return_value = sample_snapshot
 
-                # Verification finds drift; final verify should NOT run because
-                # the stack is deleted (redeploy pending).
-                mock_verify.return_value = VerifyResult(
-                    success=False,
-                    reason="1 stack has different drift",
-                    drift_differences=drift_differences,
-                )
+        # Verification finds drift; the region-wide stack/drift re-verify should NOT
+        # run because the stack is deleted (redeploy pending) — but the orphan
+        # census still runs as the fail-closed backstop and finds nothing here.
+        mock_verify.return_value = VerifyResult(
+            success=False,
+            reason="1 stack has different drift",
+            drift_differences=drift_differences,
+        )
 
-                async def mock_restore_coro(*args, **kwargs):
-                    return RestoreOutcome.DELETED_NEEDS_REDEPLOY
+        async def mock_restore_coro(*args, **kwargs):
+            return RestoreOutcome.DELETED_NEEDS_REDEPLOY
 
-                mock_restore.side_effect = mock_restore_coro
+        mock_restore.side_effect = mock_restore_coro
 
-                result = asyncio.run(manager.reset_account("test-env", "123456789012"))
+        result = asyncio.run(manager.reset_account("test-env", "123456789012"))
 
     assert result.success
     assert result.needs_redeploy is True
     assert result.details is not None
     assert result.details["deleted_stacks"] == ["test-stack"]
-    # Final verify must be skipped (only the initial verify ran).
+    # Final stack/drift verify skipped (only the initial verify ran); the orphan
+    # census ran as the backstop and was clean.
     assert mock_verify.call_count == 1
+    mock_orphan.assert_called_once()
+
+
+@mock_aws
+def test_reset_account_fails_closed_on_orphan_after_stack_delete(temp_output_dir, sample_snapshot):
+    """A stack delete must NOT suppress a still-present orphan resource.
+
+    Regression for the loophole: a leaked resource that reset tried and failed to
+    delete used to be masked by the deleted-stack early return, then absorbed into a
+    fresh baseline. Now the orphan census runs as a fail-closed backstop — reset
+    must FAIL and surface the orphan by name in unresolved_orphans.
+    """
+    session = boto3.Session(region_name="us-east-1")
+    manager = ResetManager(session, output_dir=temp_output_dir)
+
+    drift_differences = {
+        "test-stack": {
+            "baseline": [{"LogicalResourceId": "MyRole", "StackResourceDriftStatus": "IN_SYNC"}],
+            "current": [{"LogicalResourceId": "MyRole", "StackResourceDriftStatus": "MODIFIED"}],
+        }
+    }
+    orphan = {"AWS::EC2::InternetGateway": [{"Identifier": "igw-leaked"}]}
+
+    with (
+        patch(
+            "aws_bench.resource_management.verify.manager.SnapshotManager.load_snapshot"
+        ) as mock_load,
+        patch(
+            "aws_bench.resource_management.verify.manager.VerifyManager.verify_account_state"
+        ) as mock_verify,
+        patch(
+            "aws_bench.resource_management.verify.manager.VerifyManager.find_orphan_resources",
+            return_value=VerifyResult(
+                success=False,
+                reason="Found 1 new resource(s)",
+                new_resources=orphan,
+                suggestion="Run 'aws-bench env reset' to remove new resources",
+            ),
+        ) as mock_orphan,
+        patch(
+            "aws_bench.resource_management.reset.stack_restorer.StackRestorer.restore_stack"
+        ) as mock_restore,
+    ):
+        mock_load.return_value = sample_snapshot
+        mock_verify.return_value = VerifyResult(
+            success=False,
+            reason="1 stack has different drift",
+            drift_differences=drift_differences,
+        )
+
+        async def mock_restore_coro(*args, **kwargs):
+            return RestoreOutcome.DELETED_NEEDS_REDEPLOY
+
+        mock_restore.side_effect = mock_restore_coro
+
+        result = asyncio.run(manager.reset_account("test-env", "123456789012"))
+
+    # The deleted stack did NOT suppress the orphan: reset failed and named it.
+    mock_orphan.assert_called_once()
+    assert result.success is False
+    assert result.needs_redeploy is False
+    assert result.unresolved_orphans == orphan
 
 
 # ===========================================================================
@@ -537,35 +607,40 @@ def test_reset_account_remediates_delete_failed_stack_alongside_new_resources(
         },
     )
 
-    with patch(
-        "aws_bench.resource_management.verify.manager.SnapshotManager.load_snapshot"
-    ) as mock_load:
-        with patch(
+    with (
+        patch(
+            "aws_bench.resource_management.verify.manager.SnapshotManager.load_snapshot"
+        ) as mock_load,
+        patch(
             "aws_bench.resource_management.verify.manager.VerifyManager.verify_account_state"
-        ) as mock_verify:
-            with patch(
-                "aws_bench.resource_management.reset.manager.ResetManager._delete_new_resources"
-            ) as mock_del_new:
-                with patch(
-                    "aws_bench.resource_management.reset.stack_restorer."
-                    "StackRestorer._delete_for_resetup"
-                ) as mock_delete_stack:
-                    mock_load.return_value = sample_snapshot
-                    # Diagnosis returns the aggregated failure; no final verify
-                    # runs because the stack is deleted for redeploy.
-                    mock_verify.return_value = aggregated
+        ) as mock_verify,
+        patch(
+            "aws_bench.resource_management.verify.manager.VerifyManager.find_orphan_resources",
+            return_value=None,
+        ),
+        patch(
+            "aws_bench.resource_management.reset.manager.ResetManager._delete_new_resources"
+        ) as mock_del_new,
+        patch(
+            "aws_bench.resource_management.reset.stack_restorer.StackRestorer._delete_for_resetup"
+        ) as mock_delete_stack,
+    ):
+        mock_load.return_value = sample_snapshot
+        # Diagnosis returns the aggregated failure; no final stack/drift verify
+        # runs because the stack is deleted for redeploy.
+        mock_verify.return_value = aggregated
 
-                    async def _del_new_coro(*args, **kwargs):
-                        return {}  # no global resources deferred in this case
+        async def _del_new_coro(*args, **kwargs):
+            return {}  # no global resources deferred in this case
 
-                    mock_del_new.side_effect = _del_new_coro
+        mock_del_new.side_effect = _del_new_coro
 
-                    async def _delete_stack_coro(*args, **kwargs):
-                        return RestoreOutcome.DELETED_NEEDS_REDEPLOY
+        async def _delete_stack_coro(*args, **kwargs):
+            return RestoreOutcome.DELETED_NEEDS_REDEPLOY
 
-                    mock_delete_stack.side_effect = _delete_stack_coro
+        mock_delete_stack.side_effect = _delete_stack_coro
 
-                    result = asyncio.run(manager.reset_account("test-env", "123456789012"))
+        result = asyncio.run(manager.reset_account("test-env", "123456789012"))
 
     # The DELETE_FAILED stack was routed to deletion-for-resetup...
     mock_delete_stack.assert_called_once()
@@ -596,25 +671,30 @@ def test_reset_account_recreates_drift_undetectable_stack(temp_output_dir, sampl
         drift_undetectable=["ecsroll-stack"],
     )
 
-    with patch(
-        "aws_bench.resource_management.verify.manager.SnapshotManager.load_snapshot"
-    ) as mock_load:
-        with patch(
+    with (
+        patch(
+            "aws_bench.resource_management.verify.manager.SnapshotManager.load_snapshot"
+        ) as mock_load,
+        patch(
             "aws_bench.resource_management.verify.manager.VerifyManager.verify_account_state"
-        ) as mock_verify:
-            with patch(
-                "aws_bench.resource_management.reset.stack_restorer."
-                "StackRestorer._delete_for_resetup"
-            ) as mock_delete_stack:
-                mock_load.return_value = sample_snapshot
-                mock_verify.return_value = aggregated
+        ) as mock_verify,
+        patch(
+            "aws_bench.resource_management.verify.manager.VerifyManager.find_orphan_resources",
+            return_value=None,
+        ),
+        patch(
+            "aws_bench.resource_management.reset.stack_restorer.StackRestorer._delete_for_resetup"
+        ) as mock_delete_stack,
+    ):
+        mock_load.return_value = sample_snapshot
+        mock_verify.return_value = aggregated
 
-                async def _delete_stack_coro(*args, **kwargs):
-                    return RestoreOutcome.DELETED_NEEDS_REDEPLOY
+        async def _delete_stack_coro(*args, **kwargs):
+            return RestoreOutcome.DELETED_NEEDS_REDEPLOY
 
-                mock_delete_stack.side_effect = _delete_stack_coro
+        mock_delete_stack.side_effect = _delete_stack_coro
 
-                result = asyncio.run(manager.reset_account("test-env", "123456789012"))
+        result = asyncio.run(manager.reset_account("test-env", "123456789012"))
 
     # Deleted for re-setup (classification already proved it's permanently gone).
     mock_delete_stack.assert_called_once()
@@ -623,7 +703,7 @@ def test_reset_account_recreates_drift_undetectable_stack(temp_output_dir, sampl
     assert result.needs_redeploy is True
     assert result.details is not None
     assert result.details["deleted_stacks"] == ["ecsroll-stack"]
-    # Final verify must be skipped (stack deleted for redeploy) — only initial ran.
+    # Final stack/drift verify skipped (stack deleted for redeploy) — only initial ran.
     assert mock_verify.call_count == 1
 
 
@@ -682,25 +762,30 @@ def test_reset_account_drift_undetectable_skipped_when_already_status_deleted(
         drift_undetectable=["dup-stack"],
     )
 
-    with patch(
-        "aws_bench.resource_management.verify.manager.SnapshotManager.load_snapshot"
-    ) as mock_load:
-        with patch(
+    with (
+        patch(
+            "aws_bench.resource_management.verify.manager.SnapshotManager.load_snapshot"
+        ) as mock_load,
+        patch(
             "aws_bench.resource_management.verify.manager.VerifyManager.verify_account_state"
-        ) as mock_verify:
-            with patch(
-                "aws_bench.resource_management.reset.stack_restorer."
-                "StackRestorer._delete_for_resetup"
-            ) as mock_delete_stack:
-                mock_load.return_value = sample_snapshot
-                mock_verify.return_value = aggregated
+        ) as mock_verify,
+        patch(
+            "aws_bench.resource_management.verify.manager.VerifyManager.find_orphan_resources",
+            return_value=None,
+        ),
+        patch(
+            "aws_bench.resource_management.reset.stack_restorer.StackRestorer._delete_for_resetup"
+        ) as mock_delete_stack,
+    ):
+        mock_load.return_value = sample_snapshot
+        mock_verify.return_value = aggregated
 
-                async def _delete_stack_coro(*args, **kwargs):
-                    return RestoreOutcome.DELETED_NEEDS_REDEPLOY
+        async def _delete_stack_coro(*args, **kwargs):
+            return RestoreOutcome.DELETED_NEEDS_REDEPLOY
 
-                mock_delete_stack.side_effect = _delete_stack_coro
+        mock_delete_stack.side_effect = _delete_stack_coro
 
-                result = asyncio.run(manager.reset_account("test-env", "123456789012"))
+        result = asyncio.run(manager.reset_account("test-env", "123456789012"))
 
     # The MISSING status stack is handled by Phase 2 (no delete call needed), and
     # Phase 2b must NOT act on it again (already_handled).
@@ -735,30 +820,35 @@ def test_reset_account_recreates_template_mismatched_stack(temp_output_dir, samp
         template_mismatch_stacks=["databases-and-storage-S3"],
     )
 
-    with patch(
-        "aws_bench.resource_management.verify.manager.SnapshotManager.load_snapshot"
-    ) as mock_load:
-        with patch(
+    with (
+        patch(
+            "aws_bench.resource_management.verify.manager.SnapshotManager.load_snapshot"
+        ) as mock_load,
+        patch(
             "aws_bench.resource_management.verify.manager.VerifyManager.verify_account_state"
-        ) as mock_verify:
-            with patch(
-                "aws_bench.resource_management.reset.stack_restorer."
-                "StackRestorer._delete_for_resetup"
-            ) as mock_delete_stack:
-                mock_load.return_value = sample_snapshot
-                mock_verify.return_value = aggregated
+        ) as mock_verify,
+        patch(
+            "aws_bench.resource_management.verify.manager.VerifyManager.find_orphan_resources",
+            return_value=None,
+        ),
+        patch(
+            "aws_bench.resource_management.reset.stack_restorer.StackRestorer._delete_for_resetup"
+        ) as mock_delete_stack,
+    ):
+        mock_load.return_value = sample_snapshot
+        mock_verify.return_value = aggregated
 
-                async def _delete_stack_coro(*args, **kwargs):
-                    return RestoreOutcome.DELETED_NEEDS_REDEPLOY
+        async def _delete_stack_coro(*args, **kwargs):
+            return RestoreOutcome.DELETED_NEEDS_REDEPLOY
 
-                mock_delete_stack.side_effect = _delete_stack_coro
+        mock_delete_stack.side_effect = _delete_stack_coro
 
-                result = asyncio.run(manager.reset_account("test-env", "123456789012"))
+        result = asyncio.run(manager.reset_account("test-env", "123456789012"))
 
     # Template-changed stack routed to delete-for-resetup...
     mock_delete_stack.assert_called_once()
     assert mock_delete_stack.call_args.args[0] == "databases-and-storage-S3"
-    # ...and reset succeeds with redeploy pending; final verify is skipped.
+    # ...and reset succeeds with redeploy pending; final stack/drift verify is skipped.
     assert result.success
     assert result.needs_redeploy is True
     assert result.details is not None

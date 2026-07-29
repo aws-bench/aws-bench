@@ -168,6 +168,7 @@ class ResetManager:
 
         except ResetFailure as e:
             logger.error(f"Reset failed: {e.reason}")
+            orphans = e.details.get("unresolved_orphans") if isinstance(e.details, dict) else None
             return ResetResult(
                 account_id=account_id,
                 scenario_name=env_name,
@@ -175,6 +176,7 @@ class ResetManager:
                 reason=e.reason,
                 details=e.details,
                 suggestion=e.suggestion,
+                unresolved_orphans=orphans,
             )
 
     async def _reset_region(
@@ -241,9 +243,32 @@ class ResetManager:
 
             deleted_stacks = status_deleted + drift_deleted
 
-            # If stacks were deleted, the region is intentionally not at baseline;
-            # the deleted stacks get recreated by setup. Skip final verify.
             if deleted_stacks:
+                # The deleted stacks are intentionally absent (setup recreates them), so they
+                # are exempt from stack-status/drift re-checks — but a resource reset tried and
+                # failed to delete (e.g. an IGW wedged by a mapped EIP), or a baseline type we
+                # can no longer enumerate, must NOT be masked by the stack delete. Re-run only
+                # the new-resource + scan-health census and fail closed if it is not clean.
+                # This runs inside the region's deferred_scope(): the account-global resources
+                # that _delete_new_resources marked deferred are excluded by exclude_deferred,
+                # so the not-yet-deleted globals (deleted later by _delete_global_resources)
+                # never false-positive here.
+                orphan_result = await asyncio.to_thread(
+                    region_verify.find_orphan_resources, region_snapshot
+                )
+                if orphan_result is not None:
+                    raise ResetFailure(
+                        reason=(
+                            f"Stacks deleted for re-setup, but reset left the region "
+                            f"unresolved: {orphan_result.reason}"
+                        ),
+                        details={
+                            "unresolved_orphans": orphan_result.new_resources
+                            or orphan_result.details
+                        },
+                        suggestion=orphan_result.suggestion
+                        or "Run 'aws-bench env cleanup' for full reset",
+                    )
                 return deleted_stacks, global_resources
 
             logger.debug("Phase 4: final verification")
@@ -366,7 +391,8 @@ class ResetManager:
         )
         if failures:
             logger.warning(
-                "Failed to delete %d resource(s); verification will catch it", len(failures)
+                f"Failed to delete {len(failures)} resource(s); the fail-closed verify / "
+                f"orphan re-check will fail the reset if they are still present."
             )
 
     async def _delete_global_resources(

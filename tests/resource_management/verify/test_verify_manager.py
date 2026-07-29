@@ -958,6 +958,111 @@ def test_verify_account_state_skip_early_false_all_pass(
 
 
 # ===========================================================================
+# _check_new_resources — fail closed on an unenumerable baseline type
+# ===========================================================================
+
+
+@mock_aws
+@patch("aws_bench.resource_management.verify.manager.make_scanner")
+def test_check_new_resources_fails_closed_on_unenumerable_baseline_type(mock_scanner_class):
+    """A baseline-tracked type still in scan_result.failed fails verify closed.
+
+    The scanner already retries transient errors, so a persistent failure on a type
+    that mattered at setup could hide a leaked resource forever if silently skipped.
+    """
+    from aws_bench.resource_management.ccapi.models import ScanResult
+
+    session = boto3.Session(region_name="us-east-1")
+
+    mock_scanner = MagicMock()
+    mock_scanner.scan_resources.return_value = ScanResult(
+        detected={}, failed={"AWS::EC2::InternetGateway": "throttled"}
+    )
+    mock_scanner_class.return_value = mock_scanner
+
+    manager = VerifyManager(session)
+    result = manager._check_new_resources(
+        baseline_resource_ids={"AWS::EC2::InternetGateway": [{"Identifier": "igw-1"}]},
+        baseline_failed={},
+        baseline_empty=set(),
+    )
+
+    assert result is not None
+    assert result.success is False
+    assert "Could not enumerate 1 baseline resource type(s)" in result.reason
+    assert isinstance(result.details, dict)
+    assert result.details["unenumerable_types"] == ["AWS::EC2::InternetGateway"]
+
+
+@mock_aws
+@patch("aws_bench.resource_management.verify.manager.make_scanner")
+def test_check_new_resources_ignores_failed_type_absent_from_baseline(mock_scanner_class):
+    """A failed type that was NOT in the baseline does not fail verify.
+
+    The fail-closed rule is scoped to baseline-tracked types; a newly-discovered
+    type failing to enumerate is not a leaked-baseline-resource risk.
+    """
+    from aws_bench.resource_management.ccapi.models import ScanResult
+
+    session = boto3.Session(region_name="us-east-1")
+
+    mock_scanner = MagicMock()
+    # The failed type is absent from the baseline (baseline only tracks S3 buckets).
+    mock_scanner.scan_resources.return_value = ScanResult(
+        detected={}, failed={"AWS::EC2::InternetGateway": "throttled"}
+    )
+    mock_scanner_class.return_value = mock_scanner
+
+    manager = VerifyManager(session)
+    result = manager._check_new_resources(
+        baseline_resource_ids={"AWS::S3::Bucket": [{"Identifier": "b1"}]},
+        baseline_failed={},
+        baseline_empty=set(),
+    )
+
+    # No unenumerable baseline type and no new resources -> clean.
+    assert result is None
+
+
+# ===========================================================================
+# find_orphan_resources — reset's orphan/scan-health census wrapper
+# ===========================================================================
+
+
+@mock_aws
+@patch("aws_bench.resource_management.verify.manager.make_scanner")
+def test_find_orphan_resources_flags_orphan_from_snapshot(mock_scanner_class):
+    """The wrapper runs only the new-resource census and surfaces a orphan."""
+    from aws_bench.resource_management.ccapi.models import ScanResult
+
+    session = boto3.Session(region_name="us-east-1")
+
+    mock_scanner = MagicMock()
+    mock_scanner.scan_resources.return_value = ScanResult(
+        detected={"AWS::S3::Bucket": [{"Identifier": "orphan-bucket"}]}, failed={}
+    )
+    mock_scanner_class.return_value = mock_scanner
+
+    snapshot = Snapshot(
+        timestamp=datetime.now(timezone.utc),
+        account_id="123456789012",
+        environment_id="test-env",
+        scenario_hash="v1.0",
+        drift_baseline={},
+        stack_metadata={},
+        resource_ids={"AWS::S3::Bucket": []},
+        empty_resource_types={"AWS::S3::Bucket"},
+    )
+
+    result = VerifyManager(session).find_orphan_resources(snapshot)
+
+    assert result is not None
+    assert result.success is False
+    assert result.new_resources is not None
+    assert "AWS::S3::Bucket" in result.new_resources
+
+
+# ===========================================================================
 # _check_dataset_version — scenario hash comparison
 # ===========================================================================
 

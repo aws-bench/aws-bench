@@ -16,6 +16,10 @@ class ResetResult:
     running the DEPLOY phase after reset completes. ``redeploy_succeeded``
     records the outcome — ``None`` when no redeploy was attempted,
     otherwise the boolean result.
+
+    A non-empty ``unresolved_orphans`` maps a resource type to identifiers that
+    survived reset (or a baseline type it could not enumerate): the account is
+    NOT clean and must never be recaptured as a baseline.
     """
 
     success: bool
@@ -26,6 +30,7 @@ class ResetResult:
     suggestion: str | None = None
     needs_redeploy: bool = False
     redeploy_succeeded: bool | None = None
+    unresolved_orphans: dict[str, list[dict]] | None = None
 
 
 class ResetFailure(Exception):
