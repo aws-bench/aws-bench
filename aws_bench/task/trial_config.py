@@ -33,6 +33,9 @@ class AwsBenchTrialConfig(TrialConfig):
     scenario_id: str
     concurrency_mode: ConcurrencyMode
     account_mapping: dict[str, str]
+    # The scenario manifest's declared regions (validated non-empty). regions[0]
+    # pins AWS_REGION/AWS_DEFAULT_REGION for the agent phase.
+    regions: list[str]
     # When False (--no-verify-env), skip the per-trial AccountContaminated tag
     # check so operators can force a run against a flagged account.
     verify_env: bool = True

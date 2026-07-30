@@ -114,6 +114,7 @@ def _make_trial(
 
     trial.config = SimpleNamespace(  # type: ignore[assignment]
         account_mapping={"PRIMARY": "123456789012"},
+        regions=["us-east-1"],
         exports=exports or {},
         verifier=verifier,
         job_id=None,
@@ -317,6 +318,24 @@ async def test_run_agent_phase_sets_aws_profile_to_first_tag(tmp_path, fake_cred
 
 
 @pytest.mark.asyncio
+async def test_run_agent_phase_pins_region_to_first_scenario_region(tmp_path, fake_creds, mocker):
+    """AWS_REGION/AWS_DEFAULT_REGION are pinned to the scenario's first region."""
+    trial = _make_trial(tmp_path)
+    trial.config.regions = ["eu-west-1", "us-east-1"]  # type: ignore[attr-defined]
+    trial._aws_placeholders = {}
+
+    seen: dict[str, str] = {}
+
+    async def fake_super_phase(self, *, instruction, **kw):
+        seen.update(self.agent._extra_env)
+
+    mocker.patch.object(Trial, "_run_agent_phase", fake_super_phase)
+    await trial._run_agent_phase(target=MagicMock(), instruction="x", timeout_sec=None, user=None)
+    assert seen["AWS_REGION"] == "eu-west-1"
+    assert seen["AWS_DEFAULT_REGION"] == "eu-west-1"
+
+
+@pytest.mark.asyncio
 async def test_run_agent_phase_restores_extra_env_after_run(tmp_path, fake_creds, mocker):
     """The injected cred env is removed from _extra_env once the agent run returns."""
     trial = _make_trial(tmp_path)
@@ -493,6 +512,22 @@ async def test_prepare_runs_pre_invoke_once_and_seeds_placeholders(tmp_path, fak
     # Single account tag; pre-invoke's flat output merges under the sole tag.
     assert trial._aws_placeholders["PRIMARY"]["BucketName"] == "from-pre-invoke"
     assert trial._aws_placeholders["PRIMARY"]["Seed"] == "v"  # seed preserved
+
+
+@pytest.mark.asyncio
+async def test_pre_invoke_region_not_overridden_by_scenario_pin(tmp_path, fake_creds, mocker):
+    """The region pin is agent-only; a pre-invoke task.toml AWS_REGION survives."""
+    trial = _make_trial(
+        tmp_path, pre_invoke=_phase(env={"AWS_REGION": "us-west-2"}), has_pre_script=True
+    )
+    trial.config.regions = ["us-east-1", "us-west-2"]  # type: ignore[attr-defined]
+    runner = mocker.patch.object(aws_trial, "ScriptRunner", autospec=True)
+    runner.return_value.run = AsyncMock(return_value={})
+    mocker.patch.object(Trial, "_prepare", AsyncMock())
+
+    await trial._prepare()
+
+    assert runner.call_args.kwargs["override_env"]["AWS_REGION"] == "us-west-2"
 
 
 @pytest.mark.asyncio

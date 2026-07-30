@@ -173,8 +173,10 @@ class AwsBenchSingleStepTrial(SingleStepTrial):
         file ownership match the consuming process) with one static-credential
         profile per account tag. Yields the credential-chain env vars emptied to
         ``""`` so a host-forwarded credential set cannot outrank the file, plus
-        ``AWS_PROFILE`` set to the first tag. Removed on exit so a later stage in
-        the same container never inherits these credentials.
+        ``AWS_PROFILE`` set to the first tag. For the agent role only,
+        ``AWS_REGION``/``AWS_DEFAULT_REGION`` are pinned to the scenario's first
+        declared region. Removed on exit so a later stage in the same container
+        never inherits these credentials.
 
         Raises:
             RuntimeError: if the account mapping is empty, the credentials body
@@ -211,6 +213,11 @@ class AwsBenchSingleStepTrial(SingleStepTrial):
         tag = next(iter(self.config.account_mapping))
         cred_env["AWS_PROFILE"] = tag
         cred_env["AWS_DEFAULT_PROFILE"] = tag
+        # Agent only: pre/post-invoke and verifier scripts declare their own
+        # regions in task.toml [*.env], which this would otherwise override.
+        if role_type is RoleType.AGENT:
+            cred_env["AWS_REGION"] = self.config.regions[0]
+            cred_env["AWS_DEFAULT_REGION"] = self.config.regions[0]
 
         try:
             yield cred_env

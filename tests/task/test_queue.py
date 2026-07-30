@@ -114,6 +114,7 @@ def _trial_config(
         scenario_id=scenario_id,
         concurrency_mode=mode,
         account_mapping={"PRIMARY": "111111111111"},
+        regions=["us-east-1"],
     )
 
 

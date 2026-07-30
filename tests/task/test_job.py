@@ -307,6 +307,7 @@ def test_trial_config_account_and_exports_are_real_fields():
         scenario_id="ec2-small",
         concurrency_mode=ConcurrencyMode.MUTATING,
         account_mapping={"PRIMARY": "111"},
+        regions=["us-east-1"],
         exports={"PRIMARY": {"K": "v"}},
     )
     assert cfg.account_mapping == {"PRIMARY": "111"}
@@ -372,6 +373,7 @@ def test_build_trial_config_sets_scenario_descriptor():
     )
     assert cfg.scenario is descriptor
     assert cfg.scenario_id == "ec2-small"
+    assert cfg.regions == ["us-east-1"]
 
 
 def test_build_trial_config_produces_tag_keyed_export_slice():

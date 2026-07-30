@@ -25,6 +25,7 @@ def test_carries_scenario_descriptor():
         scenario=_scenario_desc(),
         scenario_id="ec2-small",
         concurrency_mode=ConcurrencyMode.MUTATING,
+        regions=["us-east-1"],
         account_mapping={"PRIMARY": "123456789012"},
     )
     assert cfg.scenario.name == "ec2-small"
@@ -38,6 +39,7 @@ def test_scenario_descriptor_rides_resume_identity():
         scenario=_scenario_desc("ec2-small"),
         scenario_id="ec2-small",
         concurrency_mode=ConcurrencyMode.MUTATING,
+        regions=["us-east-1"],
         account_mapping={"PRIMARY": "111111111111"},
     )
     diff_scenario = AwsBenchTrialConfig(
@@ -45,6 +47,7 @@ def test_scenario_descriptor_rides_resume_identity():
         scenario=_scenario_desc("ec2-large"),
         scenario_id="ec2-small",
         concurrency_mode=ConcurrencyMode.MUTATING,
+        regions=["us-east-1"],
         account_mapping={"PRIMARY": "111111111111"},
     )
     assert base != diff_scenario
@@ -56,6 +59,7 @@ def test_carries_scenario_account_mapping_and_exports():
         scenario=_scenario_desc("ec2-small"),
         scenario_id="ec2-small",
         concurrency_mode=ConcurrencyMode.MUTATING,
+        regions=["us-east-1"],
         account_mapping={"PRIMARY": "123456789012"},
         exports={"PRIMARY": {"BucketName": "my-bucket"}},
     )
@@ -71,6 +75,7 @@ def test_exports_defaults_to_empty():
         scenario=_scenario_desc("ec2-small"),
         scenario_id="ec2-small",
         concurrency_mode=ConcurrencyMode.MUTATING,
+        regions=["us-east-1"],
         account_mapping={"PRIMARY": "123456789012"},
     )
     assert cfg.exports == {}
@@ -91,6 +96,7 @@ def test_exports_is_excluded_from_serialization():
         scenario=_scenario_desc("ec2-small"),
         scenario_id="ec2-small",
         concurrency_mode=ConcurrencyMode.MUTATING,
+        regions=["us-east-1"],
         account_mapping={"PRIMARY": "123456789012"},
         exports={"PRIMARY": {"SecretishExport": "s3cr3t-value"}},
     )
@@ -113,6 +119,7 @@ def test_scenario_and_account_ride_inherited_eq_but_exports_do_not():
         scenario=_scenario_desc("ec2-small"),
         scenario_id="ec2-small",
         concurrency_mode=ConcurrencyMode.MUTATING,
+        regions=["us-east-1"],
         account_mapping={"PRIMARY": "111111111111"},
         exports={"PRIMARY": {"K": "v1"}},
     )
@@ -121,6 +128,7 @@ def test_scenario_and_account_ride_inherited_eq_but_exports_do_not():
         scenario=_scenario_desc("ec2-small"),
         scenario_id="ec2-small",
         concurrency_mode=ConcurrencyMode.MUTATING,
+        regions=["us-east-1"],
         account_mapping={"PRIMARY": "111111111111"},
         exports={"PRIMARY": {"K": "v1"}},
     )
@@ -129,6 +137,7 @@ def test_scenario_and_account_ride_inherited_eq_but_exports_do_not():
         scenario=_scenario_desc("ec2-small"),
         scenario_id="ec2-small",
         concurrency_mode=ConcurrencyMode.MUTATING,
+        regions=["us-east-1"],
         account_mapping={"PRIMARY": "222222222222"},
         exports={"PRIMARY": {"K": "v1"}},
     )
@@ -137,6 +146,7 @@ def test_scenario_and_account_ride_inherited_eq_but_exports_do_not():
         scenario=_scenario_desc("ec2-small"),
         scenario_id="ec2-small",
         concurrency_mode=ConcurrencyMode.MUTATING,
+        regions=["us-east-1"],
         account_mapping={"PRIMARY": "111111111111"},
         exports={"PRIMARY": {"K": "v2"}},
     )

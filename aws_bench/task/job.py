@@ -288,6 +288,7 @@ class AwsBenchJob(Job):
             scenario_id=scenario_id,
             concurrency_mode=task.config.concurrency.mode,
             account_mapping=mapping,
+            regions=regions,
             exports=exports,
             verify_env=self.config.verify,
         )
