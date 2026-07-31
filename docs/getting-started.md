@@ -117,11 +117,11 @@ uv run aws-bench env setup \
   --env-name awsbench-env \
   -d aws-bench-quickstart
 
-# 3. Generate a Bedrock bearer token for the agent.
-#    This token authenticates the agent's LLM inference calls.
-#    (Skip this step only if your agent uses a non-Bedrock provider.)
-#    The verifier/judge handles its own Bedrock auth separately (via IAM role
-#    assumption) — it does NOT need this token.
+# 3. Generate a Bedrock bearer token for the verifier and agent,
+#    (if your agent uses Bedrock for LLM inference).
+#    First ensure no stale AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY/AWS_SESSION_TOKEN
+#    are set in your shell, as they would override AWS_PROFILE and mint the token 
+#    against the wrong account (see the Bedrock appendix).
 eval $(uv run aws-bench env creds --eval)
 
 # 4. Run the benchmark
@@ -341,14 +341,17 @@ Using Bedrock is **optional** — aws-bench works with any LLM provider your age
 
 ### How credentials work
 
-aws-bench uses Bedrock in **two separate places**, each with its own authentication:
+aws-bench uses model and AWS credentials in **three separate places**, each with its own authentication:
 
 | Component | What it does | How it authenticates | You need to… |
 |-----------|-------------|---------------------|--------------|
-| **Agent** | Runs the model being evaluated (e.g., Claude Sonnet) | Bearer token (`AWS_BEARER_TOKEN_BEDROCK`) | Generate a token with `aws-bench env creds` and pass it via `--ve` |
-| **Verifier / LLM judge** | Scores the agent's answer (introspection tasks) | IAM role assumption (SigV4) — automatic | Nothing — the framework handles this via the management account credentials |
+| **Agent** | Runs the model being evaluated (e.g., Claude Sonnet) | Bearer token (`AWS_BEARER_TOKEN_BEDROCK`), only if it runs on Bedrock | Generate a token with `aws-bench env creds` and pass it via `--ve` (skip if the agent uses another provider) |
+| **Verifier — validation script** (mutation tasks) | Checks live AWS state in the test account | Framework-provided IAM role (`OrganizationAccountAccessRole` by default), automatic | Nothing, as the framework injects these credentials |
+| **Verifier — LLM judge** (read-only / diagnosis tasks) | Scores the agent's answer with an Anthropic model | A model-provider credential you pass via `--ve`, the framework IAM role can't reach a model provider. **Recommended:** Bedrock bearer token (`AWS_BEARER_TOKEN_BEDROCK`); or `ANTHROPIC_API_KEY` | Pass the credential via `--ve` (any LiteLLM-supported provider of the LLM judge model works) |
 
 The bearer token is a long-lived (30-day) service-specific credential for `bedrock.amazonaws.com`. It's cached in SSM Parameter Store; subsequent `env creds` calls reuse it without creating new credentials. Regenerate with `--force` if expired.
+
+> **Before generating the token, ensure no stale `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` / `AWS_SESSION_TOKEN` are exported in your shell.** `env creds` uses the default AWS credential chain, in which these environment variables **take precedence over `AWS_PROFILE`** — so leftover keys silently generate the token against the wrong account. Run `unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN` (and confirm with `aws sts get-caller-identity`) so the token is minted against your management account.
 
 ### Running with Bedrock (agent uses Bedrock models)
 
@@ -381,7 +384,7 @@ uv run aws-bench run \
   --yes
 ```
 
-> **Note:** The verifier's LLM judge still calls Bedrock (for scoring introspection tasks) — but it authenticates via the management account's IAM role chain, not the bearer token. As long as Bedrock model access is enabled on your management account, the judge works regardless of which provider your agent uses.
+> **Note:** If your dataset includes read-only / diagnosis tasks, the verifier's LLM judge still needs a model credential for Anthropic models (supported by LiteLLM), as the framework-provided IAM role can't reach a model provider. Pass one via `--ve` (recommended: `AWS_BEARER_TOKEN_BEDROCK` from `env creds`; or `ANTHROPIC_API_KEY`), independent of which provider your agent uses. Mutation-task validation scripts need nothing extra, they run on credentials injected by the framework.
 
 ### Enabling model access
 

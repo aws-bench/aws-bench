@@ -130,8 +130,11 @@ uv run aws-bench env setup \
   --env-name aws-bench-env \
   -d aws-bench-quickstart
 
-# 4. (Optional) Generate a Bedrock bearer token, for convenience when running
-#    models on Amazon Bedrock. Skip this if your agent uses another provider.
+# 4. Generate a Bedrock bearer token for the verifier and agent,
+#    (supposing your agent uses Bedrock for LLM inference).
+#    First ensure no stale AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY/AWS_SESSION_TOKEN
+#    are set in your shell, as they would override AWS_PROFILE and mint the token
+#    against the wrong account.
 eval $(uv run aws-bench env creds --eval)
 
 # 5. Run the benchmark
@@ -140,6 +143,7 @@ uv run aws-bench run \
   -d aws-bench-quickstart \
   -a claude-code \
   -m <model-id> \
+  --ve AWS_BEARER_TOKEN_BEDROCK=$AWS_BEARER_TOKEN_BEDROCK \
   --yes
 ```
 
