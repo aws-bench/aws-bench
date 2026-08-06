@@ -386,6 +386,23 @@ uv run aws-bench run \
 
 > **Note:** If your dataset includes read-only / diagnosis tasks, the verifier's LLM judge still needs a model credential for Anthropic models (supported by LiteLLM), as the framework-provided IAM role can't reach a model provider. Pass one via `--ve` (recommended: `AWS_BEARER_TOKEN_BEDROCK` from `env creds`; or `ANTHROPIC_API_KEY`), independent of which provider your agent uses. Mutation-task validation scripts need nothing extra, they run on credentials injected by the framework.
 
+### Overriding the judge model
+
+By default, the LLM judge uses the model specified in each task's `tests/judge.toml`. To override it for a run — for example, to evaluate judge consistency across models or to use a cheaper model during development — pass `REWARDKIT_JUDGE` via `--ve`:
+
+```bash
+uv run aws-bench run \
+  --env-name awsbench-env \
+  -d <dataset> \
+  -a claude-code \
+  -m global.anthropic.claude-sonnet-5 \
+  --ve "AWS_BEARER_TOKEN_BEDROCK=$AWS_BEARER_TOKEN_BEDROCK" \
+  --ve "REWARDKIT_JUDGE=bedrock/us.anthropic.claude-sonnet-4-6" \
+  --yes
+```
+
+`REWARDKIT_JUDGE` accepts any [LiteLLM-supported model identifier](https://docs.litellm.ai/docs/providers). It takes priority over `judge.toml`. Mutation tasks (which use programmatic `check.py` verifiers) ignore this variable.
+
 ### Enabling model access
 
 If you haven't already, request access to the models you plan to use in the [Amazon Bedrock console](https://console.aws.amazon.com/bedrock/home#/modelaccess) on your management account. Access typically propagates within minutes.
