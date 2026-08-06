@@ -14,6 +14,7 @@ from typing import Protocol
 
 import boto3
 
+from aws_bench.account_management.preexisting import active_account_config
 from aws_bench.logging.logger import get_logger
 from aws_bench.resource_management.ccapi.manager import CloudControlManager
 from aws_bench.resource_management.ccapi.models import ScanResult
@@ -41,6 +42,11 @@ class Scanner(Protocol):
 
 def scan_method() -> str:
     """The configured scan backend. Unset → the Lambda scan (host scan only when no account_id)."""
+    if active_account_config() is not None and SCAN_METHOD_ENV_VAR not in os.environ:
+        # The shared scanner Lambda assumes OrganizationAccountAccessRole and is
+        # deployed in the benchmark-created management account. Neither exists
+        # in an externally owned account, so use the same scanner in-process.
+        return _FASTSCAN
     method = os.environ.get(SCAN_METHOD_ENV_VAR, _FASTSCAN_LAMBDA).strip().lower()
     if method not in _VALID:
         logger.warning(f"Unknown {SCAN_METHOD_ENV_VAR}={method!r}; using {_FASTSCAN_LAMBDA!r}")

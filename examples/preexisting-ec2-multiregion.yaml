@@ -1,0 +1,15 @@
+schema_version: "1.0"
+mode: preexisting
+name: aws-bench
+
+# The ambient identity only needs permission to assume this externally managed
+# role. Scenario setup and cleanup then run as the protected benchmark runner.
+runner_role: AWSBenchRunner
+
+accounts:
+  ec2-multiregion:
+    PRIMARY: "111122223333"
+
+# This local file is the fail-closed contamination marker for externally owned
+# accounts. Keep it on persistent storage for cluster runs.
+state_file: ./state/ec2-multiregion.json

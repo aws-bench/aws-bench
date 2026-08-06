@@ -25,6 +25,11 @@ from aws_bench.account_management.models import (
     TestEnvironment,
 )
 from aws_bench.account_management.organizations import OrganizationsClient
+from aws_bench.account_management.preexisting import (
+    PreexistingEnvironmentConfig,
+    PreexistingStateStore,
+    active_account_config,
+)
 from aws_bench.account_management.utils import generate_account_email
 from aws_bench.logging.logger import get_logger
 
@@ -62,6 +67,24 @@ class AccountManager:
     def __init__(self) -> None:
         """Initialize the account manager."""
         self._org = OrganizationsClient()
+        active = active_account_config()
+        self._preexisting: PreexistingEnvironmentConfig | None = active[0] if active else None
+        self._preexisting_path = active[1] if active else None
+        self._state_store = (
+            PreexistingStateStore(self._preexisting.resolve_state_file(self._preexisting_path))
+            if self._preexisting is not None and self._preexisting_path is not None
+            else None
+        )
+
+    @property
+    def is_preexisting(self) -> bool:
+        """Whether account lifecycle is owned by an external control plane."""
+        return self._preexisting is not None
+
+    @property
+    def runner_role(self) -> str | None:
+        """Account-local runner role configured for pre-existing mode."""
+        return self._preexisting.runner_role if self._preexisting is not None else None
 
     # ── Init ──
 
@@ -70,6 +93,11 @@ class AccountManager:
 
         Idempotent — safe to call multiple times. Returns the OU id.
         """
+        if self._preexisting is not None:
+            self._require_preexisting_name(ou_name)
+            logger.info("Pre-existing account mode: skipping Organization, OU, and SCP creation.")
+            return "preexisting"
+
         self._org.create_organization()
         org_info = self._org.get_org_info()
 
@@ -132,6 +160,10 @@ class AccountManager:
                 account in the OU, not just ``required_by_scenario``.
             TestEnvironmentNotFoundError: The OU does not exist.
         """
+        if self._preexisting is not None:
+            self._require_preexisting_name(ou_name)
+            return self._preexisting.to_test_environment(required_by_scenario=required_by_scenario)
+
         org_info = self._org.get_org_info()
         ou_id = self._require_ou(org_info, ou_name)
 
@@ -194,6 +226,21 @@ class AccountManager:
                 ``(scenario, account_tag)`` pair.
             TestEnvironmentNotFoundError: The OU does not exist.
         """
+        if self._preexisting is not None:
+            self._require_preexisting_name(ou_name)
+            configured = self._preexisting.accounts.get(scenario_name)
+            if configured is None:
+                raise AccountResolutionError(
+                    f"Scenario {scenario_name!r} is not present in the pre-existing account config."
+                )
+            missing = account_tags - configured.keys()
+            if missing:
+                raise AccountResolutionError(
+                    f"Scenario {scenario_name!r} is missing pre-existing account "
+                    f"tag(s): {sorted(missing)}"
+                )
+            return {tag: configured[tag] for tag in sorted(account_tags)}
+
         org_info = self._org.get_org_info()
         ou_id = self._require_ou(org_info, ou_name)
 
@@ -287,6 +334,10 @@ class AccountManager:
 
         Accounts without a parseable ``aws-bench:scenario`` tag are skipped.
         """
+        if self._preexisting is not None:
+            environment = self.resolve_test_environment(ou_name)
+            return [account for tags in environment.accounts.values() for account in tags.values()]
+
         org_info = self._org.get_org_info()
         ou_id = self._require_ou(org_info, ou_name)
         return self._list_scenario_accounts_by_ou_id(ou_id)
@@ -301,6 +352,14 @@ class AccountManager:
         reuses the policy by name, updates its content when the region set
         changes, and skips accounts that already have it attached.
         """
+        if self._preexisting is not None:
+            self._validate_allowlisted_accounts(account_ids)
+            logger.info(
+                "Pre-existing account mode: external IaC owns the region restriction "
+                "for %s; skipping SCP mutation.",
+                scenario_name,
+            )
+            return
         self._org.ensure_region_restriction_scp(scenario_name, allowed_regions, account_ids)
 
     @retry(
@@ -314,6 +373,10 @@ class AccountManager:
         Retries transient Organizations throttling; re-raises on exhaustion so the
         caller can decide (log for a failed reset, surface for a succeeded one).
         """
+        if self._state_store is not None:
+            self._validate_allowlisted_accounts([account_id])
+            await asyncio.to_thread(self._state_store.mark, account_id)
+            return
         await self._org.tag_resource(account_id, CONTAMINATED_TAG_KEY, "true")
 
     @retry(
@@ -326,10 +389,18 @@ class AccountManager:
 
         Retries transient Organizations throttling; re-raises on exhaustion.
         """
+        if self._state_store is not None:
+            self._validate_allowlisted_accounts([account_id])
+            await asyncio.to_thread(self._state_store.clear, account_id)
+            return
         await self._org.untag_resource(account_id, [CONTAMINATED_TAG_KEY])
 
     def get_contaminated_accounts(self, account_ids: list[str]) -> list[str]:
         """Return the subset of ``account_ids`` currently carrying the contamination tag."""
+        if self._state_store is not None:
+            self._validate_allowlisted_accounts(account_ids)
+            contaminated = self._state_store.contaminated()
+            return [account_id for account_id in account_ids if account_id in contaminated]
         return [aid for aid in account_ids if CONTAMINATED_TAG_KEY in self._org.get_tags(aid)]
 
     def terminate_environment(
@@ -348,6 +419,12 @@ class AccountManager:
 
         Accounts enter a 90-day suspension period after closure.
         """
+        if self._preexisting is not None:
+            raise RuntimeError(
+                "env terminate is disabled in pre-existing account mode; external IaC owns "
+                "the accounts and Organizational Unit"
+            )
+
         org_info = self._org.get_org_info()
         ou_id = self._require_ou(org_info, ou_name)
 
@@ -386,3 +463,24 @@ class AccountManager:
                 logger.warning(f"Could not delete OU {ou_id}: {e}")
 
         return results
+
+    def _require_preexisting_name(self, ou_name: str) -> None:
+        assert self._preexisting is not None
+        if ou_name != self._preexisting.name:
+            raise TestEnvironmentNotFoundError(
+                f"Active pre-existing config names environment {self._preexisting.name!r}, "
+                f"not {ou_name!r}."
+            )
+
+    def _validate_allowlisted_accounts(self, account_ids: list[str]) -> None:
+        assert self._preexisting is not None
+        allowed = {
+            account_id
+            for tags in self._preexisting.accounts.values()
+            for account_id in tags.values()
+        }
+        unexpected = set(account_ids) - allowed
+        if unexpected:
+            raise AccountResolutionError(
+                f"Account(s) are not in the active pre-existing allowlist: {sorted(unexpected)}"
+            )

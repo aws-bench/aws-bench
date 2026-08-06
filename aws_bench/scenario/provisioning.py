@@ -248,7 +248,7 @@ async def provision_scenarios(
 
     # Only deploy when the Lambda backend is selected. A deploy failure halts provisioning
     # rather than proceeding to a scan that will fail later.
-    if scan_method() == _FASTSCAN_LAMBDA:
+    if scan_method() == _FASTSCAN_LAMBDA and am.is_preexisting is not True:
         await asyncio.to_thread(ensure_deployed)
 
     pairs = [(sc.manifest, tag) for sc in scenarios for tag in sc.manifest.scenario.account_tags]
@@ -498,6 +498,8 @@ async def _provision_all(
                     scenario,
                     result,
                     on_event,
+                    preexisting=account_manager.is_preexisting is True,
+                    runner_role=account_manager.runner_role,
                 )
 
     # Split into successes (proceed to Phase 2) and failures (pass through).
@@ -626,12 +628,23 @@ def _ensure_cfn_ops_role(cred_provider: CredentialProvider, account_id: str) -> 
     )
 
 
+def _validate_cfn_ops_role(cred_provider: CredentialProvider, account_id: str) -> None:
+    """Validate the externally managed CloudFormation execution role exists."""
+    session = cred_provider.get_session_for_account(
+        account_id, ORG_ACCESS_ROLE, "aws-bench-cfn-ops-role-validate"
+    )
+    session.client("iam").get_role(RoleName=CFN_OPS_ROLE_NAME)
+
+
 async def _provision_account_lifecycle(
     quota_manager: QuotaManager,
     cred_provider: CredentialProvider,
     scenario: ScenarioManifest,
     result: ProvisionedAccount,
     on_event: HookCallback | None,
+    *,
+    preexisting: bool = False,
+    runner_role: str | None = None,
 ) -> ProvisionedAccount:
     """Phase 2: Role wait + quota submission + baseline capture for a provisioned account.
 
@@ -651,23 +664,44 @@ async def _provision_account_lifecycle(
 
     try:
         await emit(ProvisionEvent.ROLE_START, account_id=account_id)
-        try:
-            await asyncio.to_thread(cred_provider.wait_for_role, account_id, ORG_ACCESS_ROLE)
-        except Exception as exc:  # noqa: BLE001
-            logger.error(
-                "Role %s never became assumable in %s: %s",
-                ORG_ACCESS_ROLE,
-                account_id,
-                exc,
-            )
-            result.error = exc
-            return result
+        if preexisting:
+            try:
+                session = cred_provider.get_session_for_account(
+                    account_id,
+                    ORG_ACCESS_ROLE,
+                    "aws-bench-runner-role-validate",
+                )
+                await asyncio.to_thread(session.client("sts").get_caller_identity)
+            except Exception as exc:  # noqa: BLE001
+                role_label = runner_role or "ambient account identity"
+                logger.error(
+                    "Runner identity %s is unavailable in %s: %s",
+                    role_label,
+                    account_id,
+                    exc,
+                )
+                result.error = exc
+                return result
+        else:
+            try:
+                await asyncio.to_thread(cred_provider.wait_for_role, account_id, ORG_ACCESS_ROLE)
+            except Exception as exc:  # noqa: BLE001
+                logger.error(
+                    "Role %s never became assumable in %s: %s",
+                    ORG_ACCESS_ROLE,
+                    account_id,
+                    exc,
+                )
+                result.error = exc
+                return result
 
         try:
-            await asyncio.to_thread(_ensure_cfn_ops_role, cred_provider, account_id)
+            role_operation = _validate_cfn_ops_role if preexisting else _ensure_cfn_ops_role
+            await asyncio.to_thread(role_operation, cred_provider, account_id)
         except Exception as exc:  # noqa: BLE001
             logger.error(
-                "CFN ops role creation failed in %s: %s",
+                "CFN ops role %s failed in %s: %s",
+                "validation" if preexisting else "creation",
                 account_id,
                 exc,
             )
@@ -688,8 +722,11 @@ async def _provision_account_lifecycle(
                 ],
             )
             try:
+                quota_operation = (
+                    quota_manager.verify_quotas if preexisting else quota_manager.request_quotas
+                )
                 submit_results = await asyncio.to_thread(
-                    quota_manager.request_quotas,
+                    quota_operation,
                     config,
                     account_id,
                     ORG_ACCESS_ROLE,
@@ -705,6 +742,24 @@ async def _provision_account_lifecycle(
                 )
                 result.submit_failures.append(exc)
                 continue
+            if preexisting:
+                unmet = [
+                    quota for quota in submit_results if quota.status != QuotaStatus.ALREADY_MET
+                ]
+                if unmet:
+                    result.submit_failures.append(
+                        InsufficientQuotaError(
+                            [
+                                UnmetQuota(
+                                    scenario_name=name,
+                                    account_id=account_id,
+                                    region=region,
+                                    result=quota,
+                                )
+                                for quota in unmet
+                            ]
+                        )
+                    )
             result.submitted_quotas.append(
                 SubmittedQuotaBatch(
                     scenario_name=name,
