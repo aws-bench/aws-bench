@@ -355,21 +355,49 @@ The bearer token is a long-lived (30-day) service-specific credential for `bedro
 
 ### Running with Bedrock (agent uses Bedrock models)
 
+Amazon Bedrock hosts models from multiple providers. aws-bench supports evaluating agents against any of them using a single bearer token:
+
+| Agent (`-a`) | Provider | Bedrock model IDs (`-m`) |
+|--------------|----------|--------------------------|
+| `claude-code` | Anthropic | `global.anthropic.claude-sonnet-4-6`, `global.anthropic.claude-sonnet-5` |
+| `codex` | OpenAI | `openai.gpt-5.6-sol`, `openai.gpt-5.6-terra`, `openai.gpt-5.6-luna` |
+| `aws-bench-baseline-agent` | Anthropic | `us.anthropic.claude-sonnet-4-6` |
+
 ```bash
 # Generate the bearer token (one-time, valid ~30 days)
 eval $(uv run aws-bench env creds --eval)
+```
 
-# Run — pass the token to the agent container
+#### Claude Code (Anthropic models)
+
+```bash
 uv run aws-bench run \
   --env-name awsbench-env \
   -d <dataset> \
   -a claude-code \
-  -m global.anthropic.claude-sonnet-5 \
-  --ve AWS_BEARER_TOKEN_BEDROCK=$AWS_BEARER_TOKEN_BEDROCK \
+  -m global.anthropic.claude-sonnet-4-6 \
+  --ve "AWS_BEARER_TOKEN_BEDROCK=$AWS_BEARER_TOKEN_BEDROCK" \
   --yes
 ```
 
-Other agents auto-detect Bedrock from the presence of `AWS_BEARER_TOKEN_BEDROCK`.
+#### Codex (OpenAI models on Bedrock)
+
+```bash
+uv run aws-bench run \
+  --env-name awsbench-env \
+  -d <dataset> \
+  -a codex \
+  -m openai.gpt-5.6-terra \
+  --ve "AWS_BEARER_TOKEN_BEDROCK=$AWS_BEARER_TOKEN_BEDROCK" \
+  --yes
+```
+
+The GPT-5.6 model family on Bedrock:
+- `openai.gpt-5.6-sol` — frontier reasoning (best quality, higher latency)
+- `openai.gpt-5.6-terra` — balanced production (recommended starting point)
+- `openai.gpt-5.6-luna` — fast and cost-efficient
+
+Both agents auto-detect Bedrock from the presence of `AWS_BEARER_TOKEN_BEDROCK` in the host environment (set by `eval` above). The `--ve` flag passes the token to the verifier container for the LLM judge.
 
 ### Running without Bedrock (agent uses another provider)
 
