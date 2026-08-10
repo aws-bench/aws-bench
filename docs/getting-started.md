@@ -359,7 +359,7 @@ Amazon Bedrock hosts models from multiple providers. aws-bench supports evaluati
 
 | Agent (`-a`) | Provider | Bedrock model IDs (`-m`) |
 |--------------|----------|--------------------------|
-| `claude-code` | Anthropic | `global.anthropic.claude-sonnet-4-6`, `global.anthropic.claude-sonnet-5` |
+| `claude-code` | Anthropic | `global.anthropic.claude-sonnet-5`, `global.anthropic.claude-sonnet-4-6` |
 | `codex` | OpenAI | `openai.gpt-5.6-sol`, `openai.gpt-5.6-terra`, `openai.gpt-5.6-luna` |
 | `aws-bench-baseline-agent` | Anthropic | `us.anthropic.claude-sonnet-4-6` |
 
@@ -375,7 +375,7 @@ uv run aws-bench run \
   --env-name awsbench-env \
   -d <dataset> \
   -a claude-code \
-  -m global.anthropic.claude-sonnet-4-6 \
+  -m global.anthropic.claude-sonnet-5 \
   --ve "AWS_BEARER_TOKEN_BEDROCK=$AWS_BEARER_TOKEN_BEDROCK" \
   --yes
 ```
