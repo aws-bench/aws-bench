@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
-from botocore.exceptions import ClientError
+from botocore.exceptions import BotoCoreError, ClientError
 
 from aws_bench.resource_management.ccapi.models import Resource
-from aws_bench.resource_management.cleanup.handlers.iam import _prepare
+from aws_bench.resource_management.cleanup.handlers.iam import _delete, _prepare
 from aws_bench.resource_management.cleanup.models import HandlerStatus
 
 
@@ -83,3 +83,79 @@ def test_prepare_fails_on_other_error():
     )
     result = _prepare(_role("EC2SSMRole"), session)
     assert result.status == HandlerStatus.FAILED
+
+
+class TestDelete:
+    def test_deletes_role_successfully(self):
+        session = MagicMock()
+        client = MagicMock()
+        session.client.return_value = client
+        result = _delete(_role("my-role"), session)
+        client.delete_role.assert_called_once_with(RoleName="my-role")
+        assert result.status == HandlerStatus.SUCCESS
+
+    def test_skips_when_role_not_found(self):
+        session = MagicMock()
+        client = MagicMock()
+        session.client.return_value = client
+        client.delete_role.side_effect = ClientError(
+            {"Error": {"Code": "NoSuchEntity", "Message": "not found"}}, "DeleteRole"
+        )
+        result = _delete(_role("gone-role"), session)
+        assert result.status == HandlerStatus.SKIPPED
+
+    def test_retries_on_delete_conflict(self):
+        session = MagicMock()
+        client = MagicMock()
+        session.client.return_value = client
+        # First call: DeleteConflict, second call: success
+        client.delete_role.side_effect = [
+            ClientError({"Error": {"Code": "DeleteConflict", "Message": "in use"}}, "DeleteRole"),
+            None,  # success
+        ]
+        with patch("aws_bench.resource_management.cleanup.handlers.iam.time.sleep") as mock_sleep:
+            result = _delete(_role("busy-role"), session)
+        assert result.status == HandlerStatus.SUCCESS
+        assert client.delete_role.call_count == 2
+        mock_sleep.assert_called_once_with(15)
+
+    def test_fails_after_max_retries_on_delete_conflict(self):
+        session = MagicMock()
+        client = MagicMock()
+        session.client.return_value = client
+        # All 3 attempts fail with DeleteConflict
+        client.delete_role.side_effect = ClientError(
+            {"Error": {"Code": "DeleteConflict", "Message": "still in use"}}, "DeleteRole"
+        )
+        with patch("aws_bench.resource_management.cleanup.handlers.iam.time.sleep"):
+            result = _delete(_role("stuck-role"), session)
+        assert result.status == HandlerStatus.FAILED
+        assert "DeleteConflict" in result.message or "Failed to delete" in result.message
+        assert client.delete_role.call_count == 3
+
+    def test_fails_on_access_denied(self):
+        session = MagicMock()
+        client = MagicMock()
+        session.client.return_value = client
+        client.delete_role.side_effect = ClientError(
+            {"Error": {"Code": "AccessDenied", "Message": "nope"}}, "DeleteRole"
+        )
+        result = _delete(_role("locked-role"), session)
+        assert result.status == HandlerStatus.FAILED
+        assert client.delete_role.call_count == 1  # no retry for non-conflict errors
+
+    def test_skips_service_linked_role(self):
+        result = _delete(_role("AWSServiceRoleForECS"), MagicMock())
+        assert result.status == HandlerStatus.SKIPPED
+
+    def test_skips_protected_role(self):
+        result = _delete(_role("OrganizationAccountAccessRole"), MagicMock())
+        assert result.status == HandlerStatus.SKIPPED
+
+    def test_fails_on_connection_error(self):
+        session = MagicMock()
+        client = MagicMock()
+        session.client.return_value = client
+        client.delete_role.side_effect = BotoCoreError()
+        result = _delete(_role("broken-role"), session)
+        assert result.status == HandlerStatus.FAILED
