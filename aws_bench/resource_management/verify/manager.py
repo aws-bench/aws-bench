@@ -168,6 +168,23 @@ class VerifyManager:
             f"({len(baseline_types)} resource types from baseline)"
         )
         scan_result = self._scan_mgr.scan_resources(resource_types=list(baseline_types))
+
+        # Fail closed on a persistent scan failure of a baseline-tracked type. The
+        # scanner already retries transient errors internally (8 attempts w/ backoff),
+        # so a type still in scan_result.failed is a non-transient failure.
+        # find_new_resources deliberately SKIPS failed types to avoid false diffs — but
+        # for a type that mattered at setup, silently skipping it would let a leaked
+        # resource in that type hide forever. Scoped to baseline_types only.
+        unenumerable = sorted(t for t in scan_result.failed if t in baseline_types)
+        if unenumerable:
+            logger.warning(f"Could not enumerate baseline resource type(s): {unenumerable}")
+            return VerifyResult(
+                success=False,
+                reason=f"Could not enumerate {len(unenumerable)} baseline resource type(s)",
+                details={"unenumerable_types": unenumerable},
+                suggestion="Run 'aws-bench env cleanup' and 'aws-bench env setup' to reset",
+            )
+
         new_resources = find_new_resources(
             scan_result.detected, baseline_resource_ids, scan_result.failed, baseline_failed
         )
@@ -210,6 +227,19 @@ class VerifyManager:
                 new_resources=new_resources,
             )
         return None
+
+    def find_orphan_resources(self, snapshot: Snapshot) -> VerifyResult | None:
+        """Re-run only the new-resource + scan-health census (no stack/drift checks).
+
+        Reset's fail-closed backstop after deleting stacks for re-setup: a survivor
+        it could not delete or enumerate must fail the reset, not be absorbed into a
+        fresh baseline.
+        """
+        return self._check_new_resources(
+            snapshot.resource_ids,
+            snapshot.failed_resource_types,
+            snapshot.empty_resource_types,
+        )
 
     def _check_stack_status(self, stack_metadata: dict) -> VerifyResult | None:
         """Check CloudFormation stack status.
