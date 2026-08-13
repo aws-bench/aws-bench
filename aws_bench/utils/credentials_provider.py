@@ -343,9 +343,6 @@ class CredentialProvider:
         created by aws-bench.  In pre-existing mode it means "the configured
         runner identity" instead.  Explicit task roles remain explicit.
 
-        Always returns a role name: the config requires ``runner_role``, so an
-        unnamed role resolves to it rather than to the caller's own credentials.
-
         Raises:
             CredentialError: If no config is active.
             AccountResolutionError: If ``account_id`` is outside the allowlist.

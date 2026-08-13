@@ -48,7 +48,7 @@ def temp_snapshot_dir():
 
 
 def test_preexisting_mode_stores_state_on_local_disk(tmp_path, monkeypatch, sample_snapshot):
-    """No management account holds a bucket, and one in the test account is agent-reachable."""
+    """Pre-existing mode resolves the local backend and writes the snapshot under STATE_DIR."""
     monkeypatch.setattr(
         "aws_bench.resource_management.snapshot.manager.STATE_DIR", tmp_path / "state"
     )

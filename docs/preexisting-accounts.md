@@ -108,7 +108,15 @@ than reading the absence as "no accounts contaminated".
 `runner_role` is required. An interactive IAM Identity Center session can assume it; an
 unattended workload identity needs the same trust path. Explicit per-task roles are
 assumed from that runner identity. A task that names no role runs as the runner role —
-aws-bench never falls back to the credentials of whoever invoked it.
+aws-bench never widens permissions to those of whoever invoked it.
+
+One case reuses the invoking session directly: when the caller's ambient identity
+already *is* the role being targeted, aws-bench reuses that session rather than
+attempting a self-assume, which most trust policies reject. Permissions are identical,
+but the session is the caller's, so the resulting CloudTrail entries carry the caller's
+session name rather than an `aws-bench-*` one, and the credential's lifetime is the
+ambient session's. Run from a session that is not itself a task role if you need every
+action attributable to aws-bench.
 
 aws-bench does not route through `OrganizationAccountAccessRole` in this mode; that
 role exists only in accounts the managed backend created.

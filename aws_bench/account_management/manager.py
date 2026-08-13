@@ -96,11 +96,18 @@ class AccountManager:
         if self._preexisting is not None:
             self._require_preexisting_name(ou_name)
             if self._state_store is not None:
-                self._state_store.initialize()
-                logger.info(
-                    "Pre-existing account mode: contamination state at %s.",
-                    self._state_store.path,
-                )
+                if self._state_store.initialize():
+                    logger.warning(
+                        "Created a new contamination state file at %s with no accounts "
+                        "flagged. If a previous file was lost rather than this being a "
+                        "first run, accounts flagged there are now treated as clean.",
+                        self._state_store.path,
+                    )
+                else:
+                    logger.info(
+                        "Pre-existing account mode: contamination state at %s.",
+                        self._state_store.path,
+                    )
             logger.info("Pre-existing account mode: skipping Organization, OU, and SCP creation.")
             return "preexisting"
 

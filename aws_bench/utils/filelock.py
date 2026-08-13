@@ -7,11 +7,9 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
 
-# Lock files are owner-only, matching the state they guard.
 _DIR_MODE = 0o700
 
-# Appended to the guarded path to name its lock. Callers that enumerate a
-# directory of locked files use this to skip the locks themselves.
+# Appended to the guarded path to name its lock.
 LOCK_SUFFIX = ".lock"
 
 

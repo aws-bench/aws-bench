@@ -8,9 +8,7 @@ OUTPUT_DIR = Path.home() / ".aws-bench"
 # Per-invocation command ledger (one entry dir per aws-bench CLI call).
 LOGS_DIR = OUTPUT_DIR / "logs"
 
-# Benchmark state for accounts aws-bench does not own: baseline snapshots and
-# contamination flags. Host-local, and outside every account under test, so no
-# benchmark artifact lands in an account an agent can reach.
+# Host-local benchmark state: baseline snapshots and contamination flags.
 STATE_DIR = OUTPUT_DIR / "state"
 
 # Cache for fetched scenarios. Layout: ``<SCENARIO_CACHE_DIR>/<uuid>/<name>/``,

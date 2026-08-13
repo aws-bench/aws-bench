@@ -9,6 +9,7 @@ from pydantic import ValidationError
 from aws_bench.account_management.constants import CFN_OPS_ROLE_NAME
 from aws_bench.account_management.exceptions import (
     AccountResolutionError,
+    ContaminationStateInvalidError,
     ContaminationStateMissingError,
 )
 from aws_bench.account_management.manager import AccountManager
@@ -65,7 +66,6 @@ accounts:
 
 
 def test_runner_role_is_required(tmp_path: Path):
-    """Without runner_role an unnamed task role would fall back to the caller's own creds."""
     path = _write_config(
         tmp_path,
         """
@@ -100,7 +100,6 @@ accounts:
 
 
 def test_cfn_role_is_required(tmp_path: Path):
-    """Cleanup passes it as RoleARN on DeleteStack, so it cannot be guessed."""
     path = _write_config(
         tmp_path,
         """
@@ -171,6 +170,68 @@ def test_initialize_is_idempotent_and_preserves_flags(tmp_path: Path):
     store.mark("111122223333")
     store.initialize()
     assert store.contaminated() == {"111122223333"}
+
+
+def test_initialize_reports_whether_it_created_the_file(tmp_path: Path):
+    """Callers warn on creation, since it cannot be told from a lost file."""
+    store = PreexistingStateStore(tmp_path / "state.json")
+    assert store.initialize() is True
+    assert store.initialize() is False
+
+
+def test_mark_creates_an_absent_file_rather_than_losing_the_flag(tmp_path: Path):
+    """Adding a flag only narrows reuse, so an absent file starts from empty here."""
+    store = PreexistingStateStore(tmp_path / "state.json")
+
+    store.mark("111122223333")
+
+    assert store.contaminated() == {"111122223333"}
+
+
+def test_clear_still_fails_closed_on_an_absent_file(tmp_path: Path):
+    """Unlike mark, clearing against an absent file would silently drop flags."""
+    store = PreexistingStateStore(tmp_path / "state.json")
+    with pytest.raises(ContaminationStateMissingError):
+        store.clear("111122223333")
+
+
+@pytest.mark.parametrize(
+    ("label", "body"),
+    [
+        ("empty object", "{}"),
+        ("renamed field", '{"schema_version": "2.0", "contaminated": ["111122223333"]}'),
+        ("unknown schema version", '{"schema_version": "9.9", "contaminated_account_ids": []}'),
+        ("bare string for the list", '{"schema_version": "1.0", "contaminated_account_ids": "1"}'),
+        ("top-level list", '["111122223333"]'),
+        ("truncated", '{"schema_version": "1.0", "contaminated_acc'),
+        ("empty file", ""),
+    ],
+)
+def test_unparseable_state_is_not_read_as_clean(tmp_path: Path, label: str, body: str):
+    """An empty set means 'nothing contaminated', so a file we cannot parse must raise."""
+    path = tmp_path / "state.json"
+    path.write_text(body)
+
+    with pytest.raises(ContaminationStateInvalidError, match="unreadable"):
+        PreexistingStateStore(path).contaminated()
+
+
+@pytest.mark.parametrize("name", ["../escape", "with/slash", "", ".leading-dot"])
+def test_name_that_could_traverse_the_state_directory_is_rejected(tmp_path: Path, name: str):
+    """Name becomes a path component in the default state-file location."""
+    path = _write_config(
+        tmp_path,
+        f"""
+mode: preexisting
+name: "{name}"
+runner_role: AWSBenchRunner
+cfn_role: cfn-service-execution
+accounts:
+  scenario-a: {{PRIMARY: "111122223333"}}
+""",
+    )
+    with pytest.raises(ValidationError):
+        load_account_config(path)
 
 
 @pytest.mark.asyncio

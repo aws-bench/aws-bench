@@ -68,10 +68,7 @@ class SnapshotManager:
     """
 
     def __init__(self):
-        """Initialize snapshot manager.
-
-        The storage backend is created lazily on first access via the _storage property.
-        """
+        """Initialize snapshot manager."""
         self._backend: SnapshotStorage | None = None
         self._etags: dict[SnapshotKey, str] = {}
 

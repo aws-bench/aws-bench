@@ -41,3 +41,7 @@ class DuplicateScenarioAccountError(AccountManagementError):
 
 class ContaminationStateMissingError(AccountManagementError):
     """The local contamination state file does not exist."""
+
+
+class ContaminationStateInvalidError(AccountManagementError):
+    """The local contamination state file exists but is not the expected schema."""

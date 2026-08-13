@@ -15,11 +15,19 @@ from pathlib import Path
 from typing import Annotated, Literal
 
 import yaml
-from pydantic import BaseModel, Field, StringConstraints, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    StringConstraints,
+    ValidationError,
+    model_validator,
+)
 
 from aws_bench.account_management.constants import CFN_OPS_ROLE_NAME
 from aws_bench.account_management.exceptions import (
     AccountResolutionError,
+    ContaminationStateInvalidError,
     ContaminationStateMissingError,
 )
 from aws_bench.account_management.models import OrgInfo, ScenarioAccount, TestEnvironment
@@ -28,7 +36,18 @@ from aws_bench.utils.filelock import file_lock
 
 ACCOUNT_CONFIG_ENV_VAR = "AWSBENCH_ACCOUNT_CONFIG"
 
+CONTAMINATION_SCHEMA_VERSION = "1.0"
+
+_DIR_MODE = 0o700
+_FILE_MODE = 0o600
+
 AccountId = Annotated[str, StringConstraints(pattern=r"^[0-9]{12}$")]
+
+# ``name`` becomes a path component in the default state-file location, so it is
+# constrained to characters that cannot traverse or escape.
+EnvironmentName = Annotated[
+    str, StringConstraints(min_length=1, pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+]
 
 
 class PreexistingEnvironmentConfig(BaseModel):
@@ -36,7 +55,7 @@ class PreexistingEnvironmentConfig(BaseModel):
 
     schema_version: Literal["1.0"] = "1.0"
     mode: Literal["preexisting"] = "preexisting"
-    name: str = Field(min_length=1)
+    name: EnvironmentName
     accounts: dict[str, dict[str, AccountId]]
     runner_role: str = Field(min_length=1)
     cfn_role: str = Field(min_length=1)
@@ -67,9 +86,8 @@ class PreexistingEnvironmentConfig(BaseModel):
     def resolve_state_file(self, config_path: Path) -> Path:
         """Return the persistent contamination-state path for this config.
 
-        Defaults under ``STATE_DIR``, alongside the baseline snapshots, so no
-        benchmark state lands in an account under test. A relative ``state_file``
-        override resolves against the config's directory.
+        Defaults to ``STATE_DIR/<name>-contamination.json``. A relative
+        ``state_file`` override resolves against the config's directory.
         """
         if self.state_file is None:
             return STATE_DIR / f"{self.name}-contamination.json"
@@ -169,6 +187,15 @@ def effective_cfn_role() -> str:
     return active[0].cfn_role
 
 
+class ContaminationState(BaseModel):
+    """On-disk shape of the contamination state file."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: Literal["1.0"]
+    contaminated_account_ids: list[str]
+
+
 class PreexistingStateStore:
     """Small, lock-protected local store for fail-closed contamination flags."""
 
@@ -176,15 +203,17 @@ class PreexistingStateStore:
         """Store state at ``path``, serializing access with a sibling lock."""
         self.path = path
 
-    def initialize(self) -> None:
+    def initialize(self) -> bool:
         """Create the state file with no accounts flagged, if it does not exist.
 
-        Every other operation treats an absent file as an error, so this is the
-        one place the file comes into being.
+        Returns:
+            True if the file was created, False if it was already present.
         """
         with file_lock(self.path):
-            if not self.path.exists():
-                self._write_unlocked(set())
+            if self.path.exists():
+                return False
+            self._write_unlocked(set())
+            return True
 
     def contaminated(self) -> set[str]:
         """Return all locally flagged account IDs."""
@@ -192,9 +221,14 @@ class PreexistingStateStore:
             return self._read_unlocked()
 
     def mark(self, account_id: str) -> None:
-        """Persist a contamination flag."""
+        """Persist a contamination flag, treating an absent file as an empty set.
+
+        Adding a flag only narrows what aws-bench will reuse, so starting from
+        empty here cannot mark a dirty account clean. ``clear`` and
+        ``contaminated`` can, and so both fail closed on an absent file instead.
+        """
         with file_lock(self.path):
-            values = self._read_unlocked()
+            values = self._read_unlocked() if self.path.exists() else set()
             values.add(account_id)
             self._write_unlocked(values)
 
@@ -208,31 +242,51 @@ class PreexistingStateStore:
     def _read_unlocked(self) -> set[str]:
         """Read the flagged account IDs.
 
+        An empty set means "nothing is contaminated", so neither an absent file
+        nor one this code cannot parse may be read as one.
+
         Raises:
-            ContaminationStateMissingError: If the file is absent. An empty set
-                means "nothing is contaminated", so a deleted or misplaced file
-                must not be readable as one.
+            ContaminationStateMissingError: If the file is absent.
+            ContaminationStateInvalidError: If the file does not match
+                :class:`ContaminationState`.
         """
         if not self.path.exists():
             raise ContaminationStateMissingError(
                 f"Contamination state file is missing: {self.path}. It records which "
                 "accounts are unsafe to reuse, so aws-bench cannot treat its absence "
-                "as 'no accounts contaminated'. Run 'aws-bench env init' to create it, "
-                "or restore the file from where it was moved."
+                "as 'no accounts contaminated'. Restore the file from where it was "
+                "moved. Running 'aws-bench env init' recreates it, but starts from an "
+                "empty set and so discards every flag it used to hold."
             )
-        payload = json.loads(self.path.read_text())
-        return set(payload.get("contaminated_account_ids", []))
+        try:
+            state = ContaminationState.model_validate_json(self.path.read_text())
+        except (ValidationError, UnicodeDecodeError) as e:
+            raise ContaminationStateInvalidError(
+                f"Contamination state file is unreadable: {self.path}. It records which "
+                "accounts are unsafe to reuse, so aws-bench cannot treat a file it "
+                f"cannot parse as 'no accounts contaminated'. Expected schema_version "
+                f"{CONTAMINATION_SCHEMA_VERSION} with a list of account IDs. Underlying "
+                f"error: {e}"
+            ) from e
+        return set(state.contaminated_account_ids)
 
     def _write_unlocked(self, values: set[str]) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        payload = {"schema_version": "1.0", "contaminated_account_ids": sorted(values)}
+        self.path.parent.mkdir(parents=True, exist_ok=True, mode=_DIR_MODE)
+        payload = ContaminationState(
+            schema_version=CONTAMINATION_SCHEMA_VERSION,
+            contaminated_account_ids=sorted(values),
+        )
         fd, temporary = tempfile.mkstemp(
             prefix=f".{self.path.name}.", suffix=".tmp", dir=self.path.parent
         )
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as stream:
-                json.dump(payload, stream, indent=2)
+                stream.write(payload.model_dump_json(indent=2))
                 stream.write("\n")
+                stream.flush()
+                # Flushed before the rename so a crash cannot publish empty content.
+                os.fsync(stream.fileno())
+            os.chmod(temporary, _FILE_MODE)
             os.replace(temporary, self.path)
         finally:
             if os.path.exists(temporary):
