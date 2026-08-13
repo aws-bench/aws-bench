@@ -37,3 +37,7 @@ class AccountResolutionError(AccountManagementError):
 
 class DuplicateScenarioAccountError(AccountManagementError):
     """One (scenario, account_tag) pair resolved to more than one account."""
+
+
+class ContaminationStateMissingError(AccountManagementError):
+    """The local contamination state file does not exist."""

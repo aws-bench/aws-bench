@@ -997,6 +997,15 @@ def terminate(
     _apply_debug(debug)
     account_manager = AccountManager()
 
+    # Refuse before the first Organizations call: every step below this mutates
+    # (detach SCPs, delete the OU, close accounts) and none of it is ours to do.
+    if account_manager.is_preexisting:
+        console.print(
+            "env terminate is not available in pre-existing account mode; the external "
+            "platform owns account closure and the Organizational Unit."
+        )
+        raise typer.Exit(code=1)
+
     try:
         org_info = account_manager._org.get_org_info()
         ou_id = account_manager._require_ou(org_info, name)

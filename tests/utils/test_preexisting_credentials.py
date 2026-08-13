@@ -5,17 +5,19 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from aws_bench.account_management.exceptions import AccountResolutionError
 from aws_bench.account_management.preexisting import ACCOUNT_CONFIG_ENV_VAR
 from aws_bench.utils.credentials_provider import CredentialProvider
 
 
-def _activate(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, runner_role: str | None) -> None:
-    role_line = f"runner_role: {runner_role}\n" if runner_role else ""
+def _activate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, runner_role: str = "AWSBenchRunner"
+) -> None:
     path = tmp_path / "accounts.yaml"
     path.write_text(
         "mode: preexisting\n"
         "name: aws-bench\n"
-        f"{role_line}"
+        f"runner_role: {runner_role}\n"
         "accounts:\n"
         "  scenario-a:\n"
         '    PRIMARY: "111122223333"\n'
@@ -87,14 +89,35 @@ def test_already_active_runner_role_is_not_self_assumed(tmp_path: Path, monkeypa
     regional.assert_called_once_with(session, "us-east-1")
 
 
-def test_no_runner_role_uses_ambient_same_account(tmp_path: Path, monkeypatch):
-    _activate(tmp_path, monkeypatch, None)
-    provider, session = _provider()
-    with patch("aws_bench.utils.credentials_provider.create_regional_session") as regional:
-        provider.get_session_for_account(
-            "111122223333", "OrganizationAccountAccessRole", "aws-bench-test"
-        )
-    regional.assert_called_once_with(session, "us-east-1")
+def test_unnamed_role_assumes_runner_not_caller_credentials(tmp_path: Path, monkeypatch):
+    """A task with no role_name gets the runner role, even when the caller sits in the account.
+
+    The caller here is an admin identity inside the target account, so reusing the
+    ambient session would hand the task the operator's own credentials.
+    """
+    _activate(tmp_path, monkeypatch)
+    provider, _ = _provider(arn="arn:aws:sts::111122223333:assumed-role/Admin/operator")
+    provider.assume_role = MagicMock(
+        return_value={
+            "AWS_ACCESS_KEY_ID": "runner-key",
+            "AWS_SECRET_ACCESS_KEY": "runner-secret",
+            "AWS_SESSION_TOKEN": "runner-token",
+        }
+    )
+
+    credentials = provider.chain_assume_role("111122223333", "aws-bench-task", role_name=None)
+
+    provider.assume_role.assert_called_once_with(
+        "111122223333", "AWSBenchRunner", "aws-bench-task", duration_seconds=3600
+    )
+    assert credentials["AWS_ACCESS_KEY_ID"] == "runner-key"
+
+
+def test_account_outside_allowlist_is_refused(tmp_path: Path, monkeypatch):
+    _activate(tmp_path, monkeypatch)
+    provider, _ = _provider()
+    with pytest.raises(AccountResolutionError, match="not in the active pre-existing allowlist"):
+        provider.chain_assume_role("999988887777", "aws-bench-test")
 
 
 def test_static_task_credentials_chain_through_runner(tmp_path: Path, monkeypatch):

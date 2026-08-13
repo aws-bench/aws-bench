@@ -95,6 +95,12 @@ class AccountManager:
         """
         if self._preexisting is not None:
             self._require_preexisting_name(ou_name)
+            if self._state_store is not None:
+                self._state_store.initialize()
+                logger.info(
+                    "Pre-existing account mode: contamination state at %s.",
+                    self._state_store.path,
+                )
             logger.info("Pre-existing account mode: skipping Organization, OU, and SCP creation.")
             return "preexisting"
 

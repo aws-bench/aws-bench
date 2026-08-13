@@ -23,6 +23,8 @@ from aws_bench.resource_management.snapshot.models import (
     StackMetadata,
 )
 from aws_bench.resource_management.storage.exceptions import StorageConflictError
+from aws_bench.resource_management.storage.local_backend import LocalStorageBackend
+from aws_bench.resource_management.storage.s3_backend import S3StorageBackend
 
 
 def create_test_manager() -> SnapshotManager:
@@ -43,6 +45,34 @@ def temp_snapshot_dir():
     """Create temporary directory for snapshots."""
     with tempfile.TemporaryDirectory() as tmpdir:
         yield Path(tmpdir)
+
+
+def test_preexisting_mode_stores_state_on_local_disk(tmp_path, monkeypatch, sample_snapshot):
+    """No management account holds a bucket, and one in the test account is agent-reachable."""
+    monkeypatch.setattr(
+        "aws_bench.resource_management.snapshot.manager.STATE_DIR", tmp_path / "state"
+    )
+    monkeypatch.setattr(
+        "aws_bench.resource_management.snapshot.manager.active_account_config",
+        lambda: (MagicMock(), Path("accounts.yaml")),
+    )
+    manager = SnapshotManager()
+
+    assert isinstance(manager._storage, LocalStorageBackend)
+
+    manager.save_snapshot("env-test", sample_snapshot)
+
+    written = tmp_path / "state/snapshots/env-test/post-setup/123456789012/baseline.json"
+    assert json.loads(written.read_text())["account_id"] == "123456789012"
+
+
+def test_managed_mode_still_uses_the_s3_state_bucket(monkeypatch):
+    monkeypatch.setattr(
+        "aws_bench.resource_management.snapshot.manager.active_account_config", lambda: None
+    )
+    with mock_aws():
+        manager = create_test_manager()
+        assert isinstance(manager._storage, S3StorageBackend)
 
 
 @pytest.fixture
@@ -80,13 +110,13 @@ def test_snapshot_manager_initialization(temp_snapshot_dir):
     """
     manager = create_test_manager()
     # S3 backend is not initialized yet (lazy)
-    assert manager._s3_backend is None
+    assert manager._backend is None
     assert manager._etags == {}
 
     # Access _storage property to trigger lazy initialization
     storage = manager._storage
     assert storage is not None
-    assert manager._s3_backend is not None
+    assert manager._backend is not None
 
 
 @mock_aws
@@ -102,7 +132,7 @@ def test_lazy_initialization_avoids_s3_cost_for_non_storage_operations(temp_snap
     manager = create_test_manager()
 
     # S3 backend is not initialized on construction
-    assert manager._s3_backend is None
+    assert manager._backend is None
 
     # Verify S3 is only initialized when storage operations are called
     # (not when CloudFormation-only code paths run)

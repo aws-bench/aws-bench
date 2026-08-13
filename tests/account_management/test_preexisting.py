@@ -6,13 +6,17 @@ from unittest.mock import patch
 import pytest
 from pydantic import ValidationError
 
-from aws_bench.account_management.exceptions import AccountResolutionError
+from aws_bench.account_management.exceptions import (
+    AccountResolutionError,
+    ContaminationStateMissingError,
+)
 from aws_bench.account_management.manager import AccountManager
 from aws_bench.account_management.preexisting import (
     ACCOUNT_CONFIG_ENV_VAR,
     PreexistingStateStore,
     load_account_config,
 )
+from aws_bench.constants import STATE_DIR
 
 
 def _write_config(tmp_path: Path, body: str | None = None) -> Path:
@@ -24,6 +28,7 @@ schema_version: "1.0"
 mode: preexisting
 name: aws-bench
 runner_role: AWSBenchRunner
+state_file: ./state.json
 accounts:
   scenario-a:
     PRIMARY: "111122223333"
@@ -45,6 +50,7 @@ def test_duplicate_account_assignment_is_rejected(tmp_path: Path):
         """
 mode: preexisting
 name: aws-bench
+runner_role: AWSBenchRunner
 accounts:
   scenario-a: {PRIMARY: "111122223333"}
   scenario-b: {PRIMARY: "111122223333"}
@@ -52,6 +58,40 @@ accounts:
     )
     with pytest.raises(ValidationError, match="cannot host concurrent scenario baselines"):
         load_account_config(path)
+
+
+def test_runner_role_is_required(tmp_path: Path):
+    """Without runner_role an unnamed task role would fall back to the caller's own creds."""
+    path = _write_config(
+        tmp_path,
+        """
+mode: preexisting
+name: aws-bench
+accounts:
+  scenario-a: {PRIMARY: "111122223333"}
+""",
+    )
+    with pytest.raises(ValidationError, match="runner_role"):
+        load_account_config(path)
+
+
+def test_state_file_defaults_outside_the_config_directory(tmp_path: Path):
+    """The default keeps contamination state with the snapshots, not next to the config."""
+    config = load_account_config(
+        _write_config(
+            tmp_path,
+            """
+mode: preexisting
+name: acme-benchmark
+runner_role: AWSBenchRunner
+accounts:
+  scenario-a: {PRIMARY: "111122223333"}
+""",
+        )
+    )
+    assert config.resolve_state_file(tmp_path / "accounts.yaml") == (
+        STATE_DIR / "acme-benchmark-contamination.json"
+    )
 
 
 def test_missing_scenario_or_tag_is_rejected(tmp_path: Path):
@@ -64,10 +104,33 @@ def test_missing_scenario_or_tag_is_rejected(tmp_path: Path):
 
 def test_state_store_persists_and_clears(tmp_path: Path):
     store = PreexistingStateStore(tmp_path / "state.json")
+    store.initialize()
     store.mark("111122223333")
     assert PreexistingStateStore(tmp_path / "state.json").contaminated() == {"111122223333"}
     store.clear("111122223333")
     assert store.contaminated() == set()
+
+
+def test_missing_state_file_is_not_read_as_clean(tmp_path: Path):
+    """A deleted or misplaced file must not clear contamination for every account."""
+    store = PreexistingStateStore(tmp_path / "state.json")
+    with pytest.raises(ContaminationStateMissingError, match="missing"):
+        store.contaminated()
+
+    store.initialize()
+    store.mark("111122223333")
+    (tmp_path / "state.json").unlink()
+    with pytest.raises(ContaminationStateMissingError, match="missing"):
+        store.contaminated()
+
+
+def test_initialize_is_idempotent_and_preserves_flags(tmp_path: Path):
+    store = PreexistingStateStore(tmp_path / "state.json")
+    store.initialize()
+    assert store.contaminated() == set()
+    store.mark("111122223333")
+    store.initialize()
+    assert store.contaminated() == {"111122223333"}
 
 
 @pytest.mark.asyncio

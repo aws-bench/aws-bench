@@ -673,10 +673,9 @@ async def _provision_account_lifecycle(
                 )
                 await asyncio.to_thread(session.client("sts").get_caller_identity)
             except Exception as exc:  # noqa: BLE001
-                role_label = runner_role or "ambient account identity"
                 logger.error(
-                    "Runner identity %s is unavailable in %s: %s",
-                    role_label,
+                    "Runner role %s is unavailable in %s: %s",
+                    runner_role,
                     account_id,
                     exc,
                 )

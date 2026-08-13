@@ -336,16 +336,26 @@ class CredentialProvider:
         )
         return assumed_credentials_dict_to_credentials_env(response["Credentials"])
 
-    def _preexisting_role(self, account_id: str, role_name: str | None) -> str | None:
+    def _preexisting_role(self, account_id: str, role_name: str | None) -> str:
         """Resolve the direct role used for an externally owned account.
 
         ``OrganizationAccountAccessRole`` is an implementation detail of accounts
         created by aws-bench.  In pre-existing mode it means "the configured
         runner identity" instead.  Explicit task roles remain explicit.
+
+        Always returns a role name: the config requires ``runner_role``, so an
+        unnamed role resolves to it rather than to the caller's own credentials.
+
+        Raises:
+            CredentialError: If no config is active.
+            AccountResolutionError: If ``account_id`` is outside the allowlist.
         """
         active = active_account_config()
         if active is None:
-            return None
+            raise CredentialError(
+                f"No pre-existing account config is active; cannot resolve a role for "
+                f"account {account_id}"
+            )
         config, _ = active
         allowed = {
             configured_id for tags in config.accounts.values() for configured_id in tags.values()
@@ -394,17 +404,11 @@ class CredentialProvider:
         if preexisting is not None:
             config, _ = preexisting
             target_role = self._preexisting_role(account_id, role_name)
-            if target_role is None or self._ambient_is_target_role(account_id, target_role):
-                if self.get_caller_account_id() != account_id:
-                    raise CredentialError(
-                        "Pre-existing mode has no runner_role and ambient credentials "
-                        f"belong to account {self.get_caller_account_id()}, not {account_id}"
-                    )
+            # Already running as the target role — self-assume would fail, so reuse it.
+            if self._ambient_is_target_role(account_id, target_role):
                 return session_to_env_credentials(self._session)
-            if (
-                config.runner_role is not None
-                and target_role != config.runner_role
-                and not self._ambient_is_target_role(account_id, config.runner_role)
+            if target_role != config.runner_role and not self._ambient_is_target_role(
+                account_id, config.runner_role
             ):
                 runner_creds = self.assume_role(
                     account_id,
@@ -543,18 +547,12 @@ class CredentialProvider:
         if preexisting is not None:
             config, _ = preexisting
             target_role = self._preexisting_role(account_id, role_name)
-            if target_role is None or self._ambient_is_target_role(account_id, target_role):
-                if self.get_caller_account_id() != account_id:
-                    raise CredentialError(
-                        "Pre-existing mode has no runner_role and ambient credentials "
-                        f"belong to account {self.get_caller_account_id()}, not {account_id}"
-                    )
+            # Already running as the target role — self-assume would fail, so reuse it.
+            if self._ambient_is_target_role(account_id, target_role):
                 return create_regional_session(self._session, region)
             parent_session = self._session
-            if (
-                config.runner_role is not None
-                and target_role != config.runner_role
-                and not self._ambient_is_target_role(account_id, config.runner_role)
+            if target_role != config.runner_role and not self._ambient_is_target_role(
+                account_id, config.runner_role
             ):
                 runner_arn = f"arn:aws:iam::{account_id}:role/{config.runner_role}"
                 parent_session = _create_refreshable_session(

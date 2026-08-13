@@ -9,6 +9,8 @@ Use this mode when the Organization is centrally administered and aws-bench is n
 allowed to create or close accounts. It is a new aws-bench backend, not a mode that
 the upstream benchmark previously supplied.
 
+This mode is experimental.
+
 ## Configuration
 
 Start from
@@ -17,7 +19,7 @@ Start from
 ```yaml
 schema_version: "1.0"
 mode: preexisting
-name: aws-bench
+name: acme-benchmark
 accounts:
   ec2-multiregion:
     PRIMARY: "111122223333"
@@ -28,7 +30,7 @@ Pass the file as a global option, before the command:
 
 ```bash
 uv run aws-bench --account-config ./accounts.yaml env init \
-  --env-name aws-bench -d aws-bench-quickstart@0.7.0
+  --env-name acme-benchmark -d aws-bench-quickstart@0.7.0
 ```
 
 `AWSBENCH_ACCOUNT_CONFIG=/path/to/accounts.yaml` is equivalent. A config is an
@@ -38,34 +40,76 @@ because each scenario needs its own clean baseline. With one physical account, r
 one scenario wave at a time and use a different config for the next wave after a
 successful cleanup.
 
+`name` must not match an OU name the managed backend uses. One organization can host
+both modes, and a shared name makes each mode resolve the other's environment.
+
+## Prerequisites the external platform owns
+
+aws-bench does not create any of these, and `env init` fails if one is missing:
+
+1. The member accounts named in the config.
+2. `runner_role` in each account, assumable by the identity running aws-bench.
+3. A `cfn-service-execution` role in each account, trusting
+   `cloudformation.amazonaws.com` with permission to delete the scenario's stacks.
+   Cleanup passes it as `RoleARN` on `DeleteStack` so teardown does not depend on the
+   CDK bootstrap role.
+4. Service quotas already meeting the scenario's requirements. aws-bench verifies
+   quotas in this mode and does not request increases, so an unmet quota fails
+   `env init` rather than opening a support case.
+5. **A region-restriction SCP** limiting each account to the scenario's declared
+   regions.
+
 ## What `env init` does
 
 In pre-existing mode, `env init` does not create an Organization, OU, account, SCP,
 IAM role, or quota request. It validates:
 
 - the scenario/account mapping;
-- the ambient identity or configured `runner_role` can enter the account;
+- the configured `runner_role` can enter the account;
 - the externally provisioned `cfn-service-execution` role exists;
 - current service quotas already meet the scenario requirements.
 
-It then captures the pristine pre-setup baseline. The baseline uses the account's
-`awsbench-state-<account-id>` S3 bucket and therefore may create/configure that
-benchmark-owned bucket on first use. Resource discovery runs in the process rather
-than through the management-account scanner Lambda.
+It then creates the contamination state file and captures the pristine pre-setup
+baseline. Resource discovery runs in the process rather than through the
+management-account scanner Lambda, which assumes a role and lives in an account that
+does not exist in this mode.
 
-`env terminate` is disabled. Contamination flags are kept in the config's adjacent
-`.state.json` file, or in `state_file` when specified; place that file on persistent
-storage for SLURM runs.
+`env terminate` is disabled: it refuses before issuing any Organizations call.
+
+## The region guardrail is not verified
+
+**aws-bench does not check that the region-restriction SCP exists or is in force.**
+Confirming it is the operator's responsibility.
+
+This matters more than it looks. Cleanup discovers resources only in the regions the
+scenario declares, and that set is a boundary only if something actually denies the
+others. With no SCP in force, an agent holding broad permissions can create resources
+in an unscanned region, and cleanup will not find them — they persist after teardown
+reports success.
+
+## Where benchmark state lives
+
+Baseline snapshots and contamination flags are written to `~/.aws-bench/state/`, on
+the host running aws-bench. Nothing benchmark-specific is written into an account
+under test, so no state sits where a task's agent could read or modify it.
+
+The consequence is that state is host-local. A run must reach `env cleanup` from the
+same machine that ran `env setup`; another host sees no baseline. Set `state_file` to
+put the contamination marker on shared persistent storage for cluster runs.
+
+Contamination flags fail closed: if the state file is missing, aws-bench raises rather
+than reading the absence as "no accounts contaminated".
 
 ## Credentials, in plain language
 
-For the managed `aws-bench` account, set `runner_role: AWSBenchRunner`. An interactive
-IAM Identity Center `SolutionsAdmin` session can assume it; an unattended workload
-identity will need the same trust path. Explicit per-task roles are assumed directly
-from that runner identity; aws-bench no longer routes through
-`OrganizationAccountAccessRole`, which exists only in accounts created by the original
-benchmark flow.
+`runner_role` is required. An interactive IAM Identity Center session can assume it; an
+unattended workload identity needs the same trust path. Explicit per-task roles are
+assumed from that runner identity. A task that names no role runs as the runner role —
+aws-bench never falls back to the credentials of whoever invoked it.
 
-Do not use long-lived access keys. An unattended SLURM run needs a renewable workload
+aws-bench does not route through `OrganizationAccountAccessRole` in this mode; that
+role exists only in accounts the managed backend created.
+
+Do not use long-lived access keys. An unattended batch run needs a renewable workload
 identity that can assume the runner role. An interactive SSO login proves human access,
 but its browser session is not a durable 24-hour batch-job identity.

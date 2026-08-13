@@ -8,20 +8,22 @@ there and never creates, moves, tags, or closes an AWS account.
 
 from __future__ import annotations
 
-import fcntl
 import json
 import os
 import tempfile
-from collections.abc import Iterator
-from contextlib import contextmanager
 from pathlib import Path
-from typing import Annotated, Literal, TextIO
+from typing import Annotated, Literal
 
 import yaml
 from pydantic import BaseModel, Field, StringConstraints, model_validator
 
-from aws_bench.account_management.exceptions import AccountResolutionError
+from aws_bench.account_management.exceptions import (
+    AccountResolutionError,
+    ContaminationStateMissingError,
+)
 from aws_bench.account_management.models import OrgInfo, ScenarioAccount, TestEnvironment
+from aws_bench.constants import STATE_DIR
+from aws_bench.utils.filelock import file_lock
 
 ACCOUNT_CONFIG_ENV_VAR = "AWSBENCH_ACCOUNT_CONFIG"
 
@@ -35,7 +37,7 @@ class PreexistingEnvironmentConfig(BaseModel):
     mode: Literal["preexisting"] = "preexisting"
     name: str = Field(min_length=1)
     accounts: dict[str, dict[str, AccountId]]
-    runner_role: str | None = Field(default=None, min_length=1)
+    runner_role: str = Field(min_length=1)
     state_file: Path | None = None
 
     @model_validator(mode="after")
@@ -61,9 +63,14 @@ class PreexistingEnvironmentConfig(BaseModel):
         return self
 
     def resolve_state_file(self, config_path: Path) -> Path:
-        """Return the persistent contamination-state path for this config."""
+        """Return the persistent contamination-state path for this config.
+
+        Defaults under ``STATE_DIR``, alongside the baseline snapshots, so no
+        benchmark state lands in an account under test. A relative ``state_file``
+        override resolves against the config's directory.
+        """
         if self.state_file is None:
-            return config_path.with_suffix(config_path.suffix + ".state.json")
+            return STATE_DIR / f"{self.name}-contamination.json"
         if self.state_file.is_absolute():
             return self.state_file
         return config_path.parent / self.state_file
@@ -152,42 +159,53 @@ class PreexistingStateStore:
     """Small, lock-protected local store for fail-closed contamination flags."""
 
     def __init__(self, path: Path) -> None:
-        """Store state at ``path`` and serialize access with a sibling lock."""
+        """Store state at ``path``, serializing access with a sibling lock."""
         self.path = path
-        self.lock_path = path.with_suffix(path.suffix + ".lock")
 
-    @contextmanager
-    def _locked(self) -> Iterator[TextIO]:
-        self.lock_path.parent.mkdir(parents=True, exist_ok=True)
-        with self.lock_path.open("a+", encoding="utf-8") as lock_file:
-            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
-            try:
-                yield lock_file
-            finally:
-                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+    def initialize(self) -> None:
+        """Create the state file with no accounts flagged, if it does not exist.
+
+        Every other operation treats an absent file as an error, so this is the
+        one place the file comes into being.
+        """
+        with file_lock(self.path):
+            if not self.path.exists():
+                self._write_unlocked(set())
 
     def contaminated(self) -> set[str]:
         """Return all locally flagged account IDs."""
-        with self._locked():
+        with file_lock(self.path):
             return self._read_unlocked()
 
     def mark(self, account_id: str) -> None:
         """Persist a contamination flag."""
-        with self._locked():
+        with file_lock(self.path):
             values = self._read_unlocked()
             values.add(account_id)
             self._write_unlocked(values)
 
     def clear(self, account_id: str) -> None:
         """Clear a contamination flag idempotently."""
-        with self._locked():
+        with file_lock(self.path):
             values = self._read_unlocked()
             values.discard(account_id)
             self._write_unlocked(values)
 
     def _read_unlocked(self) -> set[str]:
+        """Read the flagged account IDs.
+
+        Raises:
+            ContaminationStateMissingError: If the file is absent. An empty set
+                means "nothing is contaminated", so a deleted or misplaced file
+                must not be readable as one.
+        """
         if not self.path.exists():
-            return set()
+            raise ContaminationStateMissingError(
+                f"Contamination state file is missing: {self.path}. It records which "
+                "accounts are unsafe to reuse, so aws-bench cannot treat its absence "
+                "as 'no accounts contaminated'. Run 'aws-bench env init' to create it, "
+                "or restore the file from where it was moved."
+            )
         payload = json.loads(self.path.read_text())
         return set(payload.get("contaminated_account_ids", []))
 
