@@ -17,6 +17,7 @@ from typing import Annotated, Literal
 import yaml
 from pydantic import BaseModel, Field, StringConstraints, model_validator
 
+from aws_bench.account_management.constants import CFN_OPS_ROLE_NAME
 from aws_bench.account_management.exceptions import (
     AccountResolutionError,
     ContaminationStateMissingError,
@@ -38,6 +39,7 @@ class PreexistingEnvironmentConfig(BaseModel):
     name: str = Field(min_length=1)
     accounts: dict[str, dict[str, AccountId]]
     runner_role: str = Field(min_length=1)
+    cfn_role: str = Field(min_length=1)
     state_file: Path | None = None
 
     @model_validator(mode="after")
@@ -153,6 +155,18 @@ def active_account_config() -> tuple[PreexistingEnvironmentConfig, Path] | None:
         return None
     path = Path(raw_path).expanduser().resolve()
     return load_account_config(path), path
+
+
+def effective_cfn_role() -> str:
+    """Return the CloudFormation execution role name for the active account backend.
+
+    Externally owned accounts name the role in their config; accounts aws-bench
+    created carry the role it made, :data:`CFN_OPS_ROLE_NAME`.
+    """
+    active = active_account_config()
+    if active is None:
+        return CFN_OPS_ROLE_NAME
+    return active[0].cfn_role
 
 
 class PreexistingStateStore:

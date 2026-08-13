@@ -18,6 +18,7 @@ def _activate(
         "mode: preexisting\n"
         "name: aws-bench\n"
         f"runner_role: {runner_role}\n"
+        "cfn_role: cfn-service-execution\n"
         "accounts:\n"
         "  scenario-a:\n"
         '    PRIMARY: "111122223333"\n'

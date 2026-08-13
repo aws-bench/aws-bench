@@ -41,6 +41,7 @@ from pydantic import BaseModel, Field
 from aws_bench.account_management.constants import CFN_OPS_ROLE_NAME, ORG_ACCESS_ROLE
 from aws_bench.account_management.exceptions import AccountCreationError
 from aws_bench.account_management.manager import AccountManager
+from aws_bench.account_management.preexisting import effective_cfn_role
 from aws_bench.exceptions import OperationCancelled
 from aws_bench.logging.logger import get_logger, log_context
 from aws_bench.resource_management.fastscan.lambda_deploy import ensure_deployed
@@ -633,7 +634,7 @@ def _validate_cfn_ops_role(cred_provider: CredentialProvider, account_id: str) -
     session = cred_provider.get_session_for_account(
         account_id, ORG_ACCESS_ROLE, "aws-bench-cfn-ops-role-validate"
     )
-    session.client("iam").get_role(RoleName=CFN_OPS_ROLE_NAME)
+    session.client("iam").get_role(RoleName=effective_cfn_role())
 
 
 async def _provision_account_lifecycle(

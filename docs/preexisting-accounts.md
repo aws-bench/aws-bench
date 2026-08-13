@@ -24,6 +24,7 @@ accounts:
   ec2-multiregion:
     PRIMARY: "111122223333"
 runner_role: AWSBenchRunner
+cfn_role: cfn-service-execution
 ```
 
 Pass the file as a global option, before the command:
@@ -49,10 +50,12 @@ aws-bench does not create any of these, and `env init` fails if one is missing:
 
 1. The member accounts named in the config.
 2. `runner_role` in each account, assumable by the identity running aws-bench.
-3. A `cfn-service-execution` role in each account, trusting
+3. The role named by `cfn_role` in each account, trusting
    `cloudformation.amazonaws.com` with permission to delete the scenario's stacks.
    Cleanup passes it as `RoleARN` on `DeleteStack` so teardown does not depend on the
-   CDK bootstrap role.
+   CDK bootstrap role. It may be the same role as `runner_role`, provided that role's
+   trust policy admits both `cloudformation.amazonaws.com` and whoever assumes the
+   runner identity.
 4. Service quotas already meeting the scenario's requirements. aws-bench verifies
    quotas in this mode and does not request increases, so an unmet quota fails
    `env init` rather than opening a support case.
@@ -66,7 +69,7 @@ IAM role, or quota request. It validates:
 
 - the scenario/account mapping;
 - the configured `runner_role` can enter the account;
-- the externally provisioned `cfn-service-execution` role exists;
+- the role named by `cfn_role` exists;
 - current service quotas already meet the scenario requirements.
 
 It then creates the contamination state file and captures the pristine pre-setup

@@ -6,6 +6,7 @@ from unittest.mock import patch
 import pytest
 from pydantic import ValidationError
 
+from aws_bench.account_management.constants import CFN_OPS_ROLE_NAME
 from aws_bench.account_management.exceptions import (
     AccountResolutionError,
     ContaminationStateMissingError,
@@ -14,6 +15,7 @@ from aws_bench.account_management.manager import AccountManager
 from aws_bench.account_management.preexisting import (
     ACCOUNT_CONFIG_ENV_VAR,
     PreexistingStateStore,
+    effective_cfn_role,
     load_account_config,
 )
 from aws_bench.constants import STATE_DIR
@@ -28,6 +30,7 @@ schema_version: "1.0"
 mode: preexisting
 name: aws-bench
 runner_role: AWSBenchRunner
+cfn_role: cfn-service-execution
 state_file: ./state.json
 accounts:
   scenario-a:
@@ -51,6 +54,7 @@ def test_duplicate_account_assignment_is_rejected(tmp_path: Path):
 mode: preexisting
 name: aws-bench
 runner_role: AWSBenchRunner
+cfn_role: cfn-service-execution
 accounts:
   scenario-a: {PRIMARY: "111122223333"}
   scenario-b: {PRIMARY: "111122223333"}
@@ -84,6 +88,7 @@ def test_state_file_defaults_outside_the_config_directory(tmp_path: Path):
 mode: preexisting
 name: acme-benchmark
 runner_role: AWSBenchRunner
+cfn_role: cfn-service-execution
 accounts:
   scenario-a: {PRIMARY: "111122223333"}
 """,
@@ -92,6 +97,41 @@ accounts:
     assert config.resolve_state_file(tmp_path / "accounts.yaml") == (
         STATE_DIR / "acme-benchmark-contamination.json"
     )
+
+
+def test_cfn_role_is_required(tmp_path: Path):
+    """Cleanup passes it as RoleARN on DeleteStack, so it cannot be guessed."""
+    path = _write_config(
+        tmp_path,
+        """
+mode: preexisting
+name: aws-bench
+runner_role: AWSBenchRunner
+accounts:
+  scenario-a: {PRIMARY: "111122223333"}
+""",
+    )
+    with pytest.raises(ValidationError, match="cfn_role"):
+        load_account_config(path)
+
+
+def test_effective_cfn_role_follows_the_active_backend(tmp_path: Path, monkeypatch):
+    """Managed accounts carry the role aws-bench made; external ones name their own."""
+    assert effective_cfn_role() == CFN_OPS_ROLE_NAME
+
+    config = _write_config(
+        tmp_path,
+        """
+mode: preexisting
+name: aws-bench
+runner_role: OrganizationAccountAccessRole
+cfn_role: OrganizationAccountAccessRole
+accounts:
+  scenario-a: {PRIMARY: "111122223333"}
+""",
+    )
+    monkeypatch.setenv(ACCOUNT_CONFIG_ENV_VAR, str(config))
+    assert effective_cfn_role() == "OrganizationAccountAccessRole"
 
 
 def test_missing_scenario_or_tag_is_rejected(tmp_path: Path):

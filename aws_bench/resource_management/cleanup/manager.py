@@ -16,7 +16,7 @@ from pathlib import Path
 import boto3
 from botocore.exceptions import ClientError
 
-from aws_bench.account_management.constants import CFN_OPS_ROLE_NAME
+from aws_bench.account_management.preexisting import effective_cfn_role
 from aws_bench.constants import OUTPUT_DIR
 from aws_bench.exceptions import OperationCancelled
 from aws_bench.logging.logger import get_logger, log_context
@@ -98,7 +98,7 @@ class CleanupManager:
     def _cfn_role_arn(self) -> str | None:
         """CFN ops role ARN derived from account ID, or None (fallback to stack's role)."""
         if self._account_id:
-            return f"arn:aws:iam::{self._account_id}:role/{CFN_OPS_ROLE_NAME}"
+            return f"arn:aws:iam::{self._account_id}:role/{effective_cfn_role()}"
         return None
 
     async def cleanup_all_stacks(
