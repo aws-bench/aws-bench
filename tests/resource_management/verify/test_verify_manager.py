@@ -16,6 +16,14 @@ from aws_bench.resource_management.snapshot.models import (
 )
 from aws_bench.resource_management.verify.manager import VerifyManager
 
+
+def _empty_scan():
+    """An empty ScanResult for mocking Phase-1 scan_baseline_types in multiregion tests."""
+    from aws_bench.resource_management.ccapi.models import ScanResult
+
+    return ScanResult(detected={}, failed={})
+
+
 # ===========================================================================
 # VerifyManager initialization
 # ===========================================================================
@@ -1175,6 +1183,141 @@ def test_check_new_resources_type_with_baseline_resources_fails_closed_despite_r
     assert result.details["unenumerable_types"] == ["AWS::GameLift::ContainerFleet"]
 
 
+@mock_aws
+@patch("aws_bench.resource_management.verify.manager.make_scanner")
+def test_check_new_resources_tolerates_unknown_operation_exception(mock_scanner_class):
+    """UnknownOperationException (op absent from the region's endpoint) is tolerated."""
+    from aws_bench.resource_management.ccapi.models import ScanResult
+
+    session = boto3.Session(region_name="us-west-1")
+    mock_scanner = MagicMock()
+    mock_scanner.scan_resources.return_value = ScanResult(
+        detected={}, failed={"AWS::SageMaker::Workteam": "UnknownOperationException"}
+    )
+    mock_scanner_class.return_value = mock_scanner
+
+    manager = VerifyManager(session)
+    result = manager._check_new_resources(
+        baseline_resource_ids={},
+        baseline_failed={},
+        baseline_empty={"AWS::SageMaker::Workteam"},
+    )
+    assert result is None
+
+
+@mock_aws
+@patch("aws_bench.resource_management.verify.manager.make_scanner")
+def test_check_new_resources_tolerates_type_enumerable_in_another_region(mock_scanner_class):
+    """Cross-region: a failed baseline-empty type enumerable in another region is tolerated.
+
+    Regardless of its (auth-style) error code — it is region-available there, so it
+    cannot hold an orphan here.
+    """
+    from aws_bench.resource_management.ccapi.models import ScanResult
+
+    session = boto3.Session(region_name="us-west-1")
+    mock_scanner = MagicMock()
+    # AccessDeniedException is NOT in the allow-list, so only cross-region can forgive it.
+    mock_scanner.scan_resources.return_value = ScanResult(
+        detected={}, failed={"AWS::Rekognition::StreamProcessor": "AccessDeniedException"}
+    )
+    mock_scanner_class.return_value = mock_scanner
+
+    manager = VerifyManager(session)
+    result = manager._check_new_resources(
+        baseline_resource_ids={},
+        baseline_failed={},
+        baseline_empty={"AWS::Rekognition::StreamProcessor"},
+        enumerable_elsewhere={"AWS::Rekognition::StreamProcessor"},
+    )
+    assert result is None
+
+
+@mock_aws
+@patch("aws_bench.resource_management.verify.manager.make_scanner")
+def test_check_new_resources_fails_closed_when_type_unenumerable_in_all_regions(
+    mock_scanner_class,
+):
+    """Cross-region: a type enumerable in NO region still fails closed.
+
+    Absent from enumerable_elsewhere and with a non-region-unavailable code — preserving
+    the fail-closed guarantee.
+    """
+    from aws_bench.resource_management.ccapi.models import ScanResult
+
+    session = boto3.Session(region_name="us-west-1")
+    mock_scanner = MagicMock()
+    mock_scanner.scan_resources.return_value = ScanResult(
+        detected={}, failed={"AWS::Rekognition::StreamProcessor": "AccessDeniedException"}
+    )
+    mock_scanner_class.return_value = mock_scanner
+
+    manager = VerifyManager(session)
+    result = manager._check_new_resources(
+        baseline_resource_ids={},
+        baseline_failed={},
+        baseline_empty={"AWS::Rekognition::StreamProcessor"},
+        enumerable_elsewhere=set(),  # enumerated nowhere
+    )
+    assert result is not None
+    assert result.success is False
+    assert result.details["unenumerable_types"] == ["AWS::Rekognition::StreamProcessor"]
+
+
+@mock_aws
+@patch("aws_bench.resource_management.verify.manager.make_scanner")
+def test_check_new_resources_uses_precomputed_scan(mock_scanner_class):
+    """When a precomputed scan is supplied, the region is not re-scanned."""
+    from aws_bench.resource_management.ccapi.models import ScanResult
+
+    session = boto3.Session(region_name="us-east-1")
+    mock_scanner = MagicMock()
+    mock_scanner_class.return_value = mock_scanner
+
+    manager = VerifyManager(session)
+    precomputed = ScanResult(detected={}, failed={})
+    result = manager._check_new_resources(
+        baseline_resource_ids={"AWS::S3::Bucket": [{"Identifier": "b1"}]},
+        baseline_failed={},
+        baseline_empty=set(),
+        precomputed_scan=precomputed,
+    )
+    assert result is None
+    mock_scanner.scan_resources.assert_not_called()
+
+
+@mock_aws
+@patch("aws_bench.resource_management.verify.manager.make_scanner")
+def test_check_new_resources_type_with_resources_not_tolerated_even_if_enumerable_elsewhere(
+    mock_scanner_class,
+):
+    """A type that HAD resources at baseline fails closed even if enumerable elsewhere.
+
+    Cross-region forgiveness is scoped to baseline-empty types; a type we tracked
+    resources for must always be confirmed, never forgiven by another region.
+    """
+    from aws_bench.resource_management.ccapi.models import ScanResult
+
+    session = boto3.Session(region_name="us-west-1")
+    mock_scanner = MagicMock()
+    mock_scanner.scan_resources.return_value = ScanResult(
+        detected={}, failed={"AWS::Rekognition::StreamProcessor": "AccessDeniedException"}
+    )
+    mock_scanner_class.return_value = mock_scanner
+
+    manager = VerifyManager(session)
+    result = manager._check_new_resources(
+        # Had resources at baseline -> must fail closed regardless of cross-region status.
+        baseline_resource_ids={"AWS::Rekognition::StreamProcessor": [{"Identifier": "sp-1"}]},
+        baseline_failed={},
+        baseline_empty=set(),
+        enumerable_elsewhere={"AWS::Rekognition::StreamProcessor"},
+    )
+    assert result is not None
+    assert result.success is False
+    assert result.details["unenumerable_types"] == ["AWS::Rekognition::StreamProcessor"]
+
+
 # ===========================================================================
 # find_orphan_resources — reset's orphan/scan-health census wrapper
 # ===========================================================================
@@ -1416,7 +1559,10 @@ def test_verify_account_multiregion_success(mock_snapshot_mgr_class):
     mock_snapshot_mgr.load_snapshot.return_value = mock_snapshot
     mock_snapshot_mgr_class.return_value = mock_snapshot_mgr
 
-    with patch.object(VerifyManager, "verify_account_state") as mock_verify:
+    with (
+        patch.object(VerifyManager, "verify_account_state") as mock_verify,
+        patch.object(VerifyManager, "scan_baseline_types", return_value=_empty_scan()),
+    ):
         from aws_bench.resource_management.verify.models import VerifyResult
 
         mock_verify.return_value = VerifyResult(success=True, reason="OK")
@@ -1498,8 +1644,9 @@ def test_verify_account_multiregion_region_failure(mock_snapshot_mgr_class):
             return VerifyResult(success=False, reason="Drift detected")
         return VerifyResult(success=True, reason="OK")
 
-    with patch.object(
-        VerifyManager, "verify_account_state", autospec=True, side_effect=mock_verify
+    with (
+        patch.object(VerifyManager, "verify_account_state", autospec=True, side_effect=mock_verify),
+        patch.object(VerifyManager, "scan_baseline_types", return_value=_empty_scan()),
     ):
         manager = VerifyManager(session)
         result = manager.verify_account_multiregion("test-env", "123456789012", "env-1")
@@ -1545,8 +1692,9 @@ def test_verify_account_multiregion_isolates_region_exception(mock_snapshot_mgr_
             raise RuntimeError("boom in us-west-2")
         return VerifyResult(success=True, reason="OK")
 
-    with patch.object(
-        VerifyManager, "verify_account_state", autospec=True, side_effect=mock_verify
+    with (
+        patch.object(VerifyManager, "verify_account_state", autospec=True, side_effect=mock_verify),
+        patch.object(VerifyManager, "scan_baseline_types", return_value=_empty_scan()),
     ):
         manager = VerifyManager(session)
         result = manager.verify_account_multiregion("test-env", "123456789012", "env-1")
@@ -1594,9 +1742,107 @@ def test_verify_account_multiregion_propagates_cancel(mock_snapshot_mgr_class):
     def mock_verify(self, *args, **kwargs):
         raise OperationCancelled("shutdown")
 
-    with patch.object(
-        VerifyManager, "verify_account_state", autospec=True, side_effect=mock_verify
+    with (
+        patch.object(VerifyManager, "verify_account_state", autospec=True, side_effect=mock_verify),
+        patch.object(VerifyManager, "scan_baseline_types", return_value=_empty_scan()),
     ):
         manager = VerifyManager(session)
         with pytest.raises(OperationCancelled):
             manager.verify_account_multiregion("test-env", "123456789012", "env-1")
+
+
+@mock_aws
+@patch("aws_bench.resource_management.verify.manager.make_scanner")
+@patch("aws_bench.resource_management.verify.manager.SnapshotManager")
+def test_verify_account_multiregion_forgives_type_enumerable_in_another_region(
+    mock_snapshot_mgr_class, _mock_make_scanner
+):
+    """End-to-end: a type failing in one region but enumerable in another is forgiven.
+
+    The whole account verify passes (cross-region corroboration). us-west-1 can't
+    enumerate Rekognition::StreamProcessor (AccessDenied — service unavailable there),
+    but us-east-1 enumerates it empty. The type is region-available
+    in us-east-1, so it cannot hold an orphan in us-west-1 → us-west-1 is forgiven.
+    """
+    from aws_bench.resource_management.ccapi.models import ScanResult
+
+    session = boto3.Session(region_name="us-east-1")
+    mock_snapshot = Snapshot(
+        timestamp=datetime.now(timezone.utc),
+        account_id="123456789012",
+        environment_id="test-env",
+        scenario_hash="v1.0",
+        drift_baseline={},
+        stack_metadata={},
+        resource_ids={},
+        empty_resource_types={"AWS::Rekognition::StreamProcessor"},
+        regions=["us-east-1", "us-west-1"],
+    )
+    mock_snapshot_mgr = MagicMock()
+    mock_snapshot_mgr.load_snapshot.return_value = mock_snapshot
+    mock_snapshot_mgr_class.return_value = mock_snapshot_mgr
+
+    def per_region_scan(self, _snapshot):
+        if self._region_name == "us-west-1":
+            return ScanResult(
+                detected={}, failed={"AWS::Rekognition::StreamProcessor": "AccessDeniedException"}
+            )
+        return ScanResult(detected={}, empty={"AWS::Rekognition::StreamProcessor"}, failed={})
+
+    # Real verify_account_state runs (empty stacks/drift => only _check_new_resources matters).
+    with patch.object(
+        VerifyManager, "scan_baseline_types", autospec=True, side_effect=per_region_scan
+    ):
+        manager = VerifyManager(session)
+        result = manager.verify_account_multiregion("test-env", "123456789012", "env-1")
+
+    assert result.success is True
+    assert {r.region: r.success for r in result.region_results} == {
+        "us-east-1": True,
+        "us-west-1": True,
+    }
+
+
+@mock_aws
+@patch("aws_bench.resource_management.verify.manager.make_scanner")
+@patch("aws_bench.resource_management.verify.manager.SnapshotManager")
+def test_verify_account_multiregion_fails_when_type_unenumerable_everywhere(
+    mock_snapshot_mgr_class, _mock_make_scanner
+):
+    """End-to-end: a type failing to enumerate in EVERY region still fails the verify.
+
+    With a non-region-unavailable code, cross-region corroboration does not forgive it,
+    preserving the fail-closed guarantee.
+    """
+    from aws_bench.resource_management.ccapi.models import ScanResult
+
+    session = boto3.Session(region_name="us-east-1")
+    mock_snapshot = Snapshot(
+        timestamp=datetime.now(timezone.utc),
+        account_id="123456789012",
+        environment_id="test-env",
+        scenario_hash="v1.0",
+        drift_baseline={},
+        stack_metadata={},
+        resource_ids={},
+        empty_resource_types={"AWS::Rekognition::StreamProcessor"},
+        regions=["us-east-1", "us-west-1"],
+    )
+    mock_snapshot_mgr = MagicMock()
+    mock_snapshot_mgr.load_snapshot.return_value = mock_snapshot
+    mock_snapshot_mgr_class.return_value = mock_snapshot_mgr
+
+    def per_region_scan(self, _snapshot):
+        # Fails in BOTH regions with an auth-style (non-region-unavailable) code.
+        return ScanResult(
+            detected={}, failed={"AWS::Rekognition::StreamProcessor": "AccessDeniedException"}
+        )
+
+    with patch.object(
+        VerifyManager, "scan_baseline_types", autospec=True, side_effect=per_region_scan
+    ):
+        manager = VerifyManager(session)
+        result = manager.verify_account_multiregion("test-env", "123456789012", "env-1")
+
+    assert result.success is False
+    assert all(r.success is False for r in result.region_results)
