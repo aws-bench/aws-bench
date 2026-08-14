@@ -990,6 +990,58 @@ def list_eks_addons(session: SessionLike) -> list[str]:
     return out
 
 
+def list_eks_pod_identity_associations(session: SessionLike) -> list[str]:
+    """EKS Pod Identity Associations across every cluster.
+
+    Keyed by the composite id ``clusterName|associationId``.
+    """
+    client = session.client("eks", config=RETRY_CONFIG)
+    clusters: list[str] = []
+    for page in client.get_paginator("list_clusters").paginate():
+        clusters.extend(page.get("clusters", []))
+    results: list[str] = []
+    for cluster in clusters:
+        try:
+            token = None
+            while True:
+                kwargs: dict = {"clusterName": cluster}
+                if token:
+                    kwargs["nextToken"] = token
+                resp = client.list_pod_identity_associations(**kwargs)
+                for assoc in resp.get("associations", []):
+                    results.append(f"{cluster}|{assoc['associationId']}")
+                token = resp.get("nextToken")
+                if not token:
+                    break
+        except ClientError as e:
+            if e.response.get("Error", {}).get("Code") == "ResourceNotFoundException":
+                continue
+            raise
+    return results
+
+
+def list_eks_nodegroups(session: SessionLike) -> list[str]:
+    """EKS Nodegroups across every cluster.
+
+    Keyed by the composite id ``clusterName|nodegroupName``.
+    """
+    client = session.client("eks", config=RETRY_CONFIG)
+    clusters: list[str] = []
+    for page in client.get_paginator("list_clusters").paginate():
+        clusters.extend(page.get("clusters", []))
+    results: list[str] = []
+    for cluster in clusters:
+        try:
+            for page in client.get_paginator("list_nodegroups").paginate(clusterName=cluster):
+                for ng in page.get("nodegroups", []):
+                    results.append(f"{cluster}|{ng}")
+        except ClientError as e:
+            if e.response.get("Error", {}).get("Code") == "ResourceNotFoundException":
+                continue
+            raise
+    return results
+
+
 def list_redshift_clusters_by_identifier(session: SessionLike) -> list[str]:
     """Redshift clusters keyed by ClusterIdentifier (CCAPI's id, not the namespace ARN)."""
     client = session.client("redshift", config=RETRY_CONFIG)
@@ -3179,6 +3231,13 @@ _LISTERS: tuple[Lister, ...] = (
     Lister("ecs", "ListServices", list_ecs_list_services, "AWS::ECS::Service"),
     Lister("logs", "describe_metric_filters", list_logs_metric_filters, "AWS::Logs::MetricFilter"),
     Lister("eks", "ListAddons", list_eks_addons, "AWS::EKS::Addon"),
+    Lister(
+        "eks",
+        "ListPodIdentityAssociations",
+        list_eks_pod_identity_associations,
+        "AWS::EKS::PodIdentityAssociation",
+    ),
+    Lister("eks", "ListNodegroups", list_eks_nodegroups, "AWS::EKS::Nodegroup"),
     Lister(
         "redshift",
         "DescribeClusters",

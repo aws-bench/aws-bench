@@ -1158,7 +1158,7 @@ def test_listers_tuple_is_complete_and_unique():
     default VPC's associated (undeletable) DHCP options set is excluded from orphan reporting.
     """
     listers = cl.custom_listers()
-    assert len(listers) == 155
+    assert len(listers) == 157
     keys = [(lister.service, lister.op) for lister in listers]
     assert len(keys) == len(set(keys))
     assert all(callable(lister.run) for lister in listers)
