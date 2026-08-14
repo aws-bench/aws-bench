@@ -10,7 +10,7 @@ from aws_bench.resource_management.storage.exceptions import (
     StorageError,
     StorageNotFoundError,
 )
-from aws_bench.resource_management.storage.local_backend import LocalStorageBackend
+from aws_bench.resource_management.storage.local_storage_backend import LocalStorageBackend
 
 
 def _backend(tmp_path: Path) -> LocalStorageBackend:

@@ -12,7 +12,7 @@ class SnapshotStorage(Protocol):
     (S3's opaque token, a content hash) and in how far the guarantee reaches:
     :class:`~aws_bench.resource_management.storage.s3_backend.S3StorageBackend`
     is shared by every host, while
-    :class:`~aws_bench.resource_management.storage.local_backend.LocalStorageBackend`
+    :class:`~aws_bench.resource_management.storage.local_storage_backend.LocalStorageBackend`
     is host-local.
     """
 

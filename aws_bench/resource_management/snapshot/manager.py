@@ -44,7 +44,7 @@ from aws_bench.resource_management.storage.exceptions import (
     StorageConflictError,
     StorageNotFoundError,
 )
-from aws_bench.resource_management.storage.local_backend import LocalStorageBackend
+from aws_bench.resource_management.storage.local_storage_backend import LocalStorageBackend
 from aws_bench.resource_management.storage.s3_backend import S3StorageBackend
 from aws_bench.utils.concurrent import build_client, interruptible_executor, raise_if_shutdown
 from aws_bench.utils.credentials_provider import (
