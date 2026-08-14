@@ -2,7 +2,6 @@
 
 import hashlib
 import os
-import sys
 import tempfile
 from pathlib import Path
 
@@ -12,7 +11,8 @@ from aws_bench.resource_management.storage.exceptions import (
     StorageError,
     StorageNotFoundError,
 )
-from aws_bench.utils.filelock import LOCK_SUFFIX, file_lock
+from aws_bench.utils.atomic_write import fsync_dir
+from aws_bench.utils.locking import LOCK_SUFFIX, file_lock
 
 logger = get_logger(__name__)
 
@@ -29,20 +29,6 @@ _FILE_MODE = 0o600
 def _etag(data: bytes) -> str:
     """Return the content hash used as this backend's ETag."""
     return hashlib.sha256(data).hexdigest()
-
-
-def _fsync_dir(path: Path) -> None:
-    """Flush ``path``'s own directory entry, so a rename into it is durable.
-
-    A no-op on Windows, which cannot open a directory as a file descriptor.
-    """
-    if sys.platform == "win32":
-        return
-    fd = os.open(path, os.O_RDONLY)
-    try:
-        os.fsync(fd)
-    finally:
-        os.close(fd)
 
 
 class LocalStorageBackend:
@@ -102,7 +88,7 @@ class LocalStorageBackend:
                 os.fsync(stream.fileno())
             os.chmod(temporary, _FILE_MODE)
             os.replace(temporary, path)
-            _fsync_dir(path.parent)
+            fsync_dir(path.parent)
         finally:
             if os.path.exists(temporary):
                 os.unlink(temporary)
@@ -160,8 +146,8 @@ class LocalStorageBackend:
         path = self._path_for(key)
         logger.debug(f"Loading from {path}")
 
-        # Tested before locking, which would otherwise create the directory and a
-        # lock sidecar for a key that was never written.
+        # Tested before locking, which would otherwise create the directory for a
+        # key that was never written.
         if not path.exists():
             raise StorageNotFoundError(key=self._make_full_key(key))
 
@@ -199,8 +185,8 @@ class LocalStorageBackend:
         """
         path = self._path_for(key)
 
-        # Tested before locking, which would otherwise create the directory and a
-        # lock sidecar for a key that was never written.
+        # Tested before locking, which would otherwise create the directory for a
+        # key that was never written.
         if not path.exists():
             logger.debug(f"Delete is a no-op; {path} is absent")
             return
@@ -217,7 +203,7 @@ class LocalStorageBackend:
 
         Keys are relative to the backend prefix. This backend's own sidecars are
         never keys: ``.<name>.tmp`` while a write is in flight, ``<name>.lock``
-        always.
+        while one is held.
 
         Raises:
             StorageError: If the walk fails

@@ -32,7 +32,8 @@ from aws_bench.account_management.exceptions import (
 )
 from aws_bench.account_management.models import OrgInfo, ScenarioAccount, TestEnvironment
 from aws_bench.constants import STATE_DIR
-from aws_bench.utils.filelock import file_lock
+from aws_bench.utils.atomic_write import fsync_dir
+from aws_bench.utils.locking import file_lock
 
 ACCOUNT_CONFIG_ENV_VAR = "AWSBENCH_ACCOUNT_CONFIG"
 
@@ -288,6 +289,7 @@ class PreexistingStateStore:
                 os.fsync(stream.fileno())
             os.chmod(temporary, _FILE_MODE)
             os.replace(temporary, self.path)
+            fsync_dir(self.path.parent)
         finally:
             if os.path.exists(temporary):
                 os.unlink(temporary)

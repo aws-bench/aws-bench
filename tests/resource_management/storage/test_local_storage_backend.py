@@ -1,5 +1,6 @@
 """Tests for LocalStorageBackend."""
 
+import sys
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -40,6 +41,7 @@ def test_save_creates_root_and_nested_key(tmp_path: Path):
     assert etag
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX permission bits")
 def test_root_directory_is_owner_only(tmp_path: Path):
     backend = _backend(tmp_path)
     backend.save("k", b"x", None)
@@ -131,6 +133,7 @@ def test_traversal_cannot_write_beside_the_prefix(tmp_path: Path):
     assert not (root / "contamination.json").exists()
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="symlinks need Developer Mode")
 def test_symlinked_root_is_usable(tmp_path: Path):
     """An unresolved root would make list_keys raise a bare ValueError."""
     real = tmp_path / "real_store"
@@ -190,16 +193,6 @@ def test_reads_of_absent_keys_leave_no_trace_on_disk(tmp_path: Path):
     backend.delete("x/y/z")
 
     assert list(root.rglob("*")) == []
-
-
-def test_delete_leaves_no_lock_sidecar_for_an_absent_key(tmp_path: Path):
-    backend = _backend(tmp_path)
-    backend.save("kept.json", b"x", None)
-
-    backend.delete("never-written.json")
-
-    assert backend.list_keys("") == ["kept.json"]
-    assert not (tmp_path / "state" / "snapshots" / "never-written.json.lock").exists()
 
 
 def test_bulk_delete_rejects_more_keys_than_s3_accepts(tmp_path: Path):

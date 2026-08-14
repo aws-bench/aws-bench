@@ -22,7 +22,7 @@ classifiers = [
 dependencies = [
     "boto3>=1.42.0",
     "docker>=7.1.0",
-    "filelock>=3.13.0",
+    "filelock>=3.29.4",
     "harbor==0.9.0",
     "jinja2>=3.1.6",
     "mcp>=1.28.1",

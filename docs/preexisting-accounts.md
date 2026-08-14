@@ -100,9 +100,10 @@ The consequence is that state is host-local. A run must reach `env cleanup` from
 same machine that ran `env setup`; another host sees no baseline. Set `state_file` to
 put the contamination marker on shared persistent storage for cluster runs.
 
-Contamination flags fail closed: if the state file is missing, or present but not
-parseable as the expected schema, aws-bench raises rather than reading either as "no
-accounts contaminated".
+Reading contamination flags fails closed: if the state file is missing, or present but
+not parseable as the expected schema, aws-bench raises rather than reading either as "no
+accounts contaminated". Recording a new flag is the exception — it creates the file when
+absent, because adding a flag only ever narrows what aws-bench will reuse.
 
 ## Credentials, in plain language
 

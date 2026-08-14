@@ -238,7 +238,7 @@ docs = [
 requires-dist = [
     { name = "boto3", specifier = ">=1.42.0" },
     { name = "docker", specifier = ">=7.1.0" },
-    { name = "filelock", specifier = ">=3.13.0" },
+    { name = "filelock", specifier = ">=3.29.4" },
     { name = "gitpython", marker = "extra == 'mlflow'", specifier = ">=3.1.52" },
     { name = "harbor", specifier = "==0.9.0" },
     { name = "jinja2", specifier = ">=3.1.6" },
