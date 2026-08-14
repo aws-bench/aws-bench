@@ -1024,6 +1024,157 @@ def test_check_new_resources_ignores_failed_type_absent_from_baseline(mock_scann
     assert result is None
 
 
+@mock_aws
+@patch("aws_bench.resource_management.verify.manager.make_scanner")
+def test_check_new_resources_tolerates_region_unavailable_baseline_type(mock_scanner_class):
+    """A baseline type failing with a region-unavailability code does NOT fail verify.
+
+    A resource type that cannot exist in the scanned region cannot hide an orphan, so
+    a stable region/service-availability error is tolerated rather than failing closed.
+    """
+    from aws_bench.resource_management.ccapi.models import ScanResult
+
+    session = boto3.Session(region_name="us-east-1")
+
+    mock_scanner = MagicMock()
+    mock_scanner.scan_resources.return_value = ScanResult(
+        detected={}, failed={"AWS::GameLift::ContainerFleet": "UnsupportedRegionException"}
+    )
+    mock_scanner_class.return_value = mock_scanner
+
+    manager = VerifyManager(session)
+    result = manager._check_new_resources(
+        baseline_resource_ids={},
+        baseline_failed={},
+        baseline_empty={"AWS::GameLift::ContainerFleet"},
+    )
+
+    # Tolerated -> no unenumerable failure and no new resources -> clean.
+    assert result is None
+
+
+@mock_aws
+@patch("aws_bench.resource_management.verify.manager.make_scanner")
+def test_check_new_resources_tolerates_endpoint_connection_error(mock_scanner_class):
+    """An endpoint-connection failure (no regional endpoint) is region-unavailability."""
+    from aws_bench.resource_management.ccapi.models import ScanResult
+
+    session = boto3.Session(region_name="us-west-2")
+
+    mock_scanner = MagicMock()
+    mock_scanner.scan_resources.return_value = ScanResult(
+        detected={},
+        failed={
+            "AWS::CUR::ReportDefinition": (
+                'Connect timeout on endpoint URL: "https://cur.us-west-2.amazonaws.com/"'
+            )
+        },
+    )
+    mock_scanner_class.return_value = mock_scanner
+
+    manager = VerifyManager(session)
+    result = manager._check_new_resources(
+        baseline_resource_ids={},
+        baseline_failed={},
+        baseline_empty={"AWS::CUR::ReportDefinition"},
+    )
+
+    assert result is None
+
+
+@mock_aws
+@patch("aws_bench.resource_management.verify.manager.make_scanner")
+def test_check_new_resources_fails_closed_on_access_denied(mock_scanner_class):
+    """AccessDenied fails closed: a real permission gap, not region-unavailability."""
+    from aws_bench.resource_management.ccapi.models import ScanResult
+
+    session = boto3.Session(region_name="us-east-1")
+
+    mock_scanner = MagicMock()
+    mock_scanner.scan_resources.return_value = ScanResult(
+        detected={}, failed={"AWS::S3::Bucket": "AccessDeniedException"}
+    )
+    mock_scanner_class.return_value = mock_scanner
+
+    manager = VerifyManager(session)
+    result = manager._check_new_resources(
+        baseline_resource_ids={"AWS::S3::Bucket": [{"Identifier": "b1"}]},
+        baseline_failed={},
+        baseline_empty=set(),
+    )
+
+    assert result is not None
+    assert result.success is False
+    assert "Could not enumerate 1 baseline resource type(s)" in result.reason
+    assert result.details["unenumerable_types"] == ["AWS::S3::Bucket"]
+
+
+@mock_aws
+@patch("aws_bench.resource_management.verify.manager.make_scanner")
+def test_check_new_resources_mixed_tolerates_region_unavailable_but_fails_on_genuine(
+    mock_scanner_class,
+):
+    """A region-unavailable type is tolerated while a genuine failure still fails closed."""
+    from aws_bench.resource_management.ccapi.models import ScanResult
+
+    session = boto3.Session(region_name="us-east-1")
+
+    mock_scanner = MagicMock()
+    mock_scanner.scan_resources.return_value = ScanResult(
+        detected={},
+        failed={
+            "AWS::GameLift::ContainerFleet": "UnsupportedRegionException",
+            "AWS::EC2::InternetGateway": "ThrottlingException",
+        },
+    )
+    mock_scanner_class.return_value = mock_scanner
+
+    manager = VerifyManager(session)
+    result = manager._check_new_resources(
+        baseline_resource_ids={"AWS::EC2::InternetGateway": [{"Identifier": "igw-1"}]},
+        baseline_failed={},
+        baseline_empty={"AWS::GameLift::ContainerFleet"},
+    )
+
+    assert result is not None
+    assert result.success is False
+    # Only the genuine (non-region-unavailable) failure is surfaced.
+    assert result.details["unenumerable_types"] == ["AWS::EC2::InternetGateway"]
+
+
+@mock_aws
+@patch("aws_bench.resource_management.verify.manager.make_scanner")
+def test_check_new_resources_type_with_baseline_resources_fails_closed_despite_region_code(
+    mock_scanner_class,
+):
+    """A type that HAD resources at baseline fails closed even on a region-unavailable code.
+
+    Toleration is scoped to baseline-empty types; a type we tracked resources for must
+    never be silently skipped, whatever error its scan returns.
+    """
+    from aws_bench.resource_management.ccapi.models import ScanResult
+
+    session = boto3.Session(region_name="us-east-1")
+
+    mock_scanner = MagicMock()
+    mock_scanner.scan_resources.return_value = ScanResult(
+        detected={}, failed={"AWS::GameLift::ContainerFleet": "UnsupportedRegionException"}
+    )
+    mock_scanner_class.return_value = mock_scanner
+
+    manager = VerifyManager(session)
+    result = manager._check_new_resources(
+        # The type had resources at baseline (not empty), so it must fail closed.
+        baseline_resource_ids={"AWS::GameLift::ContainerFleet": [{"Identifier": "fleet-1"}]},
+        baseline_failed={},
+        baseline_empty=set(),
+    )
+
+    assert result is not None
+    assert result.success is False
+    assert result.details["unenumerable_types"] == ["AWS::GameLift::ContainerFleet"]
+
+
 # ===========================================================================
 # find_orphan_resources — reset's orphan/scan-health census wrapper
 # ===========================================================================

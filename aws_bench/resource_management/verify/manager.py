@@ -35,6 +35,54 @@ from aws_bench.utils.credentials_provider import create_regional_session
 logger = get_logger(__name__)
 
 
+# Error signals that a baseline-tracked resource type cannot exist in the scanned
+# region at all — the service or type is unavailable there — as opposed to an
+# enumeration gap that could hide a leaked resource. A type that cannot exist in the
+# region cannot hold an orphan, so a persistent scan failure carrying one of these
+# signals is tolerated by ``_check_new_resources`` instead of failing verify closed.
+#
+# These are stable region/service-availability errors observed live across the CCAPI
+# listers (e.g. GameLift → UnsupportedRegionException, EC2::CarrierGateway →
+# UnsupportedOperation, IoTSiteWise → InvalidRequestException, Lightsail →
+# InvalidInputException, Notifications/Bedrock prompt-routers → ValidationException,
+# CUR → endpoint connect timeout). They are deliberately NOT the transient
+# throttling/5xx codes the scanner already retries: a residual transient failure
+# leaves a type genuinely un-enumerated and must still fail closed. AccessDenied is
+# likewise excluded — with the broad scan role it means a real permission gap we
+# cannot see past, not region unavailability.
+_REGION_UNAVAILABLE_SIGNALS: frozenset[str] = frozenset(
+    {
+        "UnsupportedRegionException",
+        "UnsupportedOperation",
+        "OptInRequired",
+        "InvalidRequestException",
+        "InvalidInputException",
+        "ValidationException",
+        "UninitializedAccountException",
+        # botocore endpoint-resolution/connection failures (no ``Error.Code``, so the
+        # scanner records a truncated message): the service has no endpoint here.
+        "Could not connect to the endpoint URL",
+        "Connect timeout on endpoint URL",
+    }
+)
+
+
+def _is_region_unavailable(error: str) -> bool:
+    """True if ``error`` marks a resource type as unavailable in the scanned region.
+
+    Substring match: the scanner records either a ``ClientError`` code or a truncated
+    botocore message (e.g. an endpoint connection error), so match on signal fragments
+    rather than requiring an exact code.
+
+    Args:
+        error: The error string recorded in ``scan_result.failed`` for a type.
+
+    Returns:
+        True if the failure indicates the type/service is unavailable in the region.
+    """
+    return any(signal in error for signal in _REGION_UNAVAILABLE_SIGNALS)
+
+
 class VerifyManager:
     """Manages account state verification operations."""
 
@@ -175,7 +223,30 @@ class VerifyManager:
         # find_new_resources deliberately SKIPS failed types to avoid false diffs — but
         # for a type that mattered at setup, silently skipping it would let a leaked
         # resource in that type hide forever. Scoped to baseline_types only.
-        unenumerable = sorted(t for t in scan_result.failed if t in baseline_types)
+        #
+        # Exception: a type that cannot exist in this region at all (the service/type is
+        # unavailable here) cannot hold an orphan, so a region-unavailability failure is
+        # tolerated rather than failing verify closed. See _REGION_UNAVAILABLE_SIGNALS.
+        # This distinction is what keeps verify from false-failing on the exotic CCAPI
+        # types (GameLift, Bedrock, Omics, ...) that are simply absent in some regions.
+        #
+        # Toleration is scoped to types that were EMPTY at baseline: a type that HAD
+        # resources at setup must always fail closed when un-enumerable — we cannot confirm
+        # those tracked resources are gone, whatever the error code. Only a type with
+        # nothing to account for (in baseline_empty, not baseline_resource_ids) is tolerated.
+        failed_baseline = {t: err for t, err in scan_result.failed.items() if t in baseline_types}
+        tolerated = sorted(
+            t
+            for t, err in failed_baseline.items()
+            if t not in baseline_resource_ids and _is_region_unavailable(err)
+        )
+        tolerated_set = set(tolerated)
+        unenumerable = sorted(t for t in failed_baseline if t not in tolerated_set)
+        if tolerated:
+            logger.info(
+                f"Tolerating {len(tolerated)} baseline resource type(s) unavailable in this "
+                f"region (cannot hold an orphan): {tolerated}"
+            )
         if unenumerable:
             logger.warning(f"Could not enumerate baseline resource type(s): {unenumerable}")
             return VerifyResult(
