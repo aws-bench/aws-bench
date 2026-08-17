@@ -13,8 +13,7 @@ This mode is experimental.
 
 ## Configuration
 
-Start from
-[`examples/preexisting-ec2-multiregion.yaml`](../examples/preexisting-ec2-multiregion.yaml):
+Start from `examples/preexisting-ec2-multiregion.yaml` in the repository:
 
 ```yaml
 schema_version: "1.0"
