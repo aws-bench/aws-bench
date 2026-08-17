@@ -480,8 +480,13 @@ def show(
     """Show the current testing environment state including accounts, quotas, and stack status."""
     _apply_debug(debug)
     account_manager = AccountManager()
-    org_info = account_manager._org.get_org_info()
-    ou_id = account_manager._require_ou(org_info, name)
+    if account_manager.is_preexisting is True:
+        environment = account_manager.resolve_test_environment(name)
+        org_info = environment.org
+        ou_id = environment.ou_id
+    else:
+        org_info = account_manager._org.get_org_info()
+        ou_id = account_manager._require_ou(org_info, name)
     cred_provider = CredentialProvider.get()
     quota_manager = QuotaManager(cred_provider)
 
@@ -490,7 +495,11 @@ def show(
 
     # Org-level: surface whether an account-limit increase request is pending, so
     # operators can tell why account creation is (or would be) blocked.
-    account_quota_line = _describe_org_account_quota(quota_manager)
+    account_quota_line = (
+        "[dim]externally managed[/dim]"
+        if account_manager.is_preexisting is True
+        else _describe_org_account_quota(quota_manager)
+    )
 
     accounts = account_manager.list_scenario_accounts(name)
     if not accounts:
@@ -572,6 +581,24 @@ def list_envs(
     except PreflightError as exc:
         print_exception(console, debug=debug)
         raise typer.Exit(code=1) from exc
+
+    account_manager = AccountManager()
+    if account_manager.is_preexisting is True:
+        assert account_manager._preexisting is not None
+        configured = account_manager._preexisting
+        render_env_list(
+            console,
+            "preexisting",
+            cred_provider.get_caller_account_id(),
+            [
+                {
+                    "name": configured.name,
+                    "ou_id": "preexisting",
+                    "account_count": sum(len(tags) for tags in configured.accounts.values()),
+                }
+            ],
+        )
+        return
 
     org_client = OrganizationsClient()
     try:
@@ -969,6 +996,15 @@ def terminate(
     """
     _apply_debug(debug)
     account_manager = AccountManager()
+
+    # Refuse before the first Organizations call: the path below detaches SCPs,
+    # deletes the OU and closes accounts, none of which is ours to do.
+    if account_manager.is_preexisting:
+        console.print(
+            "env terminate is not available in pre-existing account mode; the external "
+            "platform owns account closure and the Organizational Unit."
+        )
+        raise typer.Exit(code=1)
 
     try:
         org_info = account_manager._org.get_org_info()

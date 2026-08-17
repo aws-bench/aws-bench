@@ -10,6 +10,8 @@ from botocore.credentials import DeferredRefreshableCredentials, create_assume_r
 from botocore.exceptions import ClientError
 
 from aws_bench.account_management.constants import ORG_ACCESS_ROLE
+from aws_bench.account_management.exceptions import AccountResolutionError
+from aws_bench.account_management.preexisting import active_account_config
 from aws_bench.constants import DEFAULT_REGION
 from aws_bench.exceptions import CredentialError
 from aws_bench.logging.logger import get_logger
@@ -334,6 +336,42 @@ class CredentialProvider:
         )
         return assumed_credentials_dict_to_credentials_env(response["Credentials"])
 
+    def _preexisting_role(self, account_id: str, role_name: str | None) -> str:
+        """Resolve the direct role used for an externally owned account.
+
+        ``OrganizationAccountAccessRole`` is an implementation detail of accounts
+        created by aws-bench.  In pre-existing mode it means "the configured
+        runner identity" instead.  Explicit task roles remain explicit.
+
+        Raises:
+            CredentialError: If no config is active.
+            AccountResolutionError: If ``account_id`` is outside the allowlist.
+        """
+        active = active_account_config()
+        if active is None:
+            raise CredentialError(
+                f"No pre-existing account config is active; cannot resolve a role for "
+                f"account {account_id}"
+            )
+        config, _ = active
+        allowed = {
+            configured_id for tags in config.accounts.values() for configured_id in tags.values()
+        }
+        if account_id not in allowed:
+            raise AccountResolutionError(
+                f"Account {account_id} is not in the active pre-existing allowlist"
+            )
+        if role_name in (None, ORG_ACCESS_ROLE):
+            return config.runner_role
+        return role_name
+
+    def _ambient_is_target_role(self, account_id: str, role_name: str) -> bool:
+        """Return whether the ambient STS identity already is ``role_name``."""
+        identity = self._sts.get_caller_identity()
+        arn = str(identity.get("Arn", ""))
+        marker = f"arn:aws:sts::{account_id}:assumed-role/{role_name}/"
+        return arn.startswith(marker)
+
     def chain_assume_role(
         self,
         account_id: str,
@@ -358,6 +396,39 @@ class CredentialProvider:
         Returns:
             Dict with AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_SESSION_TOKEN.
         """
+        parent_session = self._session
+        preexisting = active_account_config()
+        if preexisting is not None:
+            config, _ = preexisting
+            target_role = self._preexisting_role(account_id, role_name)
+            # Already running as the target role — self-assume would fail, so reuse it.
+            if self._ambient_is_target_role(account_id, target_role):
+                return session_to_env_credentials(self._session)
+            if target_role != config.runner_role and not self._ambient_is_target_role(
+                account_id, config.runner_role
+            ):
+                runner_creds = self.assume_role(
+                    account_id,
+                    config.runner_role,
+                    build_session_name("runner", account_id[-6:]),
+                    duration_seconds=duration_seconds,
+                )
+                parent_session = env_credentials_dict_to_session(runner_creds)
+            if parent_session is not self._session:
+                role_arn = f"arn:aws:iam::{account_id}:role/{target_role}"
+                response = build_client(parent_session, "sts").assume_role(
+                    RoleArn=role_arn,
+                    RoleSessionName=enforce_session_name(session_name),
+                    DurationSeconds=duration_seconds,
+                )
+                return assumed_credentials_dict_to_credentials_env(response["Credentials"])
+            return self.assume_role(
+                account_id,
+                target_role,
+                session_name,
+                duration_seconds=duration_seconds,
+            )
+
         # Hop 1: always go through the org access role
         hop1_session_name = (
             session_name
@@ -468,5 +539,30 @@ class CredentialProvider:
         Returns:
             A boto3.Session with refreshable credentials that auto-refresh before expiry.
         """
+        parent_session = self._session
+        preexisting = active_account_config()
+        if preexisting is not None:
+            config, _ = preexisting
+            target_role = self._preexisting_role(account_id, role_name)
+            # Already running as the target role — self-assume would fail, so reuse it.
+            if self._ambient_is_target_role(account_id, target_role):
+                return create_regional_session(self._session, region)
+            parent_session = self._session
+            if target_role != config.runner_role and not self._ambient_is_target_role(
+                account_id, config.runner_role
+            ):
+                runner_arn = f"arn:aws:iam::{account_id}:role/{config.runner_role}"
+                parent_session = _create_refreshable_session(
+                    self._session,
+                    runner_arn,
+                    build_session_name("runner", account_id[-6:]),
+                    region,
+                )
+            role_name = target_role
         role_arn = f"arn:aws:iam::{account_id}:role/{role_name}"
-        return _create_refreshable_session(self._session, role_arn, session_name, region)
+        return _create_refreshable_session(
+            parent_session,
+            role_arn,
+            session_name,
+            region,
+        )

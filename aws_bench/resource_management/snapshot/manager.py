@@ -16,6 +16,8 @@ import tenacity
 from botocore.exceptions import BotoCoreError, ClientError
 
 from aws_bench.account_management.constants import ORG_ACCESS_ROLE
+from aws_bench.account_management.preexisting import active_account_config
+from aws_bench.constants import STATE_DIR
 from aws_bench.logging.logger import get_logger, log_context
 from aws_bench.resource_management.ccapi.models import MAX_WORKERS_ACCOUNT, MAX_WORKERS_HEAVY
 from aws_bench.resource_management.constants import RESOURCE_MANAGEMENT_SESSION
@@ -37,10 +39,12 @@ from aws_bench.resource_management.snapshot.models import (
     SnapshotStage,
     StackMetadata,
 )
+from aws_bench.resource_management.storage import SnapshotStorage
 from aws_bench.resource_management.storage.exceptions import (
     StorageConflictError,
     StorageNotFoundError,
 )
+from aws_bench.resource_management.storage.local_storage_backend import LocalStorageBackend
 from aws_bench.resource_management.storage.s3_backend import S3StorageBackend
 from aws_bench.utils.concurrent import build_client, interruptible_executor, raise_if_shutdown
 from aws_bench.utils.credentials_provider import (
@@ -58,30 +62,35 @@ STATE_BUCKET_PREFIX = "awsbench-state-"
 class SnapshotManager:
     """Manages snapshot capture and loading operations.
 
-    S3 backend is lazily initialized on first storage access to avoid paying
+    The storage backend is lazily initialized on first access to avoid paying
     the initialization cost (STS get_caller_identity + S3 head_bucket + 4 config PUTs)
     in code paths that only use CloudFormation APIs (e.g., drift capture).
     """
 
     def __init__(self):
-        """Initialize snapshot manager.
-
-        S3 backend is created lazily on first storage access via the _storage property.
-        """
-        self._s3_backend: S3StorageBackend | None = None
+        """Initialize snapshot manager."""
+        self._backend: SnapshotStorage | None = None
         self._etags: dict[SnapshotKey, str] = {}
 
     @property
-    def _storage(self) -> S3StorageBackend:
-        """Lazily initialize S3 backend on first storage access.
+    def _storage(self) -> SnapshotStorage:
+        """Lazily initialize the storage backend on first access.
 
-        Auto-derives bucket name from management account ID (awsbench-state-{account-id}).
-        This avoids paying the initialization cost in code paths that never touch S3.
+        Pre-existing mode has no management account to hold a state bucket, and a
+        bucket in the account under test would put benchmark state inside the
+        agent's blast radius, so state goes to host-local disk instead. Managed
+        mode derives its bucket from the management account
+        (``awsbench-state-{account-id}``).
 
         Returns:
-            Initialized S3StorageBackend instance
+            Initialized storage backend
         """
-        if self._s3_backend is None:
+        if self._backend is None:
+            if active_account_config() is not None:
+                logger.debug(f"Initializing local storage backend at {STATE_DIR} (lazy)")
+                self._backend = LocalStorageBackend(root=STATE_DIR)
+                return self._backend
+
             logger.debug("Initializing S3 storage backend (lazy)")
             mgmt_session = CredentialProvider.get().get_management_session()
 
@@ -92,15 +101,15 @@ class SnapshotManager:
             state_bucket = f"{STATE_BUCKET_PREFIX}{account_id}"
 
             # Create S3 storage backend
-            self._s3_backend = S3StorageBackend(
+            self._backend = S3StorageBackend(
                 session=mgmt_session,
                 bucket_name=state_bucket,
             )
 
-        return self._s3_backend
+        return self._backend
 
     def _make_s3_key(self, env_name: str, account_id: str, stage: SnapshotStage) -> str:
-        """Return the S3 key for a snapshot."""
+        """Return the storage key for a snapshot."""
         return f"{env_name}/{stage}/{account_id}/baseline.json"
 
     def _get_snapshot_key(

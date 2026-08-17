@@ -2,6 +2,9 @@
 
 This guide walks you through installing aws-bench, configuring AWS access, and running your first benchmark end-to-end against the datasets that ship with the project.
 
+> Using an AWS account managed by Control Tower or another external platform? See
+> [Pre-existing AWS accounts](preexisting-accounts.md).
+
 It is focused on **running the benchmark with the provided datasets**. Authoring your own scenarios and tasks is a separate topic and is not covered here.
 
 ## Contents

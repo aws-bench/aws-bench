@@ -8,6 +8,9 @@ OUTPUT_DIR = Path.home() / ".aws-bench"
 # Per-invocation command ledger (one entry dir per aws-bench CLI call).
 LOGS_DIR = OUTPUT_DIR / "logs"
 
+# Host-local benchmark state: baseline snapshots and contamination flags.
+STATE_DIR = OUTPUT_DIR / "state"
+
 # Cache for fetched scenarios. Layout: ``<SCENARIO_CACHE_DIR>/<uuid>/<name>/``,
 # where ``<uuid>`` is content-addressed by ``(git_url, git_commit_id, path)``.
 CACHE_DIR = OUTPUT_DIR / "cache"

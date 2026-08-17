@@ -47,5 +47,6 @@ plugins:
 
 nav:
   - Home: getting-started.md
+  - Pre-existing AWS Accounts: preexisting-accounts.md
   - Framework Development: framework-development.md
   - Datasets Development: datasets-development.md

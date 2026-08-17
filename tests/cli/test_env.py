@@ -59,6 +59,7 @@ def test_terminate_renders_bracketed_failure_status_without_crashing(runner):
     multi-account close. The status must render verbatim.
     """
     mgr = MagicMock()
+    mgr.is_preexisting = False
     mgr._org.get_org_info.return_value = OrgInfo(
         org_id="o-abc",
         management_account_id="111111111111",
