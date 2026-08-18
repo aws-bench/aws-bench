@@ -1114,6 +1114,7 @@ def test_check_new_resources_fails_closed_on_access_denied(mock_scanner_class):
     assert result is not None
     assert result.success is False
     assert "Could not enumerate 1 baseline resource type(s)" in result.reason
+    assert isinstance(result.details, dict)
     assert result.details["unenumerable_types"] == ["AWS::S3::Bucket"]
 
 
@@ -1147,6 +1148,7 @@ def test_check_new_resources_mixed_tolerates_region_unavailable_but_fails_on_gen
     assert result is not None
     assert result.success is False
     # Only the genuine (non-region-unavailable) failure is surfaced.
+    assert isinstance(result.details, dict)
     assert result.details["unenumerable_types"] == ["AWS::EC2::InternetGateway"]
 
 
@@ -1180,6 +1182,7 @@ def test_check_new_resources_type_with_baseline_resources_fails_closed_despite_r
 
     assert result is not None
     assert result.success is False
+    assert isinstance(result.details, dict)
     assert result.details["unenumerable_types"] == ["AWS::GameLift::ContainerFleet"]
 
 
@@ -1261,6 +1264,7 @@ def test_check_new_resources_fails_closed_when_type_unenumerable_in_all_regions(
     )
     assert result is not None
     assert result.success is False
+    assert isinstance(result.details, dict)
     assert result.details["unenumerable_types"] == ["AWS::Rekognition::StreamProcessor"]
 
 
@@ -1315,6 +1319,7 @@ def test_check_new_resources_type_with_resources_not_tolerated_even_if_enumerabl
     )
     assert result is not None
     assert result.success is False
+    assert isinstance(result.details, dict)
     assert result.details["unenumerable_types"] == ["AWS::Rekognition::StreamProcessor"]
 
 
