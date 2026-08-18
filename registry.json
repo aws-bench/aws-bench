@@ -128,19 +128,19 @@
   },
   {
     "name": "compute-and-data",
-    "version": "0.7.1",
+    "version": "0.7.2",
     "description": "Mutation scenario (compute-and-data) \u2014 multi-region: us-east-1 (primary deployments), us-east-2 (Image Builder distribution), ap-southeast-1 (EMR cluster creation); 27 aws-introspection tasks against compute-and-data.",
     "tasks": [
       {
         "name": "amplify-deploy-frontend-from-s3",
         "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
-        "git_commit_id": "7214635d5616d6875d9dba19fb0f815155ca4fac",
+        "git_commit_id": "80f5dd36e9746f4ee0294545799937ba7bfb6238",
         "path": "tasks/compute-and-data/amplify-deploy-frontend-from-s3"
       },
       {
         "name": "analyze-b2b-commerce-summary-and-lifecycle",
         "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
-        "git_commit_id": "7214635d5616d6875d9dba19fb0f815155ca4fac",
+        "git_commit_id": "80f5dd36e9746f4ee0294545799937ba7bfb6238",
         "path": "tasks/compute-and-data/analyze-b2b-commerce-summary-and-lifecycle"
       },
       {
@@ -158,7 +158,7 @@
       {
         "name": "create-athena-tables-from-s3",
         "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
-        "git_commit_id": "7214635d5616d6875d9dba19fb0f815155ca4fac",
+        "git_commit_id": "80f5dd36e9746f4ee0294545799937ba7bfb6238",
         "path": "tasks/compute-and-data/create-athena-tables-from-s3"
       },
       {
@@ -170,7 +170,7 @@
       {
         "name": "create-eks-cluster",
         "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
-        "git_commit_id": "7214635d5616d6875d9dba19fb0f815155ca4fac",
+        "git_commit_id": "80f5dd36e9746f4ee0294545799937ba7bfb6238",
         "path": "tasks/compute-and-data/create-eks-cluster"
       },
       {
@@ -224,7 +224,7 @@
       {
         "name": "expand-elasticsearch-cfn-template",
         "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
-        "git_commit_id": "7214635d5616d6875d9dba19fb0f815155ca4fac",
+        "git_commit_id": "80f5dd36e9746f4ee0294545799937ba7bfb6238",
         "path": "tasks/compute-and-data/expand-elasticsearch-cfn-template"
       },
       {
@@ -236,7 +236,7 @@
       {
         "name": "invalidate-cloudfront-cache",
         "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
-        "git_commit_id": "7214635d5616d6875d9dba19fb0f815155ca4fac",
+        "git_commit_id": "80f5dd36e9746f4ee0294545799937ba7bfb6238",
         "path": "tasks/compute-and-data/invalidate-cloudfront-cache"
       },
       {
@@ -260,7 +260,7 @@
       {
         "name": "manage-buckets-eks-sagemaker",
         "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
-        "git_commit_id": "7214635d5616d6875d9dba19fb0f815155ca4fac",
+        "git_commit_id": "80f5dd36e9746f4ee0294545799937ba7bfb6238",
         "path": "tasks/compute-and-data/manage-buckets-eks-sagemaker"
       },
       {
@@ -272,13 +272,13 @@
       {
         "name": "move-s3-contents-and-cleanup",
         "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
-        "git_commit_id": "7214635d5616d6875d9dba19fb0f815155ca4fac",
+        "git_commit_id": "80f5dd36e9746f4ee0294545799937ba7bfb6238",
         "path": "tasks/compute-and-data/move-s3-contents-and-cleanup"
       },
       {
         "name": "move-s3-contents-within-bucket",
         "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
-        "git_commit_id": "7214635d5616d6875d9dba19fb0f815155ca4fac",
+        "git_commit_id": "80f5dd36e9746f4ee0294545799937ba7bfb6238",
         "path": "tasks/compute-and-data/move-s3-contents-within-bucket"
       },
       {
@@ -290,7 +290,7 @@
       {
         "name": "sync-s3-buckets-with-metadata",
         "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
-        "git_commit_id": "7214635d5616d6875d9dba19fb0f815155ca4fac",
+        "git_commit_id": "80f5dd36e9746f4ee0294545799937ba7bfb6238",
         "path": "tasks/compute-and-data/sync-s3-buckets-with-metadata"
       }
     ],
@@ -1523,7 +1523,7 @@
   },
   {
     "name": "aws-bench-basic",
-    "version": "0.7.1",
+    "version": "0.7.2",
     "description": "Easy-tier launch dataset (phase 1): 78 introspection and mutation tasks across streaming-and-iot, compute-and-data, serverless-apps, and databases-and-storage.",
     "tasks": [
       {
@@ -1577,13 +1577,13 @@
       {
         "name": "amplify-deploy-frontend-from-s3",
         "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
-        "git_commit_id": "7214635d5616d6875d9dba19fb0f815155ca4fac",
+        "git_commit_id": "80f5dd36e9746f4ee0294545799937ba7bfb6238",
         "path": "tasks/compute-and-data/amplify-deploy-frontend-from-s3"
       },
       {
         "name": "analyze-b2b-commerce-summary-and-lifecycle",
         "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
-        "git_commit_id": "7214635d5616d6875d9dba19fb0f815155ca4fac",
+        "git_commit_id": "80f5dd36e9746f4ee0294545799937ba7bfb6238",
         "path": "tasks/compute-and-data/analyze-b2b-commerce-summary-and-lifecycle"
       },
       {
@@ -1601,7 +1601,7 @@
       {
         "name": "create-athena-tables-from-s3",
         "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
-        "git_commit_id": "7214635d5616d6875d9dba19fb0f815155ca4fac",
+        "git_commit_id": "80f5dd36e9746f4ee0294545799937ba7bfb6238",
         "path": "tasks/compute-and-data/create-athena-tables-from-s3"
       },
       {
@@ -1613,7 +1613,7 @@
       {
         "name": "create-eks-cluster",
         "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
-        "git_commit_id": "7214635d5616d6875d9dba19fb0f815155ca4fac",
+        "git_commit_id": "80f5dd36e9746f4ee0294545799937ba7bfb6238",
         "path": "tasks/compute-and-data/create-eks-cluster"
       },
       {
@@ -1667,7 +1667,7 @@
       {
         "name": "expand-elasticsearch-cfn-template",
         "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
-        "git_commit_id": "7214635d5616d6875d9dba19fb0f815155ca4fac",
+        "git_commit_id": "80f5dd36e9746f4ee0294545799937ba7bfb6238",
         "path": "tasks/compute-and-data/expand-elasticsearch-cfn-template"
       },
       {
@@ -1679,7 +1679,7 @@
       {
         "name": "invalidate-cloudfront-cache",
         "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
-        "git_commit_id": "7214635d5616d6875d9dba19fb0f815155ca4fac",
+        "git_commit_id": "80f5dd36e9746f4ee0294545799937ba7bfb6238",
         "path": "tasks/compute-and-data/invalidate-cloudfront-cache"
       },
       {
@@ -1703,7 +1703,7 @@
       {
         "name": "manage-buckets-eks-sagemaker",
         "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
-        "git_commit_id": "7214635d5616d6875d9dba19fb0f815155ca4fac",
+        "git_commit_id": "80f5dd36e9746f4ee0294545799937ba7bfb6238",
         "path": "tasks/compute-and-data/manage-buckets-eks-sagemaker"
       },
       {
@@ -1715,13 +1715,13 @@
       {
         "name": "move-s3-contents-and-cleanup",
         "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
-        "git_commit_id": "7214635d5616d6875d9dba19fb0f815155ca4fac",
+        "git_commit_id": "80f5dd36e9746f4ee0294545799937ba7bfb6238",
         "path": "tasks/compute-and-data/move-s3-contents-and-cleanup"
       },
       {
         "name": "move-s3-contents-within-bucket",
         "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
-        "git_commit_id": "7214635d5616d6875d9dba19fb0f815155ca4fac",
+        "git_commit_id": "80f5dd36e9746f4ee0294545799937ba7bfb6238",
         "path": "tasks/compute-and-data/move-s3-contents-within-bucket"
       },
       {
@@ -1733,7 +1733,7 @@
       {
         "name": "sync-s3-buckets-with-metadata",
         "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
-        "git_commit_id": "7214635d5616d6875d9dba19fb0f815155ca4fac",
+        "git_commit_id": "80f5dd36e9746f4ee0294545799937ba7bfb6238",
         "path": "tasks/compute-and-data/sync-s3-buckets-with-metadata"
       },
       {
@@ -2046,7 +2046,7 @@
   },
   {
     "name": "all",
-    "version": "0.7.2",
+    "version": "0.7.3",
     "description": "Unified dataset spanning 8 scenario(s) (api-and-observability, compute-and-data, databases-and-storage, ec2-multiregion, reference-architectures, serverless-apps, streaming-and-iot, troubleshooting-multiservice): 8 scenarios, 134 tasks.",
     "tasks": [
       {
@@ -2142,13 +2142,13 @@
       {
         "name": "amplify-deploy-frontend-from-s3",
         "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
-        "git_commit_id": "7214635d5616d6875d9dba19fb0f815155ca4fac",
+        "git_commit_id": "80f5dd36e9746f4ee0294545799937ba7bfb6238",
         "path": "tasks/compute-and-data/amplify-deploy-frontend-from-s3"
       },
       {
         "name": "analyze-b2b-commerce-summary-and-lifecycle",
         "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
-        "git_commit_id": "7214635d5616d6875d9dba19fb0f815155ca4fac",
+        "git_commit_id": "80f5dd36e9746f4ee0294545799937ba7bfb6238",
         "path": "tasks/compute-and-data/analyze-b2b-commerce-summary-and-lifecycle"
       },
       {
@@ -2166,7 +2166,7 @@
       {
         "name": "create-athena-tables-from-s3",
         "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
-        "git_commit_id": "7214635d5616d6875d9dba19fb0f815155ca4fac",
+        "git_commit_id": "80f5dd36e9746f4ee0294545799937ba7bfb6238",
         "path": "tasks/compute-and-data/create-athena-tables-from-s3"
       },
       {
@@ -2178,7 +2178,7 @@
       {
         "name": "create-eks-cluster",
         "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
-        "git_commit_id": "7214635d5616d6875d9dba19fb0f815155ca4fac",
+        "git_commit_id": "80f5dd36e9746f4ee0294545799937ba7bfb6238",
         "path": "tasks/compute-and-data/create-eks-cluster"
       },
       {
@@ -2232,7 +2232,7 @@
       {
         "name": "expand-elasticsearch-cfn-template",
         "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
-        "git_commit_id": "7214635d5616d6875d9dba19fb0f815155ca4fac",
+        "git_commit_id": "80f5dd36e9746f4ee0294545799937ba7bfb6238",
         "path": "tasks/compute-and-data/expand-elasticsearch-cfn-template"
       },
       {
@@ -2244,7 +2244,7 @@
       {
         "name": "invalidate-cloudfront-cache",
         "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
-        "git_commit_id": "7214635d5616d6875d9dba19fb0f815155ca4fac",
+        "git_commit_id": "80f5dd36e9746f4ee0294545799937ba7bfb6238",
         "path": "tasks/compute-and-data/invalidate-cloudfront-cache"
       },
       {
@@ -2268,7 +2268,7 @@
       {
         "name": "manage-buckets-eks-sagemaker",
         "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
-        "git_commit_id": "7214635d5616d6875d9dba19fb0f815155ca4fac",
+        "git_commit_id": "80f5dd36e9746f4ee0294545799937ba7bfb6238",
         "path": "tasks/compute-and-data/manage-buckets-eks-sagemaker"
       },
       {
@@ -2280,13 +2280,13 @@
       {
         "name": "move-s3-contents-and-cleanup",
         "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
-        "git_commit_id": "7214635d5616d6875d9dba19fb0f815155ca4fac",
+        "git_commit_id": "80f5dd36e9746f4ee0294545799937ba7bfb6238",
         "path": "tasks/compute-and-data/move-s3-contents-and-cleanup"
       },
       {
         "name": "move-s3-contents-within-bucket",
         "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
-        "git_commit_id": "7214635d5616d6875d9dba19fb0f815155ca4fac",
+        "git_commit_id": "80f5dd36e9746f4ee0294545799937ba7bfb6238",
         "path": "tasks/compute-and-data/move-s3-contents-within-bucket"
       },
       {
@@ -2298,7 +2298,7 @@
       {
         "name": "sync-s3-buckets-with-metadata",
         "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
-        "git_commit_id": "7214635d5616d6875d9dba19fb0f815155ca4fac",
+        "git_commit_id": "80f5dd36e9746f4ee0294545799937ba7bfb6238",
         "path": "tasks/compute-and-data/sync-s3-buckets-with-metadata"
       },
       {
