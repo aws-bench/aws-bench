@@ -33,7 +33,9 @@ UNAVAILABLE_LISTER_REGIONS: dict[tuple[str, str], frozenset[str]] = {
     ("greengrassv2", "ListComponents"): frozenset({"us-west-1"}),
     ("greengrassv2", "ListCoreDevices"): frozenset({"us-west-1"}),
     ("greengrassv2", "ListDeployments"): frozenset({"us-west-1"}),
-    ("iotwireless", "ListPartnerAccounts"): frozenset({"us-west-2"}),
+    ("iotwireless", "ListPartnerAccounts"): frozenset(
+        {"ap-northeast-1", "ap-southeast-2", "eu-central-1", "eu-west-1", "us-west-2"}
+    ),
     ("bedrock", "ListAutomatedReasoningPolicies"): frozenset({"ap-southeast-1", "us-west-1"}),
     ("bedrock-agent", "list_flows"): frozenset({"us-west-1"}),
     ("bedrock-agent", "list_prompts"): frozenset({"us-west-1"}),
