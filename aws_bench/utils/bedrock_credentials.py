@@ -1,6 +1,5 @@
 """Bedrock service-specific credential management.
 
-Ports the logic from scripts/generate_bedrock_bearer.py into a reusable utility.
 Generates long-term Bedrock API keys via IAM service-specific credentials,
 cached in SSM Parameter Store.
 """
@@ -17,7 +16,6 @@ from aws_bench.logging.logger import get_logger
 
 logger = get_logger(__name__)
 
-# Constants matching generate_bedrock_bearer.py
 IAM_USER_NAME = "bedrock-api-user"
 SERVICE_NAME = "bedrock.amazonaws.com"
 POLICY_ARN = "arn:aws:iam::aws:policy/AmazonBedrockFullAccess"
@@ -162,7 +160,10 @@ def generate_bearer_token(
         cached_token = _get_token_from_ssm(ssm_client, SSM_PARAMETER)
         if cached_token:
             logger.info(f"Found token in SSM ({SSM_PARAMETER}), verifying...")
-            if no_verify or _verify_token(cached_token, retries=1):
+            # Full retry budget: a credential 403s until IAM propagates, which
+            # routinely outlasts a single interval. Reading that as failure would
+            # discard a valid token and delete the credential backing it.
+            if no_verify or _verify_token(cached_token):
                 logger.info("Reusing valid token from SSM.")
                 return cached_token
             logger.info("Token from SSM failed verification. Generating a new one...")
