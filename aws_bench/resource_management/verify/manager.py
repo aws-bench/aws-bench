@@ -339,17 +339,28 @@ class VerifyManager:
             )
         return None
 
-    def find_orphan_resources(self, snapshot: Snapshot) -> VerifyResult | None:
+    def find_orphan_resources(
+        self, snapshot: Snapshot, *, enumerable_elsewhere: set[str] | None = None
+    ) -> VerifyResult | None:
         """Re-run only the new-resource + scan-health census (no stack/drift checks).
 
         Reset's fail-closed backstop after deleting stacks for re-setup: a survivor
         it could not delete or enumerate must fail the reset, not be absorbed into a
         fresh baseline.
+
+        Args:
+            snapshot: The (region-filtered) baseline snapshot.
+            enumerable_elsewhere: Baseline types another region enumerated cleanly this
+                run, for cross-region corroboration in ``_check_new_resources`` — a type
+                proven region-available elsewhere cannot hold an orphan here, so failing
+                to enumerate it here is region-unavailability, not an orphan-hiding gap.
+                None falls back to the error-code allow-list only.
         """
         return self._check_new_resources(
             snapshot.resource_ids,
             snapshot.failed_resource_types,
             snapshot.empty_resource_types,
+            enumerable_elsewhere=enumerable_elsewhere,
         )
 
     def scan_baseline_types(self, snapshot: Snapshot) -> ScanResult:

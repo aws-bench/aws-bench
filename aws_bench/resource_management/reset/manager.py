@@ -12,7 +12,11 @@ from aws_bench.account_management.constants import ORG_ACCESS_ROLE
 from aws_bench.account_management.models import ScenarioAccount
 from aws_bench.logging.logger import get_logger, log_context
 from aws_bench.resource_management.ccapi.manager import CloudControlManager, Resource
-from aws_bench.resource_management.ccapi.models import GLOBAL_RESOURCE_TYPES, MAX_WORKERS_HEAVY
+from aws_bench.resource_management.ccapi.models import (
+    GLOBAL_RESOURCE_TYPES,
+    MAX_WORKERS_HEAVY,
+    ScanResult,
+)
 from aws_bench.resource_management.cleanup.manager import CleanupManager
 from aws_bench.resource_management.cleanup.models import StackResource
 from aws_bench.resource_management.cleanup.resource_cleaner import ResourceCleaner
@@ -97,12 +101,43 @@ class ResetManager:
             # Regions are independent, so reset them concurrently under a bound.
             region_sem = asyncio.Semaphore(MAX_WORKERS_HEAVY)
 
+            # Phase 0: scan every region's baseline types once, up front, to build the
+            # cross-region corroboration set. A baseline type that enumerates cleanly
+            # (detected or empty) in ANY region is region-available there, so failing to
+            # enumerate it in ANOTHER region is region-unavailability — it cannot hold an
+            # orphan there — not a reset failure. Each region's verify (below) forgives
+            # such a type instead of hard-failing on "Could not enumerate baseline
+            # resource type(s)". A type un-enumerable in EVERY region still fails closed.
+            # This mirrors the two-phase multi-region verify (see
+            # VerifyManager.verify_account_multiregion); the per-region scan is reused as
+            # each region's diagnosis ``precomputed_scan`` so no region is scanned twice.
+            async def _scan_region_bounded(region: str) -> ScanResult | None:
+                async with region_sem:
+                    return await self._scan_baseline_types(snapshot, region, account_id)
+
+            region_scans = dict(
+                zip(
+                    regions,
+                    await asyncio.gather(*(_scan_region_bounded(region) for region in regions)),
+                )
+            )
+            enumerable_elsewhere: set[str] = set()
+            for scan in region_scans.values():
+                if scan is not None:
+                    enumerable_elsewhere |= set(scan.detected.keys()) | scan.empty
+
             async def _reset_region_bounded(
                 region: str,
             ) -> tuple[list[str], dict[str, list[dict]]]:
                 async with region_sem:
                     return await self._reset_region(
-                        env_name, account_id, snapshot, region, scenario_dir
+                        env_name,
+                        account_id,
+                        snapshot,
+                        region,
+                        scenario_dir,
+                        enumerable_elsewhere=enumerable_elsewhere,
+                        diagnosis_scan=region_scans.get(region),
                     )
 
             region_results = await asyncio.gather(
@@ -181,6 +216,37 @@ class ResetManager:
                 unresolved_orphans=orphans,
             )
 
+    async def _scan_baseline_types(
+        self, snapshot: Snapshot, region: str, account_id: str
+    ) -> ScanResult | None:
+        """Fast-scan one region's baseline types for cross-region corroboration.
+
+        Phase 0 of the reset: run once per region before any reset work so the
+        per-region verify can forgive a baseline type that is un-enumerable here
+        but enumerated cleanly in another region (proven region-available there).
+
+        A scan error yields ``None`` — the region simply contributes nothing to the
+        corroboration set (fail-closed: it can never *add* a false toleration).
+
+        Returns:
+            The region's ScanResult for its baseline types, or None on scan error.
+        """
+
+        def _scan() -> ScanResult:
+            with log_context(region):
+                region_session = create_regional_session(self._session, region)
+                region_verify = VerifyManager(
+                    region_session, region_name=region, account_id=account_id
+                )
+                region_snapshot = VerifyManager._filter_snapshot_to_region(snapshot, region)
+                return region_verify.scan_baseline_types(region_snapshot)
+
+        try:
+            return await asyncio.to_thread(_scan)
+        except Exception as exc:  # noqa: BLE001 — a scan error only forfeits this region's corroboration
+            logger.warning(f"Baseline scan for region '{region}' failed, no corroboration: {exc}")
+            return None
+
     async def _reset_region(
         self,
         env_name: str,
@@ -188,8 +254,26 @@ class ResetManager:
         snapshot: Snapshot,
         region: str,
         scenario_dir: Path | None,
+        *,
+        enumerable_elsewhere: set[str] | None = None,
+        diagnosis_scan: ScanResult | None = None,
     ) -> tuple[list[str], dict[str, list[dict]]]:
         """Reset one region against its slice of the baseline.
+
+        Args:
+            env_name: Environment (scenario) name.
+            account_id: AWS account ID being reset.
+            snapshot: The full (all-region) baseline snapshot; filtered to this region.
+            region: The region to reset.
+            scenario_dir: Path to scenario directory for the version (hash) check.
+            enumerable_elsewhere: Baseline types that enumerated cleanly in any region
+                this run (Phase 0). Threaded into every verify below so a type that is
+                un-enumerable here but region-available elsewhere is forgiven rather than
+                hard-failing the reset. A type un-enumerable in every region still fails
+                closed.
+            diagnosis_scan: This region's Phase-0 ScanResult, reused as the initial
+                diagnosis's ``precomputed_scan`` so the region is not scanned twice. The
+                later re-checks re-scan (state changes after deletes).
 
         Returns:
             ``(deleted_stacks, global_resources)`` — the names of stacks deleted
@@ -222,6 +306,8 @@ class ResetManager:
                 snapshot=region_snapshot,
                 scenario_dir=scenario_dir,
                 skip_early=False,
+                precomputed_scan=diagnosis_scan,
+                enumerable_elsewhere=enumerable_elsewhere,
             )
 
             if verify_result.success:
@@ -255,7 +341,9 @@ class ResetManager:
                 # so the not-yet-deleted globals (deleted later by _delete_global_resources)
                 # never false-positive here.
                 orphan_result = await asyncio.to_thread(
-                    region_verify.find_orphan_resources, region_snapshot
+                    lambda: region_verify.find_orphan_resources(
+                        region_snapshot, enumerable_elsewhere=enumerable_elsewhere
+                    )
                 )
                 census = self._census_orphans(orphan_result) if orphan_result is not None else {}
                 unresolved = self._merge_orphan_maps(
@@ -286,6 +374,7 @@ class ResetManager:
                 snapshot=region_snapshot,
                 scenario_dir=scenario_dir,
                 skip_early=False,
+                enumerable_elsewhere=enumerable_elsewhere,
             )
             if not final_verify.success:
                 raise ResetFailure(
