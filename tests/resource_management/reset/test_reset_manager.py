@@ -232,9 +232,7 @@ def test_reset_account_threads_cross_region_corroboration(temp_output_dir, sampl
 
     captured: dict[str, dict] = {}
 
-    async def fake_reset_region(
-        env_name, account_id, snapshot, region, scenario_dir, **kwargs
-    ):
+    async def fake_reset_region(env_name, account_id, snapshot, region, scenario_dir, **kwargs):
         captured[region] = kwargs
         return [], {}
 
@@ -274,9 +272,7 @@ def test_reset_account_corroboration_empty_when_scans_fail(temp_output_dir, samp
 
     captured: dict[str, dict] = {}
 
-    async def fake_reset_region(
-        env_name, account_id, snapshot, region, scenario_dir, **kwargs
-    ):
+    async def fake_reset_region(env_name, account_id, snapshot, region, scenario_dir, **kwargs):
         captured[region] = kwargs
         return [], {}
 
