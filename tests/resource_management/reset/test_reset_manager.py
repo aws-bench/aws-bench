@@ -177,7 +177,7 @@ def test_reset_account_logs_all_region_failures_before_raising(
     snapshot_with_regions = sample_snapshot
     snapshot_with_regions.regions = ["us-east-1", "us-west-2"]
 
-    async def failing_region(env_name, account_id, snapshot, region, scenario_dir):
+    async def failing_region(env_name, account_id, snapshot, region, scenario_dir, **kwargs):
         raise ResetFailure(reason=f"{region} broke", details={}, suggestion="")
 
     with (
@@ -195,6 +195,100 @@ def test_reset_account_logs_all_region_failures_before_raising(
     # BOTH regions' failures were logged, not just the one that surfaced.
     assert "us-east-1' reset failed" in caplog.text
     assert "us-west-2' reset failed" in caplog.text
+
+
+def test_reset_account_threads_cross_region_corroboration(temp_output_dir, sample_snapshot):
+    """reset_account passes the cross-region enumerable union + per-region scan to reset.
+
+    Every region is scanned up front; the union of enumerable baseline types (detected
+    or empty) is threaded to each region's reset, along with that region's own scan for
+    reuse as the diagnosis precomputed_scan.
+    """
+    from aws_bench.resource_management.ccapi.models import ScanResult
+
+    session = boto3.Session(region_name="us-east-1")
+    manager = ResetManager(session, output_dir=temp_output_dir)
+
+    snapshot_with_regions = sample_snapshot
+    snapshot_with_regions.regions = ["us-east-1", "ap-southeast-1"]
+
+    # us-east-1 enumerates Translate::ParallelData (empty); ap-southeast-1 cannot
+    # (NotAuthorized) but enumerates S3::Bucket. The union proves each region.
+    scans = {
+        "us-east-1": ScanResult(
+            detected={"AWS::S3::Bucket": [{"Identifier": "b1"}]},
+            failed={},
+            empty={"AWS::Translate::ParallelData"},
+        ),
+        "ap-southeast-1": ScanResult(
+            detected={},
+            failed={"AWS::Translate::ParallelData": "NotAuthorizedException"},
+            empty={"AWS::S3::Bucket"},
+        ),
+    }
+
+    async def fake_scan(snapshot, region, account_id):
+        return scans[region]
+
+    captured: dict[str, dict] = {}
+
+    async def fake_reset_region(env_name, account_id, snapshot, region, scenario_dir, **kwargs):
+        captured[region] = kwargs
+        return [], {}
+
+    with (
+        patch(
+            "aws_bench.resource_management.verify.manager.SnapshotManager.load_snapshot",
+            return_value=snapshot_with_regions,
+        ),
+        patch.object(manager, "_scan_baseline_types", side_effect=fake_scan),
+        patch.object(manager, "_reset_region", side_effect=fake_reset_region),
+    ):
+        asyncio.run(manager.reset_account("test-env", "123456789012"))
+
+    expected_union = {"AWS::S3::Bucket", "AWS::Translate::ParallelData"}
+    assert set(captured) == {"us-east-1", "ap-southeast-1"}
+    for region, kwargs in captured.items():
+        # Cross-region union is passed to every region.
+        assert kwargs["enumerable_elsewhere"] == expected_union
+        # Each region reuses its own Phase-0 scan as the diagnosis scan.
+        assert kwargs["diagnosis_scan"] is scans[region]
+
+
+def test_reset_account_corroboration_empty_when_scans_fail(temp_output_dir, sample_snapshot):
+    """A failed Phase-0 scan contributes nothing to the corroboration set (fail-closed).
+
+    A region whose scan yields None adds no types, so the reset proceeds with no
+    cross-region toleration rather than a falsely-widened enumerable set.
+    """
+    session = boto3.Session(region_name="us-east-1")
+    manager = ResetManager(session, output_dir=temp_output_dir)
+
+    snapshot_with_regions = sample_snapshot
+    snapshot_with_regions.regions = ["us-east-1", "us-west-2"]
+
+    async def fake_scan(snapshot, region, account_id):
+        return None  # scan error path already logs + returns None
+
+    captured: dict[str, dict] = {}
+
+    async def fake_reset_region(env_name, account_id, snapshot, region, scenario_dir, **kwargs):
+        captured[region] = kwargs
+        return [], {}
+
+    with (
+        patch(
+            "aws_bench.resource_management.verify.manager.SnapshotManager.load_snapshot",
+            return_value=snapshot_with_regions,
+        ),
+        patch.object(manager, "_scan_baseline_types", side_effect=fake_scan),
+        patch.object(manager, "_reset_region", side_effect=fake_reset_region),
+    ):
+        asyncio.run(manager.reset_account("test-env", "123456789012"))
+
+    for kwargs in captured.values():
+        assert kwargs["enumerable_elsewhere"] == set()
+        assert kwargs["diagnosis_scan"] is None
 
 
 @mock_aws
