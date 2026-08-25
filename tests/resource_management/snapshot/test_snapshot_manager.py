@@ -836,6 +836,63 @@ def test_snapshot_account_writes_local_file_and_skips_s3(temp_snapshot_dir, mock
 
 
 # ===========================================================================
+# snapshot_account — forbidden-identifier guard (defense-in-depth)
+# ===========================================================================
+
+
+@mock_aws
+def test_snapshot_account_refuses_baseline_with_forbidden_identifier(temp_snapshot_dir, mocker):
+    """A captured baseline containing a flagged orphan is refused, never saved."""
+    manager = create_test_manager()
+
+    captured = _region_snapshot("us-east-1", stack="stack-e1", resource_id="vpc-orphan")
+    mocker.patch.object(manager, "capture_snapshot_multiregion", return_value=captured)
+    save_spy = mocker.patch.object(manager, "save_snapshot")
+
+    ctx = SnapshotContext(
+        scenario_id="my-scenario",
+        scenario_hash="hash1",
+        regions=["us-east-1"],
+        stage=SnapshotStage.POST_SETUP,
+        account_ids=["123456789012"],
+        forbidden_identifiers={"vpc-orphan"},
+    )
+
+    session = boto3.Session(region_name="us-east-1")
+    result = manager.snapshot_account(session, "123456789012", ctx)
+
+    assert result.success is False
+    assert result.error_message is not None
+    assert "vpc-orphan" in result.error_message
+    save_spy.assert_not_called()
+
+
+@mock_aws
+def test_snapshot_account_saves_when_forbidden_identifiers_absent(temp_snapshot_dir, mocker):
+    """A non-intersecting (or empty) forbidden set does not block the normal save."""
+    manager = create_test_manager()
+
+    captured = _region_snapshot("us-east-1", stack="stack-e1", resource_id="role-e1")
+    mocker.patch.object(manager, "capture_snapshot_multiregion", return_value=captured)
+    save_spy = mocker.patch.object(manager, "save_snapshot")
+
+    ctx = SnapshotContext(
+        scenario_id="my-scenario",
+        scenario_hash="hash1",
+        regions=["us-east-1"],
+        stage=SnapshotStage.POST_SETUP,
+        account_ids=["123456789012"],
+        forbidden_identifiers={"vpc-not-present"},
+    )
+
+    session = boto3.Session(region_name="us-east-1")
+    result = manager.snapshot_account(session, "123456789012", ctx)
+
+    assert result.success is True
+    save_spy.assert_called_once()
+
+
+# ===========================================================================
 # Fresh-account subscription retry — _list_active_stacks self-heals OptInRequired
 #
 # _list_active_stacks is the snapshot's first CloudFormation call, so it is the

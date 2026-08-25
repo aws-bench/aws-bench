@@ -482,6 +482,119 @@ def test_reset_redeploy_not_blocked_by_own_contamination(tmp_path, fake_containe
     acct.clear_contaminated.assert_awaited_once_with("111")
 
 
+# -- baseline recapture is gated on a fully-clean reset -------------------
+
+
+def test_baseline_recapture_allowed_only_when_all_clean():
+    """Recapture is allowed only when every result is success and orphan-free."""
+    clean = ResetResult(success=True, reason="ok", account_id="111")
+    orphan = ResetResult(
+        success=False,
+        reason="orphan",
+        account_id="222",
+        unresolved_orphans={"AWS::EC2::Vpc": [{"Identifier": "vpc-1"}]},
+    )
+    failed = ResetResult(success=False, reason="drift", account_id="333")
+
+    assert ScenarioTrial._baseline_recapture_allowed([clean]) is True
+    assert ScenarioTrial._baseline_recapture_allowed([clean, orphan]) is False
+    assert ScenarioTrial._baseline_recapture_allowed([clean, failed]) is False
+    # A success=True result still blocks recapture if it carries orphans.
+    still_orphan = ResetResult(
+        success=True,
+        reason="ok",
+        account_id="444",
+        unresolved_orphans={"AWS::EC2::Vpc": [{"Identifier": "vpc-2"}]},
+    )
+    assert ScenarioTrial._baseline_recapture_allowed([still_orphan]) is False
+
+
+def test_orphan_identifiers_unions_across_results():
+    """The orphan-id union pulls Identifier from every result's orphans."""
+    a = ResetResult(
+        success=False,
+        reason="x",
+        account_id="111",
+        unresolved_orphans={"AWS::EC2::Vpc": [{"Identifier": "vpc-1"}]},
+    )
+    b = ResetResult(
+        success=False,
+        reason="y",
+        account_id="222",
+        unresolved_orphans={
+            "AWS::EC2::Vpc": [{"Identifier": "vpc-2"}],
+            "AWS::S3::Bucket": [{"Identifier": "b-1"}, {"NoId": "skip"}],
+        },
+    )
+    clean = ResetResult(success=True, reason="ok", account_id="333")
+    assert ScenarioTrial._orphan_identifiers([a, b, clean]) == {"vpc-1", "vpc-2", "b-1"}
+    assert ScenarioTrial._orphan_identifiers([clean]) == set()
+
+
+def test_run_reset_skips_recapture_when_an_account_has_orphans(
+    tmp_path, fake_container, fake_creds
+):
+    """A orphan-carrying account blocks the scenario-wide baseline recapture.
+
+    One account needs_redeploy (stack deleted), another carries unresolved
+    orphans (success=False). Recapture would absorb the live orphan, so
+    _run_snapshot must not run and the trial fails with ResetFailedError.
+    """
+    trial = _build_trial(tmp_path, fake_container, fake_creds)
+    acct = MagicMock()
+    acct.mark_contaminated = AsyncMock()
+    acct.clear_contaminated = AsyncMock()
+    trial._account_manager = acct
+
+    redeploy = ResetResult(
+        success=True, reason="stack deleted", needs_redeploy=True, account_id="111"
+    )
+    orphan = ResetResult(
+        success=False,
+        reason="orphan",
+        account_id="222",
+        unresolved_orphans={"AWS::EC2::Vpc": [{"Identifier": "vpc-1"}]},
+    )
+    with (
+        patch(
+            "aws_bench.resource_management.manager.ResourceManager.reset_scenarios",
+            new_callable=AsyncMock,
+            return_value=[redeploy, orphan],
+        ),
+        patch.object(trial, "_redeploy_with_retry", new_callable=AsyncMock),
+        patch.object(trial, "_run_snapshot", new_callable=AsyncMock) as snap,
+    ):
+        with pytest.raises(ResetFailedError):
+            asyncio.run(trial._run_reset())
+
+    snap.assert_not_awaited()
+
+
+def test_run_reset_recaptures_when_all_clean(tmp_path, fake_container, fake_creds):
+    """A clean reset with a needs_redeploy account recaptures the baseline once."""
+    trial = _build_trial(tmp_path, fake_container, fake_creds)
+    acct = MagicMock()
+    acct.mark_contaminated = AsyncMock()
+    acct.clear_contaminated = AsyncMock()
+    trial._account_manager = acct
+
+    redeploy = ResetResult(
+        success=True, reason="stack deleted", needs_redeploy=True, account_id="111"
+    )
+    with (
+        patch(
+            "aws_bench.resource_management.manager.ResourceManager.reset_scenarios",
+            new_callable=AsyncMock,
+            return_value=[redeploy],
+        ),
+        patch.object(trial, "_redeploy_with_retry", new_callable=AsyncMock),
+        patch.object(trial, "_run_snapshot", new_callable=AsyncMock) as snap,
+    ):
+        asyncio.run(trial._run_reset())  # no raise
+
+    snap.assert_awaited_once()
+
+
 def test_run_passes_account_tag_into_phase_env(tmp_path, fake_container, fake_creds):
     trial = _build_trial(tmp_path, fake_container, fake_creds)
     asyncio.run(trial.run(ScenarioPhase.DEPLOY))

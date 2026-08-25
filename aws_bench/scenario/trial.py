@@ -551,10 +551,12 @@ class ScenarioTrial:
         elif phase == ScenarioPhase.CLEANUP:
             await self._run_cleanup(script_failed=script_failed)
 
-    async def _run_snapshot(self) -> None:
+    async def _run_snapshot(self, forbidden_identifiers: set[str] | None = None) -> None:
         """Capture the post-setup baseline snapshot for this scenario's accounts.
 
         Assumes a successful deploy; the caller gates on deploy outcome.
+        ``forbidden_identifiers`` are orphan ids the snapshot layer refuses to
+        absorb into a baseline (defense-in-depth for the recapture path).
         """
         ctx = SnapshotContext(
             scenario_id=self._scenario.name,
@@ -562,6 +564,7 @@ class ScenarioTrial:
             regions=self._scenario.manifest.scenario.regions,
             stage=SnapshotStage.POST_SETUP,
             account_ids=list(self._config.account_mapping.values()),
+            forbidden_identifiers=forbidden_identifiers or set(),
         )
 
         results_by_scenario = await ResourceManager.snapshot_scenarios([ctx])
@@ -853,8 +856,18 @@ class ScenarioTrial:
             try:
                 await self._redeploy_with_retry()
 
-                # Recapture baseline snapshot after successful redeploy
-                await self._run_snapshot()
+                # Recapture the baseline only when every account is clean — otherwise a
+                # still-present orphan would be absorbed into the new baseline and hide
+                # forever. The trial fails below on the unclean account, so the run is
+                # discarded and the preserved baseline never goes stale.
+                if self._baseline_recapture_allowed(results):
+                    await self._run_snapshot(self._orphan_identifiers(results))
+                else:
+                    logger.error(
+                        f"Skipping baseline recapture for {self._scenario.name}: an account's "
+                        "reset left unresolved orphans or failed; the prior baseline is "
+                        "preserved to avoid absorbing a live orphan."
+                    )
 
                 # Mark redeploy as successful in results
                 for result in results:
@@ -883,6 +896,26 @@ class ScenarioTrial:
 
         if clear_error is not None:
             raise clear_error
+
+    @staticmethod
+    def _baseline_recapture_allowed(results: list[ResetResult]) -> bool:
+        """A failed or orphan-carrying reset must not refresh the baseline.
+
+        Recapture is scenario-wide, so ANY unclean account would absorb its live
+        orphan into a fresh POST_SETUP baseline (``current - snapshot`` subtracts
+        it forever). When unclean the trial fails and the run is discarded, so the
+        stale baseline is correct to keep.
+        """
+        return all(r.success and not r.unresolved_orphans for r in results)
+
+    @staticmethod
+    def _orphan_identifiers(results: list[ResetResult]) -> set[str]:
+        """Union of identifiers every result flagged as an unresolved orphan."""
+        idents: set[str] = set()
+        for r in results:
+            for ids in (r.unresolved_orphans or {}).values():
+                idents.update(item["Identifier"] for item in ids if "Identifier" in item)
+        return idents
 
     async def _apply_contamination_tags(self, results: list[ResetResult]) -> Exception | None:
         """SET the flag on accounts whose reset failed, CLEAR it on those that succeeded.

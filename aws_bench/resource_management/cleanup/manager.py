@@ -304,15 +304,27 @@ class CleanupManager:
             succeeded = [stack_name] if result.status == StackDeletionStatus.SUCCESS else []
             failed = [stack_name] if result.status == StackDeletionStatus.FAILED else []
 
+            # This path runs no orphan scan, so a FORCE_DELETE-abandoned resource is
+            # only knowable from the deletion result — surface it here so the caller
+            # (reset) can fail closed instead of absorbing it into a fresh baseline.
+            abandoned = result.abandoned_resources
+            orphaned: dict[str, list[str]] = {}
+            for r in abandoned:
+                orphaned.setdefault(r.resource_type, []).append(r.physical_id or r.logical_id)
+
             region_result = RegionResult(
                 region=region,
                 stacks_found=1,
                 stacks_deleted=len(succeeded),
                 stacks_failed=failed,
-                orphan_count=0,
+                orphan_count=len(abandoned),
             )
 
-            summary = CleanupSummary(regions=[region_result], run_dir=str(run_dir))
+            summary = CleanupSummary(
+                regions=[region_result],
+                orphaned_resources=orphaned,
+                run_dir=str(run_dir),
+            )
             self._log_summary(summary)
             self._save_summary(summary, run_dir)
             return summary

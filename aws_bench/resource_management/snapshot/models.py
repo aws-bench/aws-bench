@@ -115,3 +115,7 @@ class SnapshotContext:
     # When set, the snapshot is written to a JSON file under this directory
     # instead of S3; used by OBSERVABILITY captures.
     output_dir: Path | None = None
+    # Identifiers a caller flagged as unresolved orphans; a captured baseline
+    # containing any of these is refused, never saved (defense-in-depth against
+    # absorbing a live orphan into the baseline).
+    forbidden_identifiers: set[str] = field(default_factory=set)

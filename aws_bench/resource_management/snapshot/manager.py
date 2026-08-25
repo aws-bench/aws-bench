@@ -592,6 +592,23 @@ class SnapshotManager:
             snapshot = self.capture_snapshot_multiregion(
                 scan_session, account_id, ctx.scenario_id, ctx.scenario_hash, ctx.regions
             )
+            # Defense-in-depth: never persist a baseline that still contains a resource
+            # a caller flagged as an unresolved orphan (would hide it forever).
+            if ctx.forbidden_identifiers:
+                present = sorted(
+                    ident
+                    for ids in snapshot.resource_ids.values()
+                    for item in ids
+                    if (ident := item.get("Identifier", "")) in ctx.forbidden_identifiers
+                )
+                if present:
+                    msg = (
+                        f"Refused to save {ctx.stage} baseline for "
+                        f"{ctx.scenario_id}/{account_id}: still contains "
+                        f"{len(present)} flagged orphan(s): {', '.join(present[:5])}"
+                    )
+                    logger.error(msg)
+                    return SnapshotResult(account_id=account_id, success=False, error_message=msg)
             if ctx.output_dir is not None:
                 path = self._write_snapshot_file(ctx.output_dir, ctx.scenario_id, snapshot)
                 logger.debug(

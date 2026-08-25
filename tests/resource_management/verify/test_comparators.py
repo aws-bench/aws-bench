@@ -451,3 +451,11 @@ class TestPhase2AwsOwnedFilters:
         assert predicate("arn:aws:events:us-east-1:123456789012:event-bus/default", {})
         # A task-created custom bus carries its own name and is NOT filtered.
         assert not predicate("arn:aws:events:us-east-1:123456789012:event-bus/my-bus", {})
+
+    def test_default_mediaconvert_queue_filtered_custom_kept(self):
+        predicate = self._predicate("AWS::MediaConvert::Queue")
+        # The account's default MediaConvert queue is service-created (lazily) and undeletable —
+        # filtered (the lister emits the ARN …:queues/Default).
+        assert predicate("arn:aws:mediaconvert:us-east-1:123456789012:queues/Default", {})
+        # A task-created on-demand queue carries its own name and is NOT filtered.
+        assert not predicate("arn:aws:mediaconvert:us-east-1:123456789012:queues/my-queue", {})
