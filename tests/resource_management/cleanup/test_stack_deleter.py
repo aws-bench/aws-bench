@@ -13,6 +13,7 @@ from aws_bench.resource_management.ccapi.models import DeletionFailureEvent
 from aws_bench.resource_management.cleanup.handlers.cross_service import (
     EniReapResult,
     IpamPoolReapResult,
+    VpcPublicAddressWedgeResult,
 )
 from aws_bench.resource_management.cleanup.models import (
     ExistenceStatus,
@@ -801,6 +802,97 @@ def test_reap_and_retry_networking_retries_when_vpc_left_eni_clear(deleter):
     assert result.status == StackDeletionStatus.SUCCESS
 
 
+def test_reap_and_retry_networking_clears_wedge_before_reap_and_records_manifest(deleter):
+    # The single-stack retry path must clear the NAT/EIP/IGW wedge (which the shared
+    # hooks never run here) BEFORE the ENI reap — a NAT gateway holds its own ENI —
+    # and record what it did in the manifest alongside the eni_reap entry.
+    result = StackDeletionResult(
+        stack_name="net-stack",
+        status=StackDeletionStatus.FAILED,
+        resources=[StackResource("Vpc", "vpc-1", "AWS::EC2::VPC", "DELETE_FAILED")],
+    )
+    deleter._poll_deletion = AsyncMock(return_value="DELETE_COMPLETE")
+    call_order: list[str] = []
+    wedge = VpcPublicAddressWedgeResult(
+        nat_deleted=["nat-1"], eips_released=["eipalloc-1"], igws_deleted=["igw-1"]
+    )
+    with (
+        patch(
+            "aws_bench.resource_management.cleanup.stack_deleter.clear_vpc_public_address_wedge",
+            side_effect=lambda *a, **k: call_order.append("wedge") or wedge,
+        ) as mock_wedge,
+        patch(
+            "aws_bench.resource_management.cleanup.stack_deleter.reap_vpc_enis",
+            side_effect=lambda *a, **k: (
+                call_order.append("enis") or EniReapResult(deleted=["eni-1"])
+            ),
+        ) as mock_reap,
+    ):
+        asyncio.run(deleter._reap_and_retry_networking("net-stack", result))
+
+    mock_wedge.assert_called_once()
+    mock_reap.assert_called_once()
+    assert call_order == ["wedge", "enis"]  # wedge cleared before the ENI reap
+    deleter._client.delete_stack.assert_called_once_with(StackName="net-stack")
+    assert result.status == StackDeletionStatus.SUCCESS
+    teardown = deleter._manifest["net-stack"]["nat_eip_igw_teardown"]
+    assert teardown["nat_deleted"] == ["nat-1"]
+    assert teardown["eips_released"] == ["eipalloc-1"]
+    assert teardown["igws_deleted"] == ["igw-1"]
+    assert teardown["remaining"] == []
+
+
+def test_reap_and_retry_networking_no_retry_when_only_wedge_orphans(deleter):
+    # The wedge could not fully clear (a NAT gateway never reached 'deleted') and the
+    # ENI reap found nothing to do: no progress + orphans means a retry would stall,
+    # so DeleteStack is not re-issued and the orphan is recorded.
+    result = StackDeletionResult(
+        stack_name="net-stack",
+        status=StackDeletionStatus.FAILED,
+        resources=[StackResource("Vpc", "vpc-1", "AWS::EC2::VPC", "DELETE_FAILED")],
+    )
+    deleter._poll_deletion = AsyncMock()
+    with (
+        patch(
+            "aws_bench.resource_management.cleanup.stack_deleter.clear_vpc_public_address_wedge",
+            return_value=VpcPublicAddressWedgeResult(remaining=["nat-slow"]),
+        ),
+        patch(
+            "aws_bench.resource_management.cleanup.stack_deleter.reap_vpc_enis",
+            return_value=EniReapResult(),
+        ),
+    ):
+        asyncio.run(deleter._reap_and_retry_networking("net-stack", result))
+    deleter._client.delete_stack.assert_not_called()
+    deleter._poll_deletion.assert_not_awaited()
+    assert result.status == StackDeletionStatus.FAILED
+    assert deleter._manifest["net-stack"]["nat_eip_igw_teardown"]["remaining"] == ["nat-slow"]
+
+
+def test_reap_and_retry_networking_retries_when_only_wedge_made_progress(deleter):
+    # The ENI reap found nothing (reaped_any False) but the wedge deleted a NAT gateway
+    # (cleared_any True), so progress WAS made — the retry must still fire.
+    result = StackDeletionResult(
+        stack_name="net-stack",
+        status=StackDeletionStatus.FAILED,
+        resources=[StackResource("Vpc", "vpc-1", "AWS::EC2::VPC", "DELETE_FAILED")],
+    )
+    deleter._poll_deletion = AsyncMock(return_value="DELETE_COMPLETE")
+    with (
+        patch(
+            "aws_bench.resource_management.cleanup.stack_deleter.clear_vpc_public_address_wedge",
+            return_value=VpcPublicAddressWedgeResult(nat_deleted=["nat-1"]),
+        ),
+        patch(
+            "aws_bench.resource_management.cleanup.stack_deleter.reap_vpc_enis",
+            return_value=EniReapResult(),
+        ),
+    ):
+        asyncio.run(deleter._reap_and_retry_networking("net-stack", result))
+    deleter._client.delete_stack.assert_called_once_with(StackName="net-stack")
+    assert result.status == StackDeletionStatus.SUCCESS
+
+
 def test_reap_and_retry_networking_skips_when_not_failed(deleter):
     result = StackDeletionResult(
         stack_name="eks-stack",
@@ -951,8 +1043,33 @@ def test_force_delete_failed_stack_success_flips_to_success(deleter):
         }
     ]
     result = StackDeletionResult(stack_name="my-stack", status=StackDeletionStatus.FAILED)
-    with patch.object(
-        deleter, "_poll_deletion", new_callable=AsyncMock, return_value="DELETE_COMPLETE"
+    # Drive the sweep so Bucket stays a stuck survivor: it verifies EXISTS and the
+    # cleaner fails to delete it. abandoned_resources then carries only that survivor.
+    failed_resource = Resource(type="AWS::S3::Bucket", identifier="my-bucket")
+    with (
+        patch.object(
+            deleter, "_poll_deletion", new_callable=AsyncMock, return_value="DELETE_COMPLETE"
+        ),
+        patch.object(
+            deleter._verifier,
+            "verify_resources",
+            new_callable=AsyncMock,
+            return_value=[
+                ResourceVerificationResult(
+                    logical_id="Bucket",
+                    physical_id="my-bucket",
+                    resource_type="AWS::S3::Bucket",
+                    cfn_status="DELETE_FAILED",
+                    existence_status=ExistenceStatus.EXISTS,
+                )
+            ],
+        ),
+        patch.object(
+            deleter._cleaner,
+            "cleanup",
+            new_callable=AsyncMock,
+            return_value={failed_resource: DeletionFailureEvent(status_message="AccessDenied")},
+        ),
     ):
         asyncio.run(deleter._force_delete_failed_stack("my-stack", result))
 
@@ -963,6 +1080,11 @@ def test_force_delete_failed_stack_success_flips_to_success(deleter):
     assert result.reason == ""
     assert "Bucket" in deleter._manifest["my-stack"]["force_deleted"]
     assert "Fn" not in deleter._manifest["my-stack"]["force_deleted"]
+    # Only the survivor the sweep could not delete rides on the result as an orphan;
+    # everything the sweep reaped is excluded so it does not false-positive.
+    assert [r.logical_id for r in result.abandoned_resources] == ["Bucket"]
+    assert result.abandoned_resources[0].resource_type == "AWS::S3::Bucket"
+    assert result.abandoned_resources[0].physical_id == "my-bucket"
 
 
 def test_force_delete_failed_stack_no_op_when_not_delete_failed(deleter):
@@ -1045,6 +1167,7 @@ def test_force_delete_failed_stack_finalizes_when_no_resources_remain(deleter):
     assert result.status == StackDeletionStatus.SUCCESS
     assert result.reason == ""
     assert "force_deleted" not in deleter._manifest.get("my-stack", {})
+    assert result.abandoned_resources == []
 
 
 # -- _sweep_force_abandoned --

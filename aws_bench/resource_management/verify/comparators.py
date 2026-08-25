@@ -93,6 +93,12 @@ AWS_MANAGED_FILTERS: dict[str, Callable[[str, dict], bool]] = {
     "AWS::SMSVOICE::OptOutList": lambda id, _: id.endswith("opt-out-list/Default"),
     # AWS-created default EventBridge event bus (undeletable).
     "AWS::Events::EventBus": lambda id, _: id.endswith("event-bus/default"),
+    # AWS-created default MediaConvert queue. Created lazily by the service on first
+    # MediaConvert use (so it is absent from the pre-deploy init snapshot) and cannot be
+    # deleted, so the init-snapshot diff would otherwise flag it as a leaked orphan. The
+    # lister emits the ARN (…:queues/Default). On-demand queues a task creates carry a
+    # custom name and are NOT filtered.
+    "AWS::MediaConvert::Queue": lambda id, _: id.endswith("queues/Default"),
     # Service-managed secrets (e.g. a Redshift namespace's admin credentials) are
     # created and rotated BY the owning AWS service, which names them with a "!"
     # marker: ``redshift!…``, ``rds!…``, ``aws!…`` (ARN ``…:secret:redshift!…``).

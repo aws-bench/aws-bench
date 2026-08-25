@@ -51,6 +51,11 @@ SUPERSEDED_BY_CUSTOM_LISTER: frozenset[tuple[str, str]] = frozenset(
         ("acm-pca", "ListCertificateAuthorities"),  # → AWS::ACMPCA::CertificateAuthority
         ("amp", "ListWorkspaces"),  # → AWS::APS::Workspace
         ("amp", "ListScrapers"),  # → AWS::APS::Scraper
+        # The simple no-arg list_services defaults to the "default" cluster and raises
+        # ClusterNotFoundException when it is absent (fresh/scenario accounts have none),
+        # falsely marking AWS::ECS::Service un-enumerable. The custom lister iterates every
+        # cluster and emits the CCAPI composite id serviceArn|cluster.
+        ("ecs", "list_services"),  # → AWS::ECS::Service
         ("ec2", "DescribeAddresses"),  # → AWS::EC2::EIP
         # Default-VPC exclusion: the simple row returns the default VPC's associated
         # set, which is undeletable and must not surface as an orphan.

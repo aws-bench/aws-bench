@@ -9,7 +9,7 @@ import pytest
 from moto import mock_aws
 
 from aws_bench.resource_management.cleanup.manager import CleanupManager
-from aws_bench.resource_management.reset.models import RestoreOutcome
+from aws_bench.resource_management.reset.models import ResetupDeletion, RestoreOutcome
 from aws_bench.resource_management.reset.stack_restorer import StackRestorer
 
 
@@ -51,7 +51,8 @@ def test_restore_stack_succeeds_with_drift_revert(restorer):
             )
         )
 
-    assert result is RestoreOutcome.RESTORED
+    assert result.outcome is RestoreOutcome.RESTORED
+    assert result.abandoned == {}
     mock_revert.assert_called_once()
 
 
@@ -64,7 +65,7 @@ def test_restore_stack_deletes_when_revert_fails(restorer):
         with patch.object(restorer, "_delete_for_resetup", new_callable=AsyncMock) as mock_delete:
             # Revert fails -> falls back to delete-for-resetup
             mock_revert.return_value = False
-            mock_delete.return_value = RestoreOutcome.DELETED_NEEDS_REDEPLOY
+            mock_delete.return_value = ResetupDeletion(RestoreOutcome.DELETED_NEEDS_REDEPLOY)
 
             result = asyncio.run(
                 restorer.restore_stack(
@@ -73,7 +74,7 @@ def test_restore_stack_deletes_when_revert_fails(restorer):
                 )
             )
 
-    assert result is RestoreOutcome.DELETED_NEEDS_REDEPLOY
+    assert result.outcome is RestoreOutcome.DELETED_NEEDS_REDEPLOY
     mock_revert.assert_called_once()
     mock_delete.assert_called_once_with("test-stack")
 
@@ -441,12 +442,40 @@ def test_delete_for_resetup_succeeds(restorer):
     ) as mock_cleanup:
         cleanup_result = MagicMock()
         cleanup_result.all_stacks_succeeded = True
+        cleanup_result.orphaned_resources = {}
         mock_cleanup.return_value = cleanup_result
 
         result = asyncio.run(restorer._delete_for_resetup("test-stack"))
 
-    assert result is RestoreOutcome.DELETED_NEEDS_REDEPLOY
+    assert result.outcome is RestoreOutcome.DELETED_NEEDS_REDEPLOY
+    assert result.abandoned == {}
     mock_cleanup.assert_called_once_with("test-stack")
+
+
+@mock_aws
+def test_delete_for_resetup_carries_abandoned_from_cleanup(restorer):
+    """Force-abandoned resources on cleanup_stack surface as ResetupDeletion.abandoned.
+
+    cleanup_stack reports FORCE_DELETE-abandoned resources in orphaned_resources
+    (type -> [id]); _delete_for_resetup reshapes them to type -> [{"Identifier": id}]
+    so reset can fold them into unresolved_orphans and fail closed.
+    """
+    with patch.object(
+        restorer._cleanup_mgr, "cleanup_stack", new_callable=AsyncMock
+    ) as mock_cleanup:
+        cleanup_result = MagicMock()
+        cleanup_result.all_stacks_succeeded = True
+        cleanup_result.orphaned_resources = {
+            "AWS::EC2::InternetGateway": ["igw-abandoned"],
+        }
+        mock_cleanup.return_value = cleanup_result
+
+        result = asyncio.run(restorer._delete_for_resetup("test-stack"))
+
+    assert result.outcome is RestoreOutcome.DELETED_NEEDS_REDEPLOY
+    assert result.abandoned == {
+        "AWS::EC2::InternetGateway": [{"Identifier": "igw-abandoned"}],
+    }
 
 
 @mock_aws
@@ -461,7 +490,7 @@ def test_delete_for_resetup_returns_failed_when_deletion_fails(restorer):
 
         result = asyncio.run(restorer._delete_for_resetup("test-stack"))
 
-    assert result is RestoreOutcome.FAILED
+    assert result.outcome is RestoreOutcome.FAILED
 
 
 @mock_aws
@@ -475,7 +504,7 @@ def test_delete_for_resetup_handles_exception(restorer):
     ):
         result = asyncio.run(restorer._delete_for_resetup("test-stack"))
 
-    assert result is RestoreOutcome.FAILED
+    assert result.outcome is RestoreOutcome.FAILED
 
 
 @mock_aws
@@ -486,7 +515,7 @@ def test_delete_for_resetup_already_gone_is_success(restorer):
     stack no longer exists (e.g. a ROLLBACK_COMPLETE/empty stack removed before
     or during reset). The goal of delete_for_resetup is for the stack to be
     absent so setup recreates it — already-absent satisfies that, so it must
-    return DELETED_NEEDS_REDEPLOY rather than FAILED (which fails the reset).
+    return DELETED_NEEDS_REDEPLOY (nothing abandoned) rather than FAILED.
     """
     with patch.object(
         restorer._cleanup_mgr,
@@ -496,7 +525,8 @@ def test_delete_for_resetup_already_gone_is_success(restorer):
     ):
         result = asyncio.run(restorer._delete_for_resetup("test-stack"))
 
-    assert result is RestoreOutcome.DELETED_NEEDS_REDEPLOY
+    assert result.outcome is RestoreOutcome.DELETED_NEEDS_REDEPLOY
+    assert result.abandoned == {}
 
 
 # ===========================================================================

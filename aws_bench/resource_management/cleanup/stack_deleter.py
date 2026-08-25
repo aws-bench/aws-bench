@@ -25,6 +25,7 @@ from botocore.exceptions import ClientError
 from aws_bench.exceptions import OperationCancelled
 from aws_bench.logging.logger import get_logger
 from aws_bench.resource_management.cleanup.handlers.cross_service import (
+    clear_vpc_public_address_wedge,
     reap_ipam_child_pools,
     reap_vpc_enis,
     reap_vpc_security_groups,
@@ -449,12 +450,14 @@ class StackDeleter:
         ``DeleteStack(DeletionMode="FORCE_DELETE_STACK")`` deletes the stack,
         abandoning any resource it cannot delete (with none left, it is a plain
         delete — the "state just lagging" case). On ``DELETE_COMPLETE`` the result
-        flips to SUCCESS; abandoned logical IDs are WARNING-logged and recorded in
-        the manifest (``force_deleted``), then :meth:`_sweep_force_abandoned`
-        best-effort deletes whatever actually survived — so every caller (bulk,
-        single-stack ``cleanup_stack``, reset) reaps the leftovers, not just the
-        bulk path's Phase 3 scan. Never raises: a ``ClientError`` is logged,
-        result left FAILED.
+        flips to SUCCESS; abandoned logical IDs are recorded in the manifest
+        (``force_deleted``), then :meth:`_sweep_force_abandoned` best-effort deletes
+        whatever actually survived — so every caller (bulk, single-stack
+        ``cleanup_stack``, reset) reaps the leftovers, not just the bulk path's
+        Phase 3 scan. Resources the sweep could not delete are surfaced on
+        ``result.abandoned_resources`` so the single-stack/reset path (which runs no
+        orphan scan) can fail closed instead of absorbing them into a fresh baseline.
+        Never raises: a ``ClientError`` is logged, result left FAILED.
 
         ``force_deleted`` keeps its DELETE_FAILED-only contract, but the sweep
         receives the full pre-force snapshot: a resource blocked *behind* a
@@ -501,9 +504,13 @@ class StackDeleter:
             len(abandoned),
             ", ".join(abandoned),
         )
-        await self._sweep_force_abandoned(stack_name, snapshot)
+        # Surface only the survivors the sweep could NOT delete as orphans — the raw
+        # DELETE_FAILED list would false-positive on everything the sweep reaped.
+        result.abandoned_resources = await self._sweep_force_abandoned(stack_name, snapshot)
 
-    async def _sweep_force_abandoned(self, stack_name: str, snapshot: list[StackResource]) -> None:
+    async def _sweep_force_abandoned(
+        self, stack_name: str, snapshot: list[StackResource]
+    ) -> list[StackResource]:
         """Best-effort deletion of resources a ``FORCE_DELETE_STACK`` left behind.
 
         ``snapshot`` is the stack's resource list captured just before the
@@ -522,11 +529,15 @@ class StackDeleter:
         manifest: ``force_abandoned_swept`` (deleted here) and
         ``force_abandoned_sweep_failures`` (still stuck; the next deploy's
         "already exists" failure is then the honest signal).
+
+        Returns the still-stuck survivors so the single-stack/reset caller can
+        surface them as orphans. A best-effort crash returns ``[]`` (never raises),
+        so a sweep that dies under-reports rather than failing the delete.
         """
         try:
             candidates = [r for r in snapshot if r.status != DELETE_COMPLETE]
             if not candidates:
-                return
+                return []
             verified = await self._verifier.verify_resources(candidates)
             by_key = {(r.logical_id, r.physical_id): r for r in candidates}
             survivors = [
@@ -536,7 +547,7 @@ class StackDeleter:
                 and (v.logical_id, v.physical_id) in by_key
             ]
             if not survivors:
-                return
+                return []
             logger.debug(
                 "Stack '%s': sweeping %d resource(s) surviving force-delete: %s",
                 stack_name,
@@ -551,6 +562,7 @@ class StackDeleter:
             )
             failed_ids = {f.identifier for f in failures}
             swept = [r.logical_id for r in survivors if r.physical_id not in failed_ids]
+            stuck = [r for r in survivors if r.physical_id in failed_ids]
             async with self._manifest_lock:
                 entry = self._manifest.setdefault(stack_name, {})
                 if swept:
@@ -564,6 +576,7 @@ class StackDeleter:
                     len(failures),
                     ", ".join(sorted(failed_ids)),
                 )
+            return stuck
         except (asyncio.CancelledError, OperationCancelled):
             raise
         except Exception as e:  # noqa: BLE001 — sweep is best-effort by contract
@@ -572,6 +585,7 @@ class StackDeleter:
                 stack_name,
                 e,
             )
+            return []
 
     def _build_result(
         self, stack_name: str, status: str, resources: list[StackResource]
@@ -635,7 +649,13 @@ class StackDeleter:
     async def _reap_and_retry_networking(
         self, stack_name: str, result: StackDeletionResult
     ) -> None:
-        """Reap leftover VPC ENIs blocking deletion, then retry DeleteStack once."""
+        """Clear the NAT/EIP/IGW wedge and reap blocking ENIs, then retry DeleteStack once.
+
+        The single-stack path runs no pre-delete hooks, so the wedge is otherwise never
+        cleared here. Teardown runs before the ENI reap: a NAT gateway holds its own ENI
+        (awaited to ``deleted``) and EIP, so clearing it first keeps the reap and
+        DetachInternetGateway from tripping on it.
+        """
         if result.status != StackDeletionStatus.FAILED:
             return
         vpc_ids = self._collect_resource_physical_ids(result.resources, "AWS::EC2::VPC")
@@ -643,37 +663,49 @@ class StackDeleter:
             return
 
         logger.debug(
-            "Stack '%s' failed with %d VPC(s); reaping blocking ENIs before retry",
+            "Stack '%s' failed with %d VPC(s); clearing NAT/EIP/IGW wedge and reaping ENIs "
+            "before retry",
             stack_name,
             len(vpc_ids),
         )
-        # Uses the reaper's default 5-min budget — just long enough to force-clear
-        # customer/available ENIs and catch a fast requester-managed release. We no
-        # longer wait out the full 20-40 min for requester-managed ENIs: if only
-        # those remain, the stack is deferred (see _defer_if_requester_eni_only) and
-        # a later run reaps them once the owner releases, rather than idling here.
-        reap = await asyncio.to_thread(
-            reap_vpc_enis,
-            self._session,
-            vpc_ids,
-            region=self._region,
+        # Clear the NAT/EIP/IGW wedge first: a NAT gateway holds its own ENI and EIP, so
+        # tearing it down before the reap keeps DetachInternetGateway from tripping on a
+        # mapped public address. The ENI reap then uses its default 5-min budget — long
+        # enough to force-clear customer/available ENIs and catch a fast requester-managed
+        # release. We no longer wait out the full 20-40 min for requester-managed ENIs: if
+        # only those remain, the stack is deferred (see _defer_if_requester_eni_only) and a
+        # later run reaps them once the owner releases, rather than idling here.
+        wedge = await asyncio.to_thread(
+            clear_vpc_public_address_wedge, self._session, vpc_ids, region=self._region
         )
+        reap = await asyncio.to_thread(reap_vpc_enis, self._session, vpc_ids, region=self._region)
         async with self._manifest_lock:
-            self._manifest.setdefault(stack_name, {})["eni_reap"] = {
+            entry = self._manifest.setdefault(stack_name, {})
+            entry["nat_eip_igw_teardown"] = {
+                "vpc_ids": vpc_ids,
+                "nat_deleted": wedge.nat_deleted,
+                "eips_released": wedge.eips_released,
+                "igws_deleted": wedge.igws_deleted,
+                "remaining": wedge.remaining,
+            }
+            entry["eni_reap"] = {
                 "vpc_ids": vpc_ids,
                 "deleted": reap.deleted,
                 "detached": reap.detached,
                 "remaining": reap.remaining,
             }
-        if not reap.reaped_any and reap.remaining:
-            # Nothing was clearable — only requester-managed ENIs remain. Their
-            # owning service releases them asynchronously (~20-40 min after the
-            # owner's own delete), well past this run's bounded wait, so retrying
-            # DeleteStack now would just stall again. If the stack's only remaining
-            # blockers are the subnet/VPC/SG those ENIs pin, it is eventually-
-            # deletable, not stuck: defer it so the run isn't failed for a state
-            # that self-heals. Otherwise leave it FAILED for force-delete.
-            await self._defer_if_requester_eni_only(stack_name, result, reap.remaining)
+        made_progress = wedge.cleared_any or reap.reaped_any
+        has_orphans = bool(wedge.remaining or reap.remaining)
+        if not made_progress and has_orphans:
+            # Nothing was clearable and something is still outstanding, so a retry would
+            # just stall again. If only requester-managed ENIs remain, the owning service
+            # releases them asynchronously (~20-40 min after the owner's own delete), well
+            # past this run's bounded wait; when the stack's only blockers are the
+            # subnet/VPC/SG those ENIs pin, it is eventually-deletable, not stuck, so defer
+            # it rather than fail the run. An unclearable wedge orphan alone just stalls a
+            # retry, so return without re-driving either way.
+            if reap.remaining:
+                await self._defer_if_requester_eni_only(stack_name, result, reap.remaining)
             return
 
         # ENIs are freed, but a leftover NON-default security group (one a managed
