@@ -35,6 +35,7 @@ from aws_bench.resource_management.cleanup.handlers import (
     s3_bucket_policy,  # noqa: F401
     s3express,  # noqa: F401
     s3tables,  # noqa: F401
+    sagemaker,  # noqa: F401
     servicecatalog,  # noqa: F401
     vpc,  # noqa: F401
 )
