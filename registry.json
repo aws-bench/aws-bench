@@ -1,7 +1,7 @@
 [
   {
     "name": "api-and-observability",
-    "version": "0.7.2",
+    "version": "0.7.3",
     "description": "Multi-service environment with OpenSearch, ECS, Lambda, API Gateway, CloudFront, Redshift, Step Functions, Bedrock, and ELBv2 across us-east-1, us-west-2, and ap-southeast-1; 15 aws-introspection tasks against api-and-observability.",
     "tasks": [
       {
@@ -73,7 +73,7 @@
       {
         "name": "find-missing-step-functions-state-machine",
         "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
-        "git_commit_id": "96b101fa1de0890f94e9ec7aea38c7b64ed49136",
+        "git_commit_id": "d4b1db211c07a240376ce73377550c802bf4cfef",
         "path": "tasks/api-and-observability/find-missing-step-functions-state-machine"
       },
       {
@@ -99,7 +99,7 @@
       {
         "name": "api-and-observability",
         "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
-        "git_commit_id": "2daf77d2d41c21bae00bf8227fc463be51f721d0",
+        "git_commit_id": "d4b1db211c07a240376ce73377550c802bf4cfef",
         "path": "scenarios/api-and-observability"
       }
     ],
@@ -128,7 +128,7 @@
   },
   {
     "name": "compute-and-data",
-    "version": "0.7.2",
+    "version": "0.7.3",
     "description": "Mutation scenario (compute-and-data) \u2014 multi-region: us-east-1 (primary deployments), us-east-2 (Image Builder distribution), ap-southeast-1 (EMR cluster creation); 27 aws-introspection tasks against compute-and-data.",
     "tasks": [
       {
@@ -218,7 +218,7 @@
       {
         "name": "ec2-image-builder-pipeline",
         "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
-        "git_commit_id": "7214635d5616d6875d9dba19fb0f815155ca4fac",
+        "git_commit_id": "d4b1db211c07a240376ce73377550c802bf4cfef",
         "path": "tasks/compute-and-data/ec2-image-builder-pipeline"
       },
       {
@@ -635,7 +635,7 @@
   },
   {
     "name": "reference-architectures",
-    "version": "0.7.1",
+    "version": "0.7.2",
     "description": "Multi-service environment with ALB, API Gateway, AppSync, Backup, Batch, CloudFormation, CloudFront, CloudWatch, CodePipeline, Cognito, DynamoDB, EC2, ECS, EventBridge, Glue, ImageBuilder, Lambda, Lex, MQ, RDS, Rekognition, Route53, S3, Service Catalog, SSM, Step Functions, Transfer Family, and WAF stacks in us-east-1; 11 aws-introspection tasks against reference-architectures.",
     "tasks": [
       {
@@ -653,7 +653,7 @@
       {
         "name": "diagnose-batch-job-no-logs",
         "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
-        "git_commit_id": "96b101fa1de0890f94e9ec7aea38c7b64ed49136",
+        "git_commit_id": "d4b1db211c07a240376ce73377550c802bf4cfef",
         "path": "tasks/reference-architectures/diagnose-batch-job-no-logs"
       },
       {
@@ -671,7 +671,7 @@
       {
         "name": "diagnose-rekognition-reupload-stale",
         "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
-        "git_commit_id": "96b101fa1de0890f94e9ec7aea38c7b64ed49136",
+        "git_commit_id": "d4b1db211c07a240376ce73377550c802bf4cfef",
         "path": "tasks/reference-architectures/diagnose-rekognition-reupload-stale"
       },
       {
@@ -738,7 +738,7 @@
   },
   {
     "name": "serverless-apps",
-    "version": "0.7.1",
+    "version": "0.7.2",
     "description": "Complex multi-service environment: VPC, ALB, RDS, MSK, ECS, DocumentDB, Lambda, S3, SNS, Firehose. Single stack across us-east-1; 13 aws-introspection tasks against serverless-apps.",
     "tasks": [
       {
@@ -786,7 +786,7 @@
       {
         "name": "find-sns-triggered-lambda-functions",
         "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
-        "git_commit_id": "96b101fa1de0890f94e9ec7aea38c7b64ed49136",
+        "git_commit_id": "d4b1db211c07a240376ce73377550c802bf4cfef",
         "path": "tasks/serverless-apps/find-sns-triggered-lambda-functions"
       },
       {
@@ -938,13 +938,13 @@
   },
   {
     "name": "troubleshooting-multiservice",
-    "version": "0.7.1",
+    "version": "0.7.2",
     "description": "30 stacks across 7 regions exercising EC2/ECS/ECR/Glue/Lambda/CFN/RDS/Redshift/SageMaker. Includes setup scripts that build & push Docker images to ECR, mutate KMS key policies, trigger expected Glue/SFN states, and intentionally drive one CFN stack into UPDATE_FAILED for a troubleshooting task; 21 aws-introspection tasks against troubleshooting-multiservice.",
     "tasks": [
       {
         "name": "asg-instance-health-check-failure",
         "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
-        "git_commit_id": "96b101fa1de0890f94e9ec7aea38c7b64ed49136",
+        "git_commit_id": "d4b1db211c07a240376ce73377550c802bf4cfef",
         "path": "tasks/troubleshooting-multiservice/asg-instance-health-check-failure"
       },
       {
@@ -962,7 +962,7 @@
       {
         "name": "diagnose-asg-instance-issues",
         "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
-        "git_commit_id": "96b101fa1de0890f94e9ec7aea38c7b64ed49136",
+        "git_commit_id": "d4b1db211c07a240376ce73377550c802bf4cfef",
         "path": "tasks/troubleshooting-multiservice/diagnose-asg-instance-issues"
       },
       {
@@ -998,7 +998,7 @@
       {
         "name": "diagnose-step-functions-failing-executions",
         "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
-        "git_commit_id": "96b101fa1de0890f94e9ec7aea38c7b64ed49136",
+        "git_commit_id": "d4b1db211c07a240376ce73377550c802bf4cfef",
         "path": "tasks/troubleshooting-multiservice/diagnose-step-functions-failing-executions"
       },
       {
@@ -1058,7 +1058,7 @@
       {
         "name": "troubleshoot-glue-job-table-read-failure",
         "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
-        "git_commit_id": "96b101fa1de0890f94e9ec7aea38c7b64ed49136",
+        "git_commit_id": "d4b1db211c07a240376ce73377550c802bf4cfef",
         "path": "tasks/troubleshooting-multiservice/troubleshoot-glue-job-table-read-failure"
       },
       {
@@ -1072,7 +1072,7 @@
       {
         "name": "troubleshooting-multiservice",
         "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
-        "git_commit_id": "3a1661a070eb25649ec8e5bc987a210e324469d5",
+        "git_commit_id": "d4b1db211c07a240376ce73377550c802bf4cfef",
         "path": "scenarios/troubleshooting-multiservice"
       }
     ],
@@ -1192,7 +1192,7 @@
   },
   {
     "name": "aws-bench-advanced",
-    "version": "0.7.2",
+    "version": "0.7.3",
     "description": "Hard-tier launch dataset (phase 1): 47 introspection tasks across reference-architectures, api-and-observability, and troubleshooting-multiservice.",
     "tasks": [
       {
@@ -1210,7 +1210,7 @@
       {
         "name": "diagnose-batch-job-no-logs",
         "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
-        "git_commit_id": "96b101fa1de0890f94e9ec7aea38c7b64ed49136",
+        "git_commit_id": "d4b1db211c07a240376ce73377550c802bf4cfef",
         "path": "tasks/reference-architectures/diagnose-batch-job-no-logs"
       },
       {
@@ -1222,7 +1222,7 @@
       {
         "name": "diagnose-rekognition-reupload-stale",
         "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
-        "git_commit_id": "96b101fa1de0890f94e9ec7aea38c7b64ed49136",
+        "git_commit_id": "d4b1db211c07a240376ce73377550c802bf4cfef",
         "path": "tasks/reference-architectures/diagnose-rekognition-reupload-stale"
       },
       {
@@ -1318,7 +1318,7 @@
       {
         "name": "find-missing-step-functions-state-machine",
         "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
-        "git_commit_id": "96b101fa1de0890f94e9ec7aea38c7b64ed49136",
+        "git_commit_id": "d4b1db211c07a240376ce73377550c802bf4cfef",
         "path": "tasks/api-and-observability/find-missing-step-functions-state-machine"
       },
       {
@@ -1360,7 +1360,7 @@
       {
         "name": "diagnose-asg-instance-issues",
         "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
-        "git_commit_id": "96b101fa1de0890f94e9ec7aea38c7b64ed49136",
+        "git_commit_id": "d4b1db211c07a240376ce73377550c802bf4cfef",
         "path": "tasks/troubleshooting-multiservice/diagnose-asg-instance-issues"
       },
       {
@@ -1396,7 +1396,7 @@
       {
         "name": "asg-instance-health-check-failure",
         "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
-        "git_commit_id": "96b101fa1de0890f94e9ec7aea38c7b64ed49136",
+        "git_commit_id": "d4b1db211c07a240376ce73377550c802bf4cfef",
         "path": "tasks/troubleshooting-multiservice/asg-instance-health-check-failure"
       },
       {
@@ -1438,7 +1438,7 @@
       {
         "name": "troubleshoot-glue-job-table-read-failure",
         "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
-        "git_commit_id": "96b101fa1de0890f94e9ec7aea38c7b64ed49136",
+        "git_commit_id": "d4b1db211c07a240376ce73377550c802bf4cfef",
         "path": "tasks/troubleshooting-multiservice/troubleshoot-glue-job-table-read-failure"
       },
       {
@@ -1474,7 +1474,7 @@
       {
         "name": "diagnose-step-functions-failing-executions",
         "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
-        "git_commit_id": "96b101fa1de0890f94e9ec7aea38c7b64ed49136",
+        "git_commit_id": "d4b1db211c07a240376ce73377550c802bf4cfef",
         "path": "tasks/troubleshooting-multiservice/diagnose-step-functions-failing-executions"
       }
     ],
@@ -1488,13 +1488,13 @@
       {
         "name": "api-and-observability",
         "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
-        "git_commit_id": "2daf77d2d41c21bae00bf8227fc463be51f721d0",
+        "git_commit_id": "d4b1db211c07a240376ce73377550c802bf4cfef",
         "path": "scenarios/api-and-observability"
       },
       {
         "name": "troubleshooting-multiservice",
         "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
-        "git_commit_id": "3a1661a070eb25649ec8e5bc987a210e324469d5",
+        "git_commit_id": "d4b1db211c07a240376ce73377550c802bf4cfef",
         "path": "scenarios/troubleshooting-multiservice"
       }
     ],
@@ -1523,7 +1523,7 @@
   },
   {
     "name": "aws-bench-basic",
-    "version": "0.7.2",
+    "version": "0.7.3",
     "description": "Easy-tier launch dataset (phase 1): 78 introspection and mutation tasks across streaming-and-iot, compute-and-data, serverless-apps, and databases-and-storage.",
     "tasks": [
       {
@@ -1661,7 +1661,7 @@
       {
         "name": "ec2-image-builder-pipeline",
         "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
-        "git_commit_id": "7214635d5616d6875d9dba19fb0f815155ca4fac",
+        "git_commit_id": "d4b1db211c07a240376ce73377550c802bf4cfef",
         "path": "tasks/compute-and-data/ec2-image-builder-pipeline"
       },
       {
@@ -1781,7 +1781,7 @@
       {
         "name": "find-sns-triggered-lambda-functions",
         "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
-        "git_commit_id": "96b101fa1de0890f94e9ec7aea38c7b64ed49136",
+        "git_commit_id": "d4b1db211c07a240376ce73377550c802bf4cfef",
         "path": "tasks/serverless-apps/find-sns-triggered-lambda-functions"
       },
       {
@@ -2046,7 +2046,7 @@
   },
   {
     "name": "all",
-    "version": "0.7.3",
+    "version": "0.7.4",
     "description": "Unified dataset spanning 8 scenario(s) (api-and-observability, compute-and-data, databases-and-storage, ec2-multiregion, reference-architectures, serverless-apps, streaming-and-iot, troubleshooting-multiservice): 8 scenarios, 134 tasks.",
     "tasks": [
       {
@@ -2118,7 +2118,7 @@
       {
         "name": "find-missing-step-functions-state-machine",
         "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
-        "git_commit_id": "96b101fa1de0890f94e9ec7aea38c7b64ed49136",
+        "git_commit_id": "d4b1db211c07a240376ce73377550c802bf4cfef",
         "path": "tasks/api-and-observability/find-missing-step-functions-state-machine"
       },
       {
@@ -2226,7 +2226,7 @@
       {
         "name": "ec2-image-builder-pipeline",
         "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
-        "git_commit_id": "7214635d5616d6875d9dba19fb0f815155ca4fac",
+        "git_commit_id": "d4b1db211c07a240376ce73377550c802bf4cfef",
         "path": "tasks/compute-and-data/ec2-image-builder-pipeline"
       },
       {
@@ -2550,7 +2550,7 @@
       {
         "name": "diagnose-batch-job-no-logs",
         "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
-        "git_commit_id": "96b101fa1de0890f94e9ec7aea38c7b64ed49136",
+        "git_commit_id": "d4b1db211c07a240376ce73377550c802bf4cfef",
         "path": "tasks/reference-architectures/diagnose-batch-job-no-logs"
       },
       {
@@ -2568,7 +2568,7 @@
       {
         "name": "diagnose-rekognition-reupload-stale",
         "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
-        "git_commit_id": "96b101fa1de0890f94e9ec7aea38c7b64ed49136",
+        "git_commit_id": "d4b1db211c07a240376ce73377550c802bf4cfef",
         "path": "tasks/reference-architectures/diagnose-rekognition-reupload-stale"
       },
       {
@@ -2646,7 +2646,7 @@
       {
         "name": "find-sns-triggered-lambda-functions",
         "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
-        "git_commit_id": "96b101fa1de0890f94e9ec7aea38c7b64ed49136",
+        "git_commit_id": "d4b1db211c07a240376ce73377550c802bf4cfef",
         "path": "tasks/serverless-apps/find-sns-triggered-lambda-functions"
       },
       {
@@ -2730,7 +2730,7 @@
       {
         "name": "asg-instance-health-check-failure",
         "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
-        "git_commit_id": "96b101fa1de0890f94e9ec7aea38c7b64ed49136",
+        "git_commit_id": "d4b1db211c07a240376ce73377550c802bf4cfef",
         "path": "tasks/troubleshooting-multiservice/asg-instance-health-check-failure"
       },
       {
@@ -2748,7 +2748,7 @@
       {
         "name": "diagnose-asg-instance-issues",
         "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
-        "git_commit_id": "96b101fa1de0890f94e9ec7aea38c7b64ed49136",
+        "git_commit_id": "d4b1db211c07a240376ce73377550c802bf4cfef",
         "path": "tasks/troubleshooting-multiservice/diagnose-asg-instance-issues"
       },
       {
@@ -2784,7 +2784,7 @@
       {
         "name": "diagnose-step-functions-failing-executions",
         "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
-        "git_commit_id": "96b101fa1de0890f94e9ec7aea38c7b64ed49136",
+        "git_commit_id": "d4b1db211c07a240376ce73377550c802bf4cfef",
         "path": "tasks/troubleshooting-multiservice/diagnose-step-functions-failing-executions"
       },
       {
@@ -2844,7 +2844,7 @@
       {
         "name": "troubleshoot-glue-job-table-read-failure",
         "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
-        "git_commit_id": "96b101fa1de0890f94e9ec7aea38c7b64ed49136",
+        "git_commit_id": "d4b1db211c07a240376ce73377550c802bf4cfef",
         "path": "tasks/troubleshooting-multiservice/troubleshoot-glue-job-table-read-failure"
       },
       {
@@ -2858,7 +2858,7 @@
       {
         "name": "api-and-observability",
         "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
-        "git_commit_id": "2daf77d2d41c21bae00bf8227fc463be51f721d0",
+        "git_commit_id": "d4b1db211c07a240376ce73377550c802bf4cfef",
         "path": "scenarios/api-and-observability"
       },
       {
@@ -2900,7 +2900,7 @@
       {
         "name": "troubleshooting-multiservice",
         "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
-        "git_commit_id": "3a1661a070eb25649ec8e5bc987a210e324469d5",
+        "git_commit_id": "d4b1db211c07a240376ce73377550c802bf4cfef",
         "path": "scenarios/troubleshooting-multiservice"
       }
     ],
