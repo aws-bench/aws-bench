@@ -23,6 +23,7 @@ from aws_bench.resource_management.cleanup.handlers import (
     elbv2,  # noqa: F401
     emr,  # noqa: F401
     events,  # noqa: F401
+    glue,  # noqa: F401
     iam,  # noqa: F401
     imagebuilder,  # noqa: F401
     iot,  # noqa: F401
