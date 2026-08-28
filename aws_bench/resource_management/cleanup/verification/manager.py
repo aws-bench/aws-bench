@@ -11,6 +11,7 @@ from aws_bench.logging.logger import get_logger
 from aws_bench.resource_management.ccapi.exceptions import (
     ResourceExistenceCheckError,
     ResourceExistenceThrottledError,
+    ResourceExistenceUnsupportedError,
 )
 from aws_bench.resource_management.ccapi.manager import CloudControlManager, Resource
 from aws_bench.resource_management.ccapi.models import (
@@ -53,7 +54,7 @@ class ResourceVerifier:
             - EXISTS: Resource still exists
             - ABSENT: Resource confirmed gone
             - SKIPPED: Resource type cannot be verified (e.g., Custom::*)
-            - UNKNOWN: Verification failed (transient error)
+            - UNKNOWN: Verification did not answer (throttled, denied, or errored)
             - UNCHECKED_SUBRESOURCE: Sub-resource that requires parent context
 
         Limits concurrency to avoid thundering herd of API calls.
@@ -124,10 +125,13 @@ class ResourceVerifier:
             # accurate label is defence-in-depth. Must precede the base-class catch.
             logger.debug("CCAPI throttled verifying %s '%s'; marking UNKNOWN", rtype, pid)
             return _make_result(ExistenceStatus.UNKNOWN)
-        except ResourceExistenceCheckError:
-            # Expected error for unsupported CCAPI types
+        except ResourceExistenceUnsupportedError:
+            # Must precede the base-class catch.
             logger.debug("CCAPI does not support %s '%s'", rtype, pid)
             return _make_result(ExistenceStatus.SKIPPED)
+        except ResourceExistenceCheckError:
+            logger.debug("Existence check failed for %s '%s'; marking UNKNOWN", rtype, pid)
+            return _make_result(ExistenceStatus.UNKNOWN)
         except ClientError as exc:
             code = exc.response.get("Error", {}).get("Code", "")
             if code in UNSUPPORTED_CCAPI_ERROR_CODES:
