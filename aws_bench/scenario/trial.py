@@ -133,6 +133,7 @@ class ScenarioTrial:
             host_logs_dir=self._paths.trial_dir,
             cred_provider=cred_provider,
             account_mapping=config.account_mapping,
+            labels=config.labels,
         )
         self._merged_env = merged_env
         self._result = ScenarioTrialResult(
