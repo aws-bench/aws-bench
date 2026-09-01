@@ -262,6 +262,9 @@ Common flags:
 
 ## Checking results
 
+To run CloudGeni and a same-model generic Codex control against the same tasks,
+see [Running CloudGeni on AWS-Bench](cloudgeni.md).
+
 Results land in `jobs/<timestamp>/` under the package directory. For each trial:
 
 | File | Contents |
