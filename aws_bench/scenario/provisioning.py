@@ -66,7 +66,7 @@ from aws_bench.scenario.exceptions import (
 )
 from aws_bench.scenario.job import ScenarioJob
 from aws_bench.scenario.scenario import Scenario
-from aws_bench.utils.credentials_provider import CredentialProvider
+from aws_bench.utils.credentials_provider import CredentialProvider, build_session_name
 
 logger = get_logger(__name__)
 
@@ -596,7 +596,7 @@ def _ensure_cfn_ops_role(cred_provider: CredentialProvider, account_id: str) -> 
     bootstrap cfn-exec role. AdministratorAccess — same scope as cfn-exec.
     """
     session = cred_provider.get_session_for_account(
-        account_id, ORG_ACCESS_ROLE, "aws-bench-cfn-ops-role-setup"
+        account_id, ORG_ACCESS_ROLE, build_session_name("cfn-ops-role-setup")
     )
     iam = session.client("iam")
 
@@ -632,7 +632,7 @@ def _ensure_cfn_ops_role(cred_provider: CredentialProvider, account_id: str) -> 
 def _validate_cfn_ops_role(cred_provider: CredentialProvider, account_id: str) -> None:
     """Validate the externally managed CloudFormation execution role exists."""
     session = cred_provider.get_session_for_account(
-        account_id, ORG_ACCESS_ROLE, "aws-bench-cfn-ops-role-validate"
+        account_id, ORG_ACCESS_ROLE, build_session_name("cfn-ops-role-validate")
     )
     session.client("iam").get_role(RoleName=effective_cfn_role())
 
@@ -670,7 +670,7 @@ async def _provision_account_lifecycle(
                 session = cred_provider.get_session_for_account(
                     account_id,
                     ORG_ACCESS_ROLE,
-                    "aws-bench-runner-role-validate",
+                    build_session_name("runner-role-validate"),
                 )
                 await asyncio.to_thread(session.client("sts").get_caller_identity)
             except Exception as exc:  # noqa: BLE001

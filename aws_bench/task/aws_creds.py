@@ -20,7 +20,7 @@ logger = get_logger(__name__)
 def session_name(*, task_name: str, role_type: RoleType, job_id: UUID | None) -> str:
     r"""Build an STS RoleSessionName for CloudTrail auditing (<=64 chars, [\w+=,.@-]).
 
-    Ordered ``aws-bench-<role>-<task>-<job>`` so that if the name exceeds 64 chars,
+    Ordered ``app-<role>-<task>-<job>`` so that if the name exceeds 64 chars,
     ``build_session_name``'s trim drops the job-id tail rather than the
     audit-meaningful role and task. '/' in an org/name task name becomes '-'
     (STS allows only [\w+=,.@-]).

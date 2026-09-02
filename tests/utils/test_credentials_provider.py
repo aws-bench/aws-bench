@@ -9,8 +9,8 @@ import boto3
 import pytest
 
 from aws_bench.utils.credentials_provider import (
-    AWS_BENCH_PREFIX,
     MAX_SESSION_NAME_LEN,
+    SESSION_NAME_PREFIX,
     CredentialProvider,
     _create_refreshable_session,
     build_aws_credentials_file,
@@ -111,7 +111,7 @@ def test_assume_role_returns_credentials():
         }
     }
     provider = CredentialProvider(session=mock_session)
-    creds = provider.assume_role("111111111111", "TestRole", "aws-bench-test-session")
+    creds = provider.assume_role("111111111111", "TestRole", "app-test-session")
 
     assert creds["AWS_ACCESS_KEY_ID"] == "AKIA_TEST"
     assert creds["AWS_SECRET_ACCESS_KEY"] == "SECRET_TEST"
@@ -126,7 +126,7 @@ def test_assume_role_truncates_session_name_to_64_chars():
         "Credentials": {"AccessKeyId": "AK", "SecretAccessKey": "SK", "SessionToken": "ST"}
     }
     provider = CredentialProvider(session=mock_session)
-    provider.assume_role("111111111111", "TestRole", "aws-bench-" + "a" * 100)
+    provider.assume_role("111111111111", "TestRole", "app-" + "a" * 100)
 
     call_kwargs = mock_sts.assume_role.call_args[1]
     assert len(call_kwargs["RoleSessionName"]) == 64
@@ -151,7 +151,7 @@ def test_create_refreshable_session_returns_session():
     }
 
     session = _create_refreshable_session(
-        mock_parent_session, "arn:aws:iam::123456789012:role/TestRole", "aws-bench-test-session"
+        mock_parent_session, "arn:aws:iam::123456789012:role/TestRole", "app-test-session"
     )
 
     assert isinstance(session, boto3.Session)
@@ -176,7 +176,7 @@ def test_create_refreshable_session_uses_correct_params():
     session = _create_refreshable_session(
         mock_parent_session,
         "arn:aws:iam::123456789012:role/TestRole",
-        "aws-bench-test-session-name",
+        "app-test-session-name",
     )
 
     # Trigger credential fetch by accessing credentials
@@ -187,7 +187,7 @@ def test_create_refreshable_session_uses_correct_params():
     mock_sts.assume_role.assert_called_once()
     call_kwargs = mock_sts.assume_role.call_args.kwargs
     assert call_kwargs["RoleArn"] == "arn:aws:iam::123456789012:role/TestRole"
-    assert call_kwargs["RoleSessionName"] == "aws-bench-test-session-name"
+    assert call_kwargs["RoleSessionName"] == "app-test-session-name"
 
 
 def test_create_refreshable_session_creates_fresh_sts_client_on_each_refresh():
@@ -217,7 +217,7 @@ def test_create_refreshable_session_creates_fresh_sts_client_on_each_refresh():
     mock_parent_session.client.side_effect = make_sts
 
     session = _create_refreshable_session(
-        mock_parent_session, "arn:aws:iam::123456789012:role/TestRole", "aws-bench-test-session"
+        mock_parent_session, "arn:aws:iam::123456789012:role/TestRole", "app-test-session"
     )
 
     # First credential fetch creates first STS client
@@ -245,11 +245,11 @@ def test_get_session_for_account_returns_session(mock_create_session):
     mock_create_session.return_value = mock_created_session
 
     provider = CredentialProvider(session=mock_session)
-    result = provider.get_session_for_account("111111111111", "TestRole", "aws-bench-sess")
+    result = provider.get_session_for_account("111111111111", "TestRole", "app-sess")
 
     assert result is mock_created_session
     mock_create_session.assert_called_once_with(
-        mock_session, "arn:aws:iam::111111111111:role/TestRole", "aws-bench-sess", "us-east-1"
+        mock_session, "arn:aws:iam::111111111111:role/TestRole", "app-sess", "us-east-1"
     )
 
 
@@ -269,7 +269,7 @@ def test_chain_assume_role_without_role_returns_org_creds(mock_session_cls):
         }
     }
     provider = CredentialProvider(session=mock_session)
-    creds = provider.chain_assume_role(account_id="111111111111", session_name="aws-bench-sess")
+    creds = provider.chain_assume_role(account_id="111111111111", session_name="app-sess")
 
     assert creds["AWS_ACCESS_KEY_ID"] == "ORG_AK"
     mock_sts.assume_role.assert_called_once()  # only hop 1
@@ -291,12 +291,12 @@ def test_chain_assume_role_with_org_role_skips_second_hop(mock_session_cls):
     }
     provider = CredentialProvider(session=mock_session)
     creds = provider.chain_assume_role(
-        account_id="111111111111", session_name="aws-bench-sess", role_name=ORG_ACCESS_ROLE
+        account_id="111111111111", session_name="app-sess", role_name=ORG_ACCESS_ROLE
     )
 
     assert creds["AWS_ACCESS_KEY_ID"] == "ORG_AK"
     mock_sts.assume_role.assert_called_once()  # only hop 1
-    assert mock_sts.assume_role.call_args.kwargs["RoleSessionName"] == "aws-bench-sess"
+    assert mock_sts.assume_role.call_args.kwargs["RoleSessionName"] == "app-sess"
 
 
 @patch("aws_bench.utils.credentials_provider.boto3.Session")
@@ -324,7 +324,7 @@ def test_chain_assume_role_with_role_performs_two_hops(mock_session_cls):
 
     provider = CredentialProvider(session=mock_session)
     creds = provider.chain_assume_role(
-        account_id="111111111111", session_name="aws-bench-sess", role_name="TaskRole"
+        account_id="111111111111", session_name="app-sess", role_name="TaskRole"
     )
 
     assert creds["AWS_ACCESS_KEY_ID"] == "TASK_AK"
@@ -349,7 +349,7 @@ def test_chain_assume_role_first_hop_failure(mock_session_cls):
 
     with pytest.raises(ClientError):
         provider.chain_assume_role(
-            account_id="111111111111", session_name="aws-bench-sess", role_name="TaskRole"
+            account_id="111111111111", session_name="app-sess", role_name="TaskRole"
         )
 
 
@@ -379,7 +379,7 @@ def test_chain_assume_role_second_hop_failure(mock_session_cls):
 
     with pytest.raises(ClientError):
         provider.chain_assume_role(
-            account_id="111111111111", session_name="aws-bench-sess", role_name="TaskRole"
+            account_id="111111111111", session_name="app-sess", role_name="TaskRole"
         )
 
 
@@ -403,7 +403,7 @@ def test_create_regional_session_shares_credentials():
 
     # Create parent session with refreshable credentials
     parent_session = _create_refreshable_session(
-        mock_parent_session, "arn:aws:iam::123456789012:role/TestRole", "aws-bench-test-session"
+        mock_parent_session, "arn:aws:iam::123456789012:role/TestRole", "app-test-session"
     )
 
     # Create regional session
@@ -431,7 +431,7 @@ def test_create_regional_session_preserves_refreshable_credentials():
 
     # Create parent session
     parent_session = _create_refreshable_session(
-        mock_parent_session, "arn:aws:iam::123456789012:role/TestRole", "aws-bench-test-session"
+        mock_parent_session, "arn:aws:iam::123456789012:role/TestRole", "app-test-session"
     )
 
     # Get credentials from parent
@@ -622,7 +622,7 @@ def test_regional_session_stamps_adaptive_retry_default():
         }
     }
     session = _create_refreshable_session(
-        mock_parent, "arn:aws:iam::123456789012:role/TestRole", "aws-bench-test"
+        mock_parent, "arn:aws:iam::123456789012:role/TestRole", "app-test"
     )
     regional = create_regional_session(session, "us-west-2")
 
@@ -648,7 +648,7 @@ def test_explicit_client_config_overrides_retry_default():
         }
     }
     session = _create_refreshable_session(
-        mock_parent, "arn:aws:iam::123456789012:role/TestRole", "aws-bench-test"
+        mock_parent, "arn:aws:iam::123456789012:role/TestRole", "app-test"
     )
 
     # A timeout-only config keeps the inherited adaptive retries (field-by-field merge).
@@ -783,22 +783,22 @@ def test_build_aws_credentials_file_empty_mapping_returns_empty_string():
 
 
 def test_build_session_name_prepends_prefix_and_joins():
-    """Composes aws-bench-<segments> with hyphens from the shared prefix constant."""
-    assert build_session_name("rm", "cleanup") == "aws-bench-rm-cleanup"
-    assert build_session_name("quota", "verify", "123456") == "aws-bench-quota-verify-123456"
-    assert build_session_name("show") == "aws-bench-show"
+    """Composes app-<segments> with hyphens from the shared prefix constant."""
+    assert build_session_name("rm", "cleanup") == "app-rm-cleanup"
+    assert build_session_name("quota", "verify", "123456") == "app-quota-verify-123456"
+    assert build_session_name("show") == "app-show"
 
 
 def test_build_session_name_uses_prefix_constant():
-    """The prefix comes from AWS_BENCH_PREFIX, the single source of truth."""
-    assert build_session_name("x").startswith(AWS_BENCH_PREFIX + "-")
+    """The prefix comes from SESSION_NAME_PREFIX, the single source of truth."""
+    assert build_session_name("x").startswith(SESSION_NAME_PREFIX + "-")
 
 
 def test_build_session_name_truncates_to_sts_limit():
     """Composed names are truncated to STS's 64-char limit."""
     result = build_session_name("a" * 100)
     assert len(result) == MAX_SESSION_NAME_LEN
-    assert result.startswith("aws-bench-")
+    assert result.startswith("app-")
 
 
 def test_build_session_name_output_passes_enforce():
@@ -813,23 +813,23 @@ def test_build_session_name_output_passes_enforce():
 @pytest.mark.parametrize(
     "name",
     [
-        "aws-bench-rm-cleanup",
-        "aws-bench-rm-cleanup-stack",
-        "aws-bench-rm-reset",
-        "aws-bench-rm-verify",
-        "aws-bench-rm-snapshot-post_setup",
-        "aws-bench-role-probe",
-        "aws-bench-show",
-        "aws-bench-exports-123456",
-        "aws-bench-quota-123456",
-        "aws-bench-quota-verify-123456",
-        "aws-bench-quota-show-123456",
-        "aws-bench-org-123456",
-        "aws-bench-agent-aws-introspection-list-ec-instances",
+        "app-rm-cleanup",
+        "app-rm-cleanup-stack",
+        "app-rm-reset",
+        "app-rm-verify",
+        "app-rm-snapshot-post_setup",
+        "app-role-probe",
+        "app-show",
+        "app-exports-123456",
+        "app-quota-123456",
+        "app-quota-verify-123456",
+        "app-quota-show-123456",
+        "app-org-123456",
+        "app-agent-aws-introspection-list-ec-instances",
     ],
 )
 def test_enforce_session_name_accepts_convention(name):
-    """Every name following the aws-bench- convention passes through unchanged."""
+    """Every name following the app- convention passes through unchanged."""
     assert enforce_session_name(name) == name
 
 
@@ -848,17 +848,17 @@ def test_enforce_session_name_accepts_convention(name):
     ],
 )
 def test_enforce_session_name_rejects_missing_prefix(name):
-    """Names without the aws-bench- prefix are rejected before reaching STS."""
-    with pytest.raises(ValueError, match="must start with 'aws-bench-'"):
+    """Names without the app- prefix are rejected before reaching STS."""
+    with pytest.raises(ValueError, match="must start with 'app-'"):
         enforce_session_name(name)
 
 
 def test_enforce_session_name_truncates_to_sts_limit():
     """Over-long names are truncated to STS's 64-char limit, prefix preserved."""
-    long_name = "aws-bench-" + "a" * 100
+    long_name = "app-" + "a" * 100
     result = enforce_session_name(long_name)
     assert len(result) == MAX_SESSION_NAME_LEN
-    assert result.startswith("aws-bench-")
+    assert result.startswith("app-")
 
 
 def test_assume_role_enforces_session_name_convention():
@@ -869,7 +869,7 @@ def test_assume_role_enforces_session_name_convention():
     """
     mock_session = MagicMock()
     provider = CredentialProvider(session=mock_session)
-    with pytest.raises(ValueError, match="must start with 'aws-bench-'"):
+    with pytest.raises(ValueError, match="must start with 'app-'"):
         provider.assume_role("123456789012", "SomeRole", "bad-session-name")
     # STS must never be invoked with an invalid session name.
     mock_session.client.return_value.assume_role.assert_not_called()

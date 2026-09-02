@@ -63,5 +63,5 @@ def test_session_for_account_assumes_org_role_with_attribution(mocker):
     assert "PolicyArns" not in kwargs
     # Short-lived creds bound the credential lifetime.
     assert kwargs["DurationSeconds"] == constants.SCAN_ASSUME_ROLE_DURATION_S
-    # Session name carries the aws-bench- prefix for CloudTrail attribution.
-    assert kwargs["RoleSessionName"].startswith("aws-bench-")
+    # Session name carries the app- prefix for CloudTrail attribution.
+    assert kwargs["RoleSessionName"].startswith("app-")
