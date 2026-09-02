@@ -16,14 +16,14 @@ def test_session_name_includes_job_id_when_set():
     )
     # '/' is replaced with '-' (STS session names allow only [\w+=,.@-]).
     assert "org-my-task" in name
-    # Ordered aws-bench-<role>-<task>-<job>: role leads so a trim drops the job tail.
-    assert name.startswith(f"aws-bench-{RoleType.AGENT}-")
+    # Ordered app-<role>-<task>-<job>: role leads so a trim drops the job tail.
+    assert name.startswith(f"app-{RoleType.AGENT}-")
     assert str(UUID(int=1)) in name
 
 
 def test_session_name_omits_job_id_when_none():
     name = aws_creds.session_name(task_name="org/my-task", role_type=RoleType.VERIFIER, job_id=None)
-    assert name == "aws-bench-verifier-org-my-task"
+    assert name == "app-verifier-org-my-task"
 
 
 def test_resolve_env_with_creds_substitutes_then_appends_creds():
@@ -87,7 +87,7 @@ def test_assume_role_for_script_falls_back_to_org_access_role(mocker):
 @pytest.mark.parametrize("role_type", list(RoleType))
 def test_session_name_role_types(role_type):
     name = aws_creds.session_name(task_name="t", role_type=role_type, job_id=None)
-    assert name.startswith(f"aws-bench-{role_type}-")
+    assert name.startswith(f"app-{role_type}-")
 
 
 def test_session_name_overflow_trims_to_64_keeping_role_and_task():
@@ -98,6 +98,6 @@ def test_session_name_overflow_trims_to_64_keeping_role_and_task():
     )
     assert len(name) == 64
     # Role and the (start of the) task survive the trim; the job-id tail is cut.
-    assert name.startswith("aws-bench-verifier-some-org-aaa")
+    assert name.startswith("app-verifier-some-org-aaa")
     # STS charset: [\w+=,.@-]. '/' must have been replaced.
     assert "/" not in name

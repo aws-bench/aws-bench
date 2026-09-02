@@ -41,12 +41,12 @@ def test_org_access_role_maps_directly_to_runner_role(tmp_path: Path, monkeypatc
         "aws_bench.utils.credentials_provider._create_refreshable_session"
     ) as create_session:
         provider.get_session_for_account(
-            "111122223333", "OrganizationAccountAccessRole", "aws-bench-test"
+            "111122223333", "OrganizationAccountAccessRole", "app-test"
         )
     create_session.assert_called_once_with(
         session,
         "arn:aws:iam::111122223333:role/AWSBenchRunner",
-        "aws-bench-test",
+        "app-test",
         "us-east-1",
     )
 
@@ -57,19 +57,19 @@ def test_explicit_task_role_chains_from_configured_runner(tmp_path: Path, monkey
     with patch(
         "aws_bench.utils.credentials_provider._create_refreshable_session"
     ) as create_session:
-        provider.get_session_for_account("111122223333", "TaskRole", "aws-bench-task")
+        provider.get_session_for_account("111122223333", "TaskRole", "app-task")
     assert create_session.call_count == 2
     runner_session = create_session.return_value
     assert create_session.call_args_list[0].args == (
         session,
         "arn:aws:iam::111122223333:role/AWSBenchRunner",
-        "aws-bench-runner-223333",
+        "app-runner-223333",
         "us-east-1",
     )
     assert create_session.call_args_list[1].args == (
         runner_session,
         "arn:aws:iam::111122223333:role/TaskRole",
-        "aws-bench-task",
+        "app-task",
         "us-east-1",
     )
 
@@ -84,7 +84,7 @@ def test_already_active_runner_role_is_not_self_assumed(tmp_path: Path, monkeypa
         patch("aws_bench.utils.credentials_provider.create_regional_session") as regional,
     ):
         provider.get_session_for_account(
-            "111122223333", "OrganizationAccountAccessRole", "aws-bench-test"
+            "111122223333", "OrganizationAccountAccessRole", "app-test"
         )
     create.assert_not_called()
     regional.assert_called_once_with(session, "us-east-1")
@@ -106,10 +106,10 @@ def test_unnamed_role_assumes_runner_not_caller_credentials(tmp_path: Path, monk
         }
     )
 
-    credentials = provider.chain_assume_role("111122223333", "aws-bench-task", role_name=None)
+    credentials = provider.chain_assume_role("111122223333", "app-task", role_name=None)
 
     provider.assume_role.assert_called_once_with(
-        "111122223333", "AWSBenchRunner", "aws-bench-task", duration_seconds=3600
+        "111122223333", "AWSBenchRunner", "app-task", duration_seconds=3600
     )
     assert credentials["AWS_ACCESS_KEY_ID"] == "runner-key"
 
@@ -118,7 +118,7 @@ def test_account_outside_allowlist_is_refused(tmp_path: Path, monkeypatch):
     _activate(tmp_path, monkeypatch)
     provider, _ = _provider()
     with pytest.raises(AccountResolutionError, match="not in the active pre-existing allowlist"):
-        provider.chain_assume_role("999988887777", "aws-bench-test")
+        provider.chain_assume_role("999988887777", "app-test")
 
 
 def test_static_task_credentials_chain_through_runner(tmp_path: Path, monkeypatch):
@@ -144,18 +144,16 @@ def test_static_task_credentials_chain_through_runner(tmp_path: Path, monkeypatc
         "aws_bench.utils.credentials_provider.env_credentials_dict_to_session",
         return_value=runner_session,
     ):
-        credentials = provider.chain_assume_role(
-            "111122223333", "aws-bench-task", role_name="TaskRole"
-        )
+        credentials = provider.chain_assume_role("111122223333", "app-task", role_name="TaskRole")
     provider.assume_role.assert_called_once_with(
         "111122223333",
         "AWSBenchRunner",
-        "aws-bench-runner-223333",
+        "app-runner-223333",
         duration_seconds=3600,
     )
     runner_sts.assume_role.assert_called_once_with(
         RoleArn="arn:aws:iam::111122223333:role/TaskRole",
-        RoleSessionName="aws-bench-task",
+        RoleSessionName="app-task",
         DurationSeconds=3600,
     )
     assert credentials["AWS_ACCESS_KEY_ID"] == "task-key"

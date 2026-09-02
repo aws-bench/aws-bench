@@ -51,7 +51,7 @@ def test_cleanup_account_creates_cleanup_manager_and_delegates():
         result = asyncio.run(ResourceManager.cleanup_account("123456789012", regions=["us-east-1"]))
 
         mock_cred_provider.get_session_for_account.assert_called_once_with(
-            "123456789012", "OrganizationAccountAccessRole", "aws-bench-rm-cleanup-account"
+            "123456789012", "OrganizationAccountAccessRole", "app-rm-cleanup-account"
         )
         mock_cleanup_cls.assert_called_once_with(
             mock_session, env_name=None, account_id="123456789012"
@@ -109,7 +109,7 @@ def test_cleanup_stack_creates_cleanup_manager_and_delegates():
         result = asyncio.run(ResourceManager.cleanup_stack("123456789012", "my-stack"))
 
         mock_cred_provider.get_session_for_account.assert_called_once_with(
-            "123456789012", "OrganizationAccountAccessRole", "aws-bench-rm-cleanup-stack"
+            "123456789012", "OrganizationAccountAccessRole", "app-rm-cleanup-stack"
         )
         mock_cleanup_cls.assert_called_once_with(mock_session, account_id="123456789012")
         mock_cleanup_manager.cleanup_stack.assert_called_once_with("my-stack")

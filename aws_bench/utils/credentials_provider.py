@@ -37,24 +37,25 @@ def _apply_client_defaults(session: boto3.Session) -> boto3.Session:
 
 
 # Building blocks for STS RoleSessionNames. Every name is composed as
-# ``aws-bench[-<segment>...]`` so CloudTrail entries are uniformly attributable
-# to the tool. ``AWS_BENCH_PREFIX`` is the single source of truth for that prefix.
-AWS_BENCH_PREFIX = "aws-bench"
+# ``app[-<segment>...]`` so CloudTrail entries are uniformly attributable and the
+# name stays neutral — it must not reveal to an evaluated agent that it is running
+# inside aws-bench. ``SESSION_NAME_PREFIX`` is the single source of truth.
+SESSION_NAME_PREFIX = "app"
 # STS caps RoleSessionName at 64 chars.
 MAX_SESSION_NAME_LEN = 64
 
 
 def build_session_name(*segments: str) -> str:
-    """Compose an ``aws-bench``-prefixed STS RoleSessionName from ``segments``.
+    """Compose a ``SESSION_NAME_PREFIX``-prefixed STS RoleSessionName from ``segments``.
 
-    Joins ``AWS_BENCH_PREFIX`` and ``segments`` with ``-`` and truncates to STS's
+    Joins ``SESSION_NAME_PREFIX`` and ``segments`` with ``-`` and truncates to STS's
     64-char limit. This is the single constructor for session names, so the
-    CloudTrail-attribution prefix lives in exactly one place.
+    prefix lives in exactly one place.
 
     Example:
-        ``build_session_name("rm", "cleanup")`` -> ``"aws-bench-rm-cleanup"``
+        ``build_session_name("rm", "cleanup")`` -> ``"app-rm-cleanup"``
     """
-    return "-".join([AWS_BENCH_PREFIX, *segments])[:MAX_SESSION_NAME_LEN]
+    return "-".join([SESSION_NAME_PREFIX, *segments])[:MAX_SESSION_NAME_LEN]
 
 
 def enforce_session_name(session_name: str) -> str:
@@ -62,16 +63,16 @@ def enforce_session_name(session_name: str) -> str:
 
     Backstop at the generic STS choke points all assume-role paths funnel
     through: even a hand-written name (not built via :func:`build_session_name`)
-    must carry the ``aws-bench-`` prefix, so the convention is enforced at runtime.
+    must carry the ``app-`` prefix, so the convention is enforced at runtime.
 
     Returns the name truncated to STS's 64-char limit; callers historically
-    relied on this truncation (e.g. the ``aws-bench-<role>-<task>-<job>`` builder
+    relied on this truncation (e.g. the ``app-<role>-<task>-<job>`` builder
     drops its job-id tail rather than the audit-meaningful prefix).
 
     Raises:
-        ValueError: If the name does not start with ``aws-bench-``.
+        ValueError: If the name does not start with ``app-``.
     """
-    required_prefix = AWS_BENCH_PREFIX + "-"
+    required_prefix = SESSION_NAME_PREFIX + "-"
     if not session_name.startswith(required_prefix):
         raise ValueError(
             f"RoleSessionName must start with {required_prefix!r} for CloudTrail "
