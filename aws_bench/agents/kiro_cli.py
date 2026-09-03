@@ -172,13 +172,25 @@ class KiroCli(BaseInstalledAgent):
         cli_flags = self.build_cli_flags()
         extra_flags = (cli_flags + " ") if cli_flags else ""
 
-        # Copy skills into ~/.kiro/skills/ if configured
+        # Stage skills where kiro-cli's default agent looks. The default agent
+        # scans both `.kiro/skills/*/SKILL.md` (workspace, relative to the run's
+        # cwd) and `~/.kiro/skills/*/SKILL.md` (global) and surfaces each skill's
+        # name/description in context (headless included), reading a full
+        # SKILL.md on demand. Copying only to ~/.kiro/skills has left the dir
+        # empty at chat time when the copy step's $HOME/cwd differed from the
+        # chat process, so we stage to BOTH locations. The echo/ls line records
+        # the resolved paths and file counts in the run log for debugging.
         if self.skills_dir:
+            src = shlex.quote(self.skills_dir)
             await self.exec_as_agent(
                 environment,
                 command=(
-                    f"mkdir -p ~/.kiro/skills && "
-                    f"cp -r {shlex.quote(self.skills_dir)}/* ~/.kiro/skills/ 2>/dev/null || true"
+                    f'echo "kiro-skills: HOME=$HOME PWD=$PWD src={self.skills_dir}"; '
+                    f"mkdir -p ~/.kiro/skills .kiro/skills && "
+                    f"cp -r {src}/* ~/.kiro/skills/ 2>/dev/null || true; "
+                    f"cp -r {src}/* .kiro/skills/ 2>/dev/null || true; "
+                    f'echo "kiro-skills: global=$(ls ~/.kiro/skills 2>/dev/null | wc -l) '
+                    f'workspace=$(ls .kiro/skills 2>/dev/null | wc -l)"'
                 ),
                 env=env or None,
             )
