@@ -21,7 +21,10 @@ from aws_bench.constants import OUTPUT_DIR
 from aws_bench.exceptions import OperationCancelled
 from aws_bench.logging.logger import get_logger, log_context
 from aws_bench.resource_management.ccapi.models import DeletionFailureEvent, Resource, ScanResult
-from aws_bench.resource_management.cleanup.account_scanner import AccountScanner
+from aws_bench.resource_management.cleanup.account_scanner import (
+    AccountScanner,
+    ExistenceCheckCache,
+)
 from aws_bench.resource_management.cleanup.models import (
     AccountScanResult,
     CleanupSummary,
@@ -74,6 +77,10 @@ class CleanupManager:
         self._session = session
         self._account_id: str | None = account_id
         self._env_name = env_name
+        # One existence-check memo per cleanup run, shared across the three sweep waves and the
+        # final orphan scan (each builds its own AccountScanner). Scoped to this manager so a
+        # later cleanup re-checks against fresh AWS state; see ExistenceCheckCache.
+        self._existence_cache = ExistenceCheckCache()
         if output_dir is None:
             output_dir = OUTPUT_DIR / "cleanup"
         self._output_dir = output_dir
@@ -508,11 +515,42 @@ class CleanupManager:
         diff and skip a type that failed to enumerate rather than deleting its live
         resources as if they were new. ``include_infra`` keeps CDK bootstrap/toolkit
         resources in the scan (filtered out by default).
+
+        The scan does NOT run the host-side CCAPI stale-read guard
+        (``verify_absent=False``): the caller diffs this against the baseline first
+        (``find_new_resources``) and re-checks only the surviving residuals via
+        ``_drop_stale_residuals``. Guarding the full live inventory here would
+        CCAPI-``GetResource`` every account-default resource on every sweep wave —
+        the F4 verification storm.
         """
         region_session = create_regional_session(self._session, region)
-        return AccountScanner(region_session, account_id=self._get_account_id()).scan_region(
-            region, include_infra=include_infra
+        return AccountScanner(
+            region_session,
+            account_id=self._get_account_id(),
+            existence_cache=self._existence_cache,
+        ).scan_region(region, include_infra=include_infra, verify_absent=False)
+
+    async def _drop_stale_residuals(
+        self, region: str, residuals: dict[str, list[dict]]
+    ) -> dict[str, list[dict]]:
+        """Drop residuals a host-side CCAPI check confirms already gone (stale fast-scan reads).
+
+        The sweep scan no longer runs this guard over the full inventory (see
+        ``_scan_region_resources``); it runs here, on the handful of residuals the baseline diff
+        surfaced. Fail-closed and unchanged in meaning: only a definitive ResourceNotFound drops a
+        residual; one that still exists, is CCAPI-uncheckable, or errs is kept for the sweeper to
+        attempt. Shares the per-run existence cache, so a residual re-checked across waves (and by
+        the final orphan scan) hits CCAPI once.
+        """
+        if not residuals:
+            return residuals
+        region_session = create_regional_session(self._session, region)
+        scanner = AccountScanner(
+            region_session,
+            account_id=self._get_account_id(),
+            existence_cache=self._existence_cache,
         )
+        return await asyncio.to_thread(scanner.drop_confirmed_absent, region_session, residuals)
 
     async def _delete_resources_created_after_setup(
         self, region: str, setup: SnapshotResources | None
@@ -541,6 +579,12 @@ class CleanupManager:
         residuals, _global = partition_by_scope(residuals)
         if not residuals:
             logger.debug(f"Phase 1: no run-created regional residuals in {region}")
+            return
+        # Host-side re-check of just these residuals (not the full inventory) — drop phantoms
+        # the fast-scan still lists after a delete.
+        residuals = await self._drop_stale_residuals(region, residuals)
+        if not residuals:
+            logger.debug(f"Phase 1: all residuals in {region} already gone (stale fast-scan)")
             return
         logger.debug(f"Phase 1: deleting run-created residuals in {region}")
         failures = await ResourceSweeper(create_regional_session(self._session, region)).delete(
@@ -587,6 +631,10 @@ class CleanupManager:
         leftovers, _global = partition_by_scope(leftovers)
         if not leftovers:
             logger.debug(f"Phase 3: nothing to sweep in {region}")
+            return
+        leftovers = await self._drop_stale_residuals(region, leftovers)
+        if not leftovers:
+            logger.debug(f"Phase 3: all leftovers in {region} already gone (stale fast-scan)")
             return
         logger.debug(f"Phase 3: sweeping non-baseline leftovers in {region}")
         failures = await ResourceSweeper(create_regional_session(self._session, region)).delete(
@@ -659,6 +707,9 @@ class CleanupManager:
                 fresh = [i for i in items if i.get("Identifier", "") not in swept_ids]
                 if fresh:
                     deduped[rtype] = fresh
+            if not deduped:
+                continue
+            deduped = await self._drop_stale_residuals(region, deduped)
             if not deduped:
                 continue
             for items in deduped.values():
@@ -761,7 +812,11 @@ class CleanupManager:
         snapshot = self._load_snapshot_resource_ids(SnapshotStage.PRE_SETUP)
         predeploy_snapshot = snapshot.resource_ids if snapshot else None
         return await asyncio.to_thread(
-            AccountScanner(self._session, account_id=self._get_account_id()).run,
+            AccountScanner(
+                self._session,
+                account_id=self._get_account_id(),
+                existence_cache=self._existence_cache,
+            ).run,
             run_dir,
             regions,
             predeploy_snapshot,

@@ -1751,3 +1751,77 @@ def test_reset_account_global_recheck_fails_closed_on_throttle(temp_output_dir):
 
     assert result.success is False
     assert "still present" in (result.reason or "")
+
+
+# -- ResetManager._surviving_globals — existence-check retry (F4 Change B) --
+
+
+def _throttle_client_error():
+    from botocore.exceptions import ClientError
+
+    return ClientError({"Error": {"Code": "ThrottlingException", "Message": "slow"}}, "GetResource")
+
+
+def test_surviving_globals_retries_recoverable_then_fails_closed():
+    """A throttled reset survivor-check RETRIES (call_count > 1) before failing closed.
+
+    The reset path must ride out a momentary throttle rather than treat the first throttle as a
+    surviving global — that would spuriously fail the reset closed (F5). It exercises the real
+    CloudControlManager.resource_exists retry against a stubbed client.
+    """
+    from aws_bench.resource_management.ccapi.models import EXISTENCE_CHECK_MAX_ATTEMPTS
+
+    session = MagicMock()
+    client = session.client.return_value
+    client.get_resource.side_effect = _throttle_client_error()
+    client.exceptions.ResourceNotFoundException = type("RNF", (Exception,), {})
+
+    with patch("aws_bench.resource_management.ccapi.manager._existence_check_sleep"):
+        survivors = ResetManager._surviving_globals(
+            session, {"AWS::IAM::Role": [{"Identifier": "role-1"}]}
+        )
+
+    # Fail-closed: unverifiable after retries -> counted as surviving.
+    assert survivors == {"AWS::IAM::Role": ["role-1"]}
+    # Recoverable -> retried the full budget, not a single doomed attempt.
+    assert client.get_resource.call_count > 1
+    assert client.get_resource.call_count == EXISTENCE_CHECK_MAX_ATTEMPTS
+
+
+def test_surviving_globals_handler_failure_not_retried():
+    """A broken-handler survivor-check is raised on the first attempt (call_count == 1).
+
+    Still fail-closed (counted surviving), but without the doomed-retry burn.
+    """
+    from botocore.exceptions import ClientError
+
+    session = MagicMock()
+    client = session.client.return_value
+    client.get_resource.side_effect = ClientError(
+        {"Error": {"Code": "HandlerInternalFailureException", "Message": "internal"}},
+        "GetResource",
+    )
+    client.exceptions.ResourceNotFoundException = type("RNF", (Exception,), {})
+
+    with patch("aws_bench.resource_management.ccapi.manager._existence_check_sleep") as mock_sleep:
+        survivors = ResetManager._surviving_globals(
+            session, {"AWS::IAM::Role": [{"Identifier": "role-1"}]}
+        )
+
+    assert survivors == {"AWS::IAM::Role": ["role-1"]}
+    assert client.get_resource.call_count == 1
+    mock_sleep.assert_not_called()
+
+
+def test_surviving_globals_absent_role_not_surviving():
+    """A definitively-gone global is NOT a survivor (fail-closed only on uncertainty)."""
+    session = MagicMock()
+    rnf = type("RNF", (Exception,), {})
+    client = session.client.return_value
+    client.exceptions.ResourceNotFoundException = rnf
+    client.get_resource.side_effect = rnf()
+
+    survivors = ResetManager._surviving_globals(
+        session, {"AWS::IAM::Role": [{"Identifier": "role-1"}]}
+    )
+    assert survivors == {}
