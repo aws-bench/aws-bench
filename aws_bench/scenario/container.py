@@ -129,6 +129,7 @@ class ScenarioContainer:
         host_logs_dir: Path,
         cred_provider: CredentialProvider,
         account_mapping: dict[str, str],
+        labels: dict[str, str] | None = None,
         log: logging.Logger | None = None,
     ) -> None:
         """Initialize the container wrapper.
@@ -150,6 +151,9 @@ class ScenarioContainer:
             account_mapping: ``{account_tag: account_id}`` for the scenario.
                 Each tag becomes an ``AWS_PROFILE`` the container's scripts can
                 select; the refresher writes one credential file per tag.
+            labels: Optional Docker labels applied to the container at ``run``
+                time (``--label k=v``). Operational metadata for tooling to match
+                containers by; empty by default.
             log: Optional logger override.
         """
         self._paths = paths
@@ -159,6 +163,7 @@ class ScenarioContainer:
         self._host_logs_dir = host_logs_dir
         self._cred_provider = cred_provider
         self._account_mapping = account_mapping
+        self._labels = dict(labels or {})
         self._log = (log or logger).getChild(container_name)
         self._started = False
         # Cache for rootless-daemon detection (see _is_rootless_docker).
@@ -251,6 +256,10 @@ class ScenarioContainer:
             "--mount",
             f"type=bind,source={self._creds_dir},target={CREDS_DIR},readonly",
         ]
+        # Operational labels (sorted for a deterministic command) so tooling can
+        # match containers by role rather than by name.
+        for key, value in sorted(self._labels.items()):
+            args.extend(["--label", f"{key}={value}"])
         for m in self._env_config.mounts_json:
             mount_str = f"type={m['type']},source={m['source']},target={m['target']}"
             if m.get("read_only"):
