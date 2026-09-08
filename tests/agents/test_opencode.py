@@ -92,21 +92,47 @@ def test_subclass_replaces_builtin_in_agents_list():
 # -- bedrock-mode detection --
 
 
-def test_bedrock_mode_true_when_token_set(monkeypatch: pytest.MonkeyPatch):
+def test_bedrock_mode_true_when_token_set(agent: OpenCode, monkeypatch: pytest.MonkeyPatch):
     """A non-empty bearer token turns on Bedrock mode."""
     monkeypatch.setenv("AWS_BEARER_TOKEN_BEDROCK", _BEARER)
-    assert OpenCode._is_bedrock_mode() is True
+    assert agent._is_bedrock_mode() is True
 
 
-def test_bedrock_mode_false_when_token_absent():
+def test_bedrock_mode_false_when_token_absent(agent: OpenCode):
     """No bearer token means no Bedrock mode."""
-    assert OpenCode._is_bedrock_mode() is False
+    assert agent._is_bedrock_mode() is False
 
 
-def test_bedrock_mode_false_when_token_blank(monkeypatch: pytest.MonkeyPatch):
+def test_bedrock_mode_false_when_token_blank(agent: OpenCode, monkeypatch: pytest.MonkeyPatch):
     """A whitespace-only token does not count as Bedrock mode."""
     monkeypatch.setenv("AWS_BEARER_TOKEN_BEDROCK", "   ")
-    assert OpenCode._is_bedrock_mode() is False
+    assert agent._is_bedrock_mode() is False
+
+
+def test_bedrock_mode_true_when_token_in_extra_env(logs_dir: Path):
+    """A token supplied via extra_env (-ae) counts, not just os.environ.
+
+    --ae values land in the agent's _extra_env, never the host environment, so
+    detection must go through Harbor's _get_env (extra_env first, then host).
+    """
+    agent = OpenCode(
+        logs_dir=logs_dir,
+        model_name=_MODEL,
+        extra_env={"AWS_BEARER_TOKEN_BEDROCK": _BEARER},
+    )
+    assert agent._is_bedrock_mode() is True
+
+
+def test_inject_reads_token_from_extra_env(logs_dir: Path):
+    """Injection also resolves the token via _get_env, so the -ae path is complete."""
+    agent = OpenCode(
+        logs_dir=logs_dir,
+        model_name=_MODEL,
+        extra_env={"AWS_BEARER_TOKEN_BEDROCK": _BEARER},
+    )
+    agent._inject_bedrock_env()
+    assert agent._extra_env["AWS_BEARER_TOKEN_BEDROCK"] == _BEARER
+    assert agent._extra_env["AWS_REGION"] == _DEFAULT_AWS_REGION
 
 
 # -- env injection --

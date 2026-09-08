@@ -42,8 +42,6 @@ no model-ID dialect to satisfy.
 
 from __future__ import annotations
 
-import os
-
 from harbor.agents.installed.opencode import OpenCode as _HarborOpenCode
 from harbor.environments.base import BaseEnvironment
 from harbor.models.agent.context import AgentContext
@@ -57,8 +55,7 @@ _DEFAULT_AWS_REGION = "us-east-1"
 class OpenCode(_HarborOpenCode):
     """OpenCode agent that can target Amazon Bedrock via a bearer token."""
 
-    @staticmethod
-    def _is_bedrock_mode() -> bool:
+    def _is_bedrock_mode(self) -> bool:
         """Detect Bedrock mode from the environment.
 
         Triggered solely by a non-empty ``AWS_BEARER_TOKEN_BEDROCK``. That token
@@ -67,8 +64,11 @@ class OpenCode(_HarborOpenCode):
         cannot serve as a trigger: they are present in any AWS shell regardless
         of whether Bedrock is intended.) When the token is absent this behaves
         exactly like Harbor's OpenCode.
+
+        Read via ``_get_env`` so the token counts however it was supplied:
+        ``--ae`` values land in ``_extra_env``, not ``os.environ``.
         """
-        return bool(os.environ.get("AWS_BEARER_TOKEN_BEDROCK", "").strip())
+        return bool((self._get_env("AWS_BEARER_TOKEN_BEDROCK") or "").strip())
 
     def _inject_bedrock_env(self) -> None:
         """Forward Bedrock auth env into ``_extra_env`` so every exec inherits it.
@@ -85,10 +85,10 @@ class OpenCode(_HarborOpenCode):
         (test-account) credentials to act on the resources under test.
         ``AWS_REGION`` is required for Bedrock auth.
         """
-        token = os.environ.get("AWS_BEARER_TOKEN_BEDROCK", "").strip()
+        token = (self._get_env("AWS_BEARER_TOKEN_BEDROCK") or "").strip()
         self._extra_env.setdefault("AWS_BEARER_TOKEN_BEDROCK", token)
         # Bedrock requires a Region. Honor extra_env / host AWS_REGION, else default.
-        self._extra_env.setdefault("AWS_REGION", os.environ.get("AWS_REGION", _DEFAULT_AWS_REGION))
+        self._extra_env.setdefault("AWS_REGION", self._get_env("AWS_REGION") or _DEFAULT_AWS_REGION)
 
     async def run(
         self, instruction: str, environment: BaseEnvironment, context: AgentContext
