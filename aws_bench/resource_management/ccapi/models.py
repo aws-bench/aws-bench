@@ -23,6 +23,27 @@ CCAPI_CLIENT_CONFIG = Config(
     max_pool_connections=max(MAX_WORKERS_HEAVY, MAX_WORKERS_LIGHT) + 10,
 )
 
+# Client config for the fail-closed GetResource existence check ONLY. Botocore retries are
+# disabled here (``max_attempts: 0`` == one attempt): botocore classifies
+# HandlerInternalFailureException as a retryable 5xx fault and would retry it the full 8 adaptive
+# attempts (~49s) on the broken-handler types (AWS::ControlTower::EnabledBaseline, ...), which
+# fail identically every time — pure waste on every cleanup sweep wave. Botocore's retry
+# conditions cannot exclude a single error code, so instead of letting it retry everything, the
+# existence check re-adds retries at the application level (``resource_exists``, tenacity) for the
+# RECOVERABLE classes only — throttles and transient 5xx/connection faults — while a broken-handler
+# fault short-circuits on the first attempt. That keeps the reset/verification callers resilient to
+# a momentary blip without re-introducing the doomed-handler burn. The scan/list/delete path keeps
+# CCAPI_CLIENT_CONFIG's retries (bulk listing genuinely benefits from throttle backoff).
+EXISTENCE_CHECK_CLIENT_CONFIG = Config(
+    retries={"max_attempts": 0},
+    max_pool_connections=max(MAX_WORKERS_HEAVY, MAX_WORKERS_LIGHT) + 10,
+)
+
+# Total attempts for the application-level existence-check retry (see resource_exists). Small on
+# purpose: it only has to ride out a transient throttle/5xx blip, not a sustained outage, and the
+# root fix (checking only diffed residuals) means these checks are now rare.
+EXISTENCE_CHECK_MAX_ATTEMPTS = 3
+
 CUSTOM_RESOURCE_PREFIX = "Custom::"
 SERVICE_ROLE_PREFIX = "AWSServiceRole"
 
@@ -80,6 +101,26 @@ THROTTLE_ERROR_CODES = frozenset(
         "Throttling",
         "TooManyRequestsException",
         "RequestLimitExceeded",
+    }
+)
+
+# Server-side handler faults: Cloud Control invoked the resource type's handler and it
+# failed internally (HandlerErrorCode InternalFailure). Modeled as a 5xx fault, so the
+# adaptive retry mode retries it to exhaustion. A fixed set of default resource types
+# (AWS::ControlTower::EnabledBaseline, AWS::SecurityHub::Standard, ...) have handlers
+# broken server-side and fail this way on EVERY GetResource. Kept distinct from
+# UNSUPPORTED_* so an existence check maps them to UNKNOWN (keep the resource), never
+# SKIPPED — the type is not unsupported, its handler is merely broken, so a real orphan
+# of the type must still be attempted rather than silently leaked.
+#
+# Deliberately ONLY the handler-specific code. Bare ``InternalFailure`` is AWS's generic
+# code for a transient server-side 500 as well, so treating it as non-recoverable would
+# skip retries on genuinely transient faults — on the reset survivor check that reports
+# a spurious survivor and escalates to a reset failure. An ambiguous 500 instead falls
+# through to the transient classification and gets the bounded retry.
+HANDLER_FAILURE_ERROR_CODES = frozenset(
+    {
+        "HandlerInternalFailureException",
     }
 )
 

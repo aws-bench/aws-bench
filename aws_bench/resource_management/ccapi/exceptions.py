@@ -46,6 +46,34 @@ class ResourceExistenceUnsupportedError(ResourceExistenceCheckError):
     """
 
 
+class ResourceExistenceHandlerFailureError(ResourceExistenceCheckError):
+    """An existence check failed because CCAPI's handler for the type errored internally.
+
+    Subclasses :class:`ResourceExistenceCheckError` (so existing handlers still catch it and
+    keep/attempt the resource — this is NOT :class:`ResourceExistenceUnsupportedError`, which
+    would skip and leak a live resource), but lets callers distinguish a *server-side handler
+    fault* (HandlerErrorCode InternalFailure) from other unverified failures. A fixed set of
+    default resource types have handlers broken server-side and fail this way on every check;
+    surfacing it distinctly lets the fail-closed verification path memoize and stop re-burning
+    retries on them.
+
+    This class is deliberately treated as *non-recoverable* by the existence-check retry: the
+    handler fails identically on every attempt, so retrying only burns latency.
+    """
+
+
+class ResourceExistenceTransientError(ResourceExistenceCheckError):
+    """An existence check hit a transient fault (server 5xx or a connection/timeout error).
+
+    Subclasses :class:`ResourceExistenceCheckError` (so existing handlers still keep the
+    resource) but marks the failure as *recoverable*, so the existence-check retry re-attempts
+    it — distinct from a broken-handler fault (:class:`ResourceExistenceHandlerFailureError`,
+    non-recoverable) which shares the same 5xx class but never succeeds. Keeping transient
+    faults retryable is what preserves reset/verification resilience: a momentary blip must not
+    fail those paths closed on the first attempt.
+    """
+
+
 # CCAPI wraps service-level "not found" errors as GeneralServiceException.
 # These patterns in the error message indicate the resource (or its parent) is gone.
 _NOT_FOUND_PATTERNS = ("does not exist", "is not found", "not found", "could not be found")
