@@ -197,6 +197,64 @@ def test_resource_exists_handler_failure_is_not_retried():
     mock_sleep.assert_not_called()
 
 
+def test_resource_exists_bare_internal_failure_is_retried():
+    """Bare ``InternalFailure`` is retried, NOT treated as a broken handler.
+
+    It is AWS's generic code for a transient server-side 500 as well as the
+    handler fault, so only the handler-specific code may skip retries. A
+    transient 500 that fails closed with zero retries on the reset survivor
+    check reports a spurious survivor and escalates to a reset failure.
+    """
+    from aws_bench.resource_management.ccapi.models import EXISTENCE_CHECK_MAX_ATTEMPTS
+
+    session = MagicMock()
+    ccm = CloudControlManager(session)
+    exc = ClientError(
+        {
+            "Error": {"Code": "InternalFailure", "Message": "transient blip"},
+            "ResponseMetadata": {"HTTPStatusCode": 500},
+        },
+        "GetResource",
+    )
+    ccm._existence_client.get_resource.side_effect = exc
+    ccm._existence_client.exceptions.ResourceNotFoundException = type("RNF", (Exception,), {})
+
+    with (
+        patch("aws_bench.resource_management.ccapi.manager._existence_check_sleep"),
+        pytest.raises(ResourceExistenceTransientError),
+    ):
+        ccm.resource_exists(Resource("AWS::S3::Bucket", "my-bucket"))
+    assert ccm._existence_client.get_resource.call_count == EXISTENCE_CHECK_MAX_ATTEMPTS
+
+
+def test_resource_exists_unknown_error_defaults_to_recoverable():
+    """An unrecognized error code gets the bounded retry, then still fails closed.
+
+    The asymmetry favors retrying: a permanent unknown error wastes seconds,
+    while refusing to retry a transient one (e.g. a throttle variant missing
+    from THROTTLE_ERROR_CODES) fails the check closed on the first blip. The
+    raised error is still a ResourceExistenceCheckError, so every caller keeps
+    the resource exactly as before.
+    """
+    from aws_bench.resource_management.ccapi.models import EXISTENCE_CHECK_MAX_ATTEMPTS
+
+    session = MagicMock()
+    ccm = CloudControlManager(session)
+    exc = ClientError(
+        {"Error": {"Code": "RequestThrottledException", "Message": "slow down"}},
+        "GetResource",
+    )
+    ccm._existence_client.get_resource.side_effect = exc
+    ccm._existence_client.exceptions.ResourceNotFoundException = type("RNF", (Exception,), {})
+
+    with (
+        patch("aws_bench.resource_management.ccapi.manager._existence_check_sleep"),
+        pytest.raises(ResourceExistenceCheckError),
+    ):
+        ccm.resource_exists(Resource("AWS::S3::Bucket", "my-bucket"))
+    assert ccm._existence_client.get_resource.call_count == EXISTENCE_CHECK_MAX_ATTEMPTS
+
+
 def test_throttled_error_is_a_resource_existence_check_error():
     """The throttle subclass stays catchable as ResourceExistenceCheckError.
 

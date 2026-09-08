@@ -112,10 +112,15 @@ THROTTLE_ERROR_CODES = frozenset(
 # UNSUPPORTED_* so an existence check maps them to UNKNOWN (keep the resource), never
 # SKIPPED — the type is not unsupported, its handler is merely broken, so a real orphan
 # of the type must still be attempted rather than silently leaked.
+#
+# Deliberately ONLY the handler-specific code. Bare ``InternalFailure`` is AWS's generic
+# code for a transient server-side 500 as well, so treating it as non-recoverable would
+# skip retries on genuinely transient faults — on the reset survivor check that reports
+# a spurious survivor and escalates to a reset failure. An ambiguous 500 instead falls
+# through to the transient classification and gets the bounded retry.
 HANDLER_FAILURE_ERROR_CODES = frozenset(
     {
         "HandlerInternalFailureException",
-        "InternalFailure",
     }
 )
 

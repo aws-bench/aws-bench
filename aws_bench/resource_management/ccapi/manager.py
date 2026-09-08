@@ -16,7 +16,6 @@ from botocore.exceptions import (
 from aws_bench.logging.logger import get_logger
 from aws_bench.resource_management.ccapi.deleter import Deleter
 from aws_bench.resource_management.ccapi.exceptions import (
-    ResourceExistenceCheckError,
     ResourceExistenceHandlerFailureError,
     ResourceExistenceThrottledError,
     ResourceExistenceTransientError,
@@ -198,7 +197,14 @@ class CloudControlManager:
                 resource.identifier,
                 exc,
             )
-            raise ResourceExistenceCheckError(
+            # Unknown failure: default to RECOVERABLE. The asymmetry favors retrying —
+            # a genuinely permanent unknown error wastes at most
+            # EXISTENCE_CHECK_MAX_ATTEMPTS - 1 extra round-trips (seconds), while
+            # refusing to retry a transient one fails the check closed immediately,
+            # which on the reset survivor path reports a spurious survivor and
+            # escalates to a reset failure. Known-permanent classes (handler failure,
+            # unsupported type) are classified above and never reach this branch.
+            raise ResourceExistenceTransientError(
                 f"Failed to check existence of {resource.type} '{resource.identifier}': {exc}"
             ) from exc
 
