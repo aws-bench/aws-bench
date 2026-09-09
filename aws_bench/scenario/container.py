@@ -305,7 +305,7 @@ class ScenarioContainer:
         session = self._cred_provider.get_session_for_account(
             self._account_mapping[tag],
             ORG_ACCESS_ROLE,
-            build_session_name("container", tag[-8:]),
+            build_session_name("session", tag[-8:]),
         )
         creds = session_to_credential_process(session)
         path = self._creds_file(tag)

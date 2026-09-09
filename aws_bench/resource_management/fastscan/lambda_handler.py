@@ -36,14 +36,15 @@ def _session_for_account(account_id: str, region: str) -> boto3.Session:
     Uses a raw STS call (only boto3) so the handler's import stays free of the
     credential-provider chain, which pulls heavy deps (harbor/pydantic/rich) absent in the
     Lambda runtime. The org role is assumed unscoped, matching the host scan path. A short
-    duration bounds the credential lifetime. The ``app-`` session-name prefix (built
-    inline; the shared builder is host-only) makes the assume attributable in CloudTrail
-    while staying neutral (it must not reveal aws-bench to an evaluated agent).
+    duration bounds the credential lifetime. The neutral ``app-session-`` session name
+    (built inline; the shared builder is host-only) makes the assume attributable in
+    CloudTrail while staying neutral — it must not reveal aws-bench, the benchmark, or a
+    task to an evaluated agent, so it carries only the opaque account-id tail.
     """
     sts = boto3.client("sts")
     resp = sts.assume_role(
         RoleArn=f"arn:aws:iam::{account_id}:role/{ORG_ACCESS_ROLE}",
-        RoleSessionName=f"app-fastscan-{account_id[-6:]}",
+        RoleSessionName=f"app-session-{account_id[-6:]}",
         DurationSeconds=SCAN_ASSUME_ROLE_DURATION_S,
     )
     creds = resp["Credentials"]

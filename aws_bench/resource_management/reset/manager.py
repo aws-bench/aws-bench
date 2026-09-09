@@ -20,7 +20,6 @@ from aws_bench.resource_management.ccapi.models import (
 from aws_bench.resource_management.cleanup.manager import CleanupManager
 from aws_bench.resource_management.cleanup.models import StackResource
 from aws_bench.resource_management.cleanup.resource_cleaner import ResourceCleaner
-from aws_bench.resource_management.constants import RESOURCE_MANAGEMENT_SESSION
 from aws_bench.resource_management.deferred import deferred_scope, mark_deferred
 from aws_bench.resource_management.reset.models import (
     ResetFailure,
@@ -793,7 +792,7 @@ class ResetManager:
                             session = CredentialProvider.get().get_session_for_account(
                                 account.account_id,
                                 ORG_ACCESS_ROLE,
-                                build_session_name(RESOURCE_MANAGEMENT_SESSION, "reset-account"),
+                                build_session_name("session"),
                             )
                             reset_mgr = ResetManager(session, account_id=account.account_id)
                             return await reset_mgr.reset_account(

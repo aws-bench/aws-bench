@@ -784,9 +784,8 @@ def test_build_aws_credentials_file_empty_mapping_returns_empty_string():
 
 def test_build_session_name_prepends_prefix_and_joins():
     """Composes app-<segments> with hyphens from the shared prefix constant."""
-    assert build_session_name("rm", "cleanup") == "app-rm-cleanup"
-    assert build_session_name("quota", "verify", "123456") == "app-quota-verify-123456"
-    assert build_session_name("show") == "app-show"
+    assert build_session_name("session") == "app-session"
+    assert build_session_name("session", "123456") == "app-session-123456"
 
 
 def test_build_session_name_uses_prefix_constant():
@@ -803,7 +802,7 @@ def test_build_session_name_truncates_to_sts_limit():
 
 def test_build_session_name_output_passes_enforce():
     """Anything build_session_name produces satisfies the choke-point validator."""
-    name = build_session_name("rm", "reset")
+    name = build_session_name("session", "123456")
     assert enforce_session_name(name) == name
 
 
@@ -813,19 +812,10 @@ def test_build_session_name_output_passes_enforce():
 @pytest.mark.parametrize(
     "name",
     [
-        "app-rm-cleanup",
-        "app-rm-cleanup-stack",
-        "app-rm-reset",
-        "app-rm-verify",
-        "app-rm-snapshot-post_setup",
-        "app-role-probe",
-        "app-show",
-        "app-exports-123456",
-        "app-quota-123456",
-        "app-quota-verify-123456",
-        "app-quota-show-123456",
-        "app-org-123456",
-        "app-agent-aws-introspection-list-ec-instances",
+        "app-session",
+        "app-session-123456",
+        "app-session-00000000-0000-0000-0000-000000000001",
+        "app-test-session-name",  # arbitrary caller-provided name, still valid
     ],
 )
 def test_enforce_session_name_accepts_convention(name):

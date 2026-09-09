@@ -194,7 +194,7 @@ class QuotaManager:
 
         with log_context(account_id), log_context(config.region):
             session = self._credential_provider.get_session_for_account(
-                account_id, role_name, build_session_name("quota", account_id[-6:])
+                account_id, role_name, build_session_name("session", account_id[-6:])
             )
             client: BaseClient = build_client(session, "service-quotas", region_name=config.region)
 
@@ -318,7 +318,7 @@ class QuotaManager:
             session = self._credential_provider.get_session_for_account(
                 account_id,
                 role_name,
-                build_session_name("quota", "verify", account_id[-6:]),
+                build_session_name("session", account_id[-6:]),
             )
             client: BaseClient = build_client(session, "service-quotas", region_name=config.region)
 
@@ -411,7 +411,7 @@ class QuotaManager:
             session = self._credential_provider.get_session_for_account(
                 account_id,
                 role_name,
-                build_session_name("quota", "show", account_id[-6:]),
+                build_session_name("session", account_id[-6:]),
             )
             regions = get_enabled_regions(session)
         except Exception as e:

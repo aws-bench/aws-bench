@@ -17,16 +17,18 @@ from aws_bench.utils.placeholders import substitute_placeholders
 logger = get_logger(__name__)
 
 
-def session_name(*, task_name: str, role_type: RoleType, job_id: UUID | None) -> str:
-    r"""Build an STS RoleSessionName for CloudTrail auditing (<=64 chars, [\w+=,.@-]).
+def session_name(*, job_id: UUID | None) -> str:
+    r"""Build a neutral STS RoleSessionName for CloudTrail auditing (<=64 chars, [\w+=,.@-]).
 
-    Ordered ``app-<role>-<task>-<job>`` so that if the name exceeds 64 chars,
-    ``build_session_name``'s trim drops the job-id tail rather than the
-    audit-meaningful role and task. '/' in an org/name task name becomes '-'
-    (STS allows only [\w+=,.@-]).
+    Composed as ``app-session[-<job>]``: it deliberately carries no task name or
+    role type. An evaluated agent that reads its own session via
+    ``sts:GetCallerIdentity`` (or scans CloudTrail with its own credentials) must
+    not be able to infer that it is running inside aws-bench or scope events to a
+    particular benchmark task. The opaque job-id (a random UUID) is appended when
+    available so operators keep an internal correlation handle without leaking
+    task/benchmark identity.
     """
-    safe_name = task_name.replace("/", "-")
-    segments = [str(role_type), safe_name]
+    segments = ["session"]
     if job_id:
         segments.append(str(job_id))
     return build_session_name(*segments)
@@ -67,5 +69,5 @@ def assume_role_for_script(
     return CredentialProvider.get().chain_assume_role(
         account_id=account_id,
         role_name=role_name,
-        session_name=session_name(task_name=task_name, role_type=role_type, job_id=job_id),
+        session_name=session_name(job_id=job_id),
     )

@@ -4,26 +4,19 @@ from __future__ import annotations
 
 from uuid import UUID
 
-import pytest
-
 from aws_bench.dataset.models import RoleType
 from aws_bench.task import aws_creds
 
 
 def test_session_name_includes_job_id_when_set():
-    name = aws_creds.session_name(
-        task_name="org/my-task", role_type=RoleType.AGENT, job_id=UUID(int=1)
-    )
-    # '/' is replaced with '-' (STS session names allow only [\w+=,.@-]).
-    assert "org-my-task" in name
-    # Ordered app-<role>-<task>-<job>: role leads so a trim drops the job tail.
-    assert name.startswith(f"app-{RoleType.AGENT}-")
-    assert str(UUID(int=1)) in name
+    name = aws_creds.session_name(job_id=UUID(int=1))
+    # Neutral app-session-<job>: no task name or role type leaks to CloudTrail.
+    assert name == f"app-session-{UUID(int=1)}"
 
 
 def test_session_name_omits_job_id_when_none():
-    name = aws_creds.session_name(task_name="org/my-task", role_type=RoleType.VERIFIER, job_id=None)
-    assert name == "app-verifier-org-my-task"
+    name = aws_creds.session_name(job_id=None)
+    assert name == "app-session"
 
 
 def test_resolve_env_with_creds_substitutes_then_appends_creds():
@@ -84,20 +77,10 @@ def test_assume_role_for_script_falls_back_to_org_access_role(mocker):
     assert chain.call_args.kwargs["role_name"] == ORG_ACCESS_ROLE
 
 
-@pytest.mark.parametrize("role_type", list(RoleType))
-def test_session_name_role_types(role_type):
-    name = aws_creds.session_name(task_name="t", role_type=role_type, job_id=None)
-    assert name.startswith(f"app-{role_type}-")
-
-
-def test_session_name_overflow_trims_to_64_keeping_role_and_task():
-    """A long task name + UUID exceeds 64 chars; the trim drops the job-id tail."""
-    long_task = "some-org/" + "a" * 80
-    name = aws_creds.session_name(
-        task_name=long_task, role_type=RoleType.VERIFIER, job_id=UUID(int=1)
-    )
-    assert len(name) == 64
-    # Role and the (start of the) task survive the trim; the job-id tail is cut.
-    assert name.startswith("app-verifier-some-org-aaa")
-    # STS charset: [\w+=,.@-]. '/' must have been replaced.
+def test_session_name_is_neutral_and_within_sts_limit():
+    """The name leaks no task/role identity and stays within STS's 64-char cap."""
+    name = aws_creds.session_name(job_id=UUID(int=1))
+    assert name == "app-session-00000000-0000-0000-0000-000000000001"
+    assert len(name) <= 64
+    # STS charset: [\w+=,.@-]. '/' must never appear.
     assert "/" not in name
