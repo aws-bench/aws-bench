@@ -63,7 +63,7 @@ def test_explicit_task_role_chains_from_configured_runner(tmp_path: Path, monkey
     assert create_session.call_args_list[0].args == (
         session,
         "arn:aws:iam::111122223333:role/AWSBenchRunner",
-        "app-runner-223333",
+        "app-session-223333",
         "us-east-1",
     )
     assert create_session.call_args_list[1].args == (
@@ -148,7 +148,7 @@ def test_static_task_credentials_chain_through_runner(tmp_path: Path, monkeypatc
     provider.assume_role.assert_called_once_with(
         "111122223333",
         "AWSBenchRunner",
-        "app-runner-223333",
+        "app-session-223333",
         duration_seconds=3600,
     )
     runner_sts.assume_role.assert_called_once_with(

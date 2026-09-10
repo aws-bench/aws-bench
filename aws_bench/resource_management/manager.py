@@ -18,7 +18,6 @@ from aws_bench.resource_management.cleanup.models import (
     CleanupSummary,
     EnvironmentCleanupResult,
 )
-from aws_bench.resource_management.constants import RESOURCE_MANAGEMENT_SESSION
 from aws_bench.resource_management.reset.manager import ResetManager
 from aws_bench.resource_management.reset.models import ResetResult
 from aws_bench.resource_management.snapshot.manager import SnapshotManager
@@ -119,7 +118,7 @@ class ResourceManager:
         session = CredentialProvider.get().get_session_for_account(
             account_id,
             ORG_ACCESS_ROLE,
-            build_session_name(RESOURCE_MANAGEMENT_SESSION, "cleanup-account"),
+            build_session_name("session"),
         )
         manager = CleanupManager(session, env_name=env_name, account_id=account_id)
         return await manager.cleanup_all_stacks(regions=regions)
@@ -148,7 +147,7 @@ class ResourceManager:
         session = CredentialProvider.get().get_session_for_account(
             account_id,
             ORG_ACCESS_ROLE,
-            build_session_name(RESOURCE_MANAGEMENT_SESSION, "cleanup-stack"),
+            build_session_name("session"),
         )
         manager = CleanupManager(session, account_id=account_id)
         return await manager.cleanup_stack(stack_name)
@@ -196,7 +195,7 @@ class ResourceManager:
             session = cred_provider.get_session_for_account(
                 account_id,
                 ORG_ACCESS_ROLE,
-                build_session_name(RESOURCE_MANAGEMENT_SESSION, "snapshot-pre-setup"),
+                build_session_name("session"),
             )
             ctx = SnapshotContext(
                 scenario_id=scenario_name,
@@ -238,7 +237,7 @@ class ResourceManager:
                         session = cred_provider.get_session_for_account(
                             account_id,
                             ORG_ACCESS_ROLE,
-                            build_session_name(RESOURCE_MANAGEMENT_SESSION, "verify"),
+                            build_session_name("session"),
                         )
                         verify_mgr = VerifyManager(
                             session, region_name=region, account_id=account_id
@@ -329,7 +328,7 @@ class ResourceManager:
                         session = cred_provider.get_session_for_account(
                             account_id,
                             ORG_ACCESS_ROLE,
-                            build_session_name(RESOURCE_MANAGEMENT_SESSION, "reset"),
+                            build_session_name("session"),
                         )
                         reset_mgr = ResetManager(
                             # Nest per account tag (the unique mapping key) so concurrent
@@ -396,7 +395,7 @@ class ResourceManager:
                         session = cred_provider.get_session_for_account(
                             account_id,
                             ORG_ACCESS_ROLE,
-                            build_session_name(RESOURCE_MANAGEMENT_SESSION, "cleanup"),
+                            build_session_name("session"),
                         )
                         cleanup_mgr = CleanupManager(
                             session,
@@ -454,7 +453,7 @@ class ResourceManager:
                         session = cred_provider.get_session_for_account(
                             account_id,
                             ORG_ACCESS_ROLE,
-                            build_session_name(RESOURCE_MANAGEMENT_SESSION, "pre-cleanup-sweep"),
+                            build_session_name("session"),
                         )
                         cleanup_mgr = CleanupManager(
                             session,
@@ -549,7 +548,7 @@ def list_account_stacks(account_id: str, cred_provider: CredentialProvider) -> l
     stacks: list[dict[str, str]] = []
     try:
         session = cred_provider.get_session_for_account(
-            account_id, ORG_ACCESS_ROLE, build_session_name("show")
+            account_id, ORG_ACCESS_ROLE, build_session_name("session")
         )
         regions = get_enabled_regions(session)
     except Exception:

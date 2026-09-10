@@ -20,7 +20,6 @@ from aws_bench.account_management.preexisting import active_account_config
 from aws_bench.constants import STATE_DIR
 from aws_bench.logging.logger import get_logger, log_context
 from aws_bench.resource_management.ccapi.models import MAX_WORKERS_ACCOUNT, MAX_WORKERS_HEAVY
-from aws_bench.resource_management.constants import RESOURCE_MANAGEMENT_SESSION
 from aws_bench.resource_management.exceptions import DriftDetectionError, SnapshotNotFoundError
 from aws_bench.resource_management.fastscan.engine import _TRANSIENT_SERVER_CODES
 from aws_bench.resource_management.scanner import make_scanner, scan_method
@@ -673,7 +672,7 @@ class SnapshotManager:
                 session = cred_provider.get_session_for_account(
                     account_id,
                     ORG_ACCESS_ROLE,
-                    build_session_name(RESOURCE_MANAGEMENT_SESSION, f"snapshot-{ctx.stage}"),
+                    build_session_name("session"),
                 )
                 return self.snapshot_account(session, account_id, ctx)
 
