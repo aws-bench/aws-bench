@@ -181,6 +181,11 @@ class ScenarioTrialConfig(BaseModel):
     account_mapping: dict[str, str]
     timeout_multiplier: float = 1.0
     ou_name: str = ""
+    # Docker labels applied to this trial's scenario container. Operational only
+    # (e.g. ``{"awsbench.role": "scenario-reset"}`` so tooling can match reset
+    # containers by role, not name); excluded from the persisted config.json so
+    # it stays off disk and does not perturb resume identity.
+    labels: dict[str, str] = Field(default_factory=dict, exclude=True)
     # Phase-specific resource management parameters
     verify_region: str | None = None
     reset_max_concurrent: int = 10

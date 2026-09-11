@@ -24,7 +24,6 @@ from aws_bench.account_management.constants import ORG_ACCESS_ROLE
 from aws_bench.account_management.manager import AccountManager
 from aws_bench.exceptions import AccountContaminatedError, OperationCancelled
 from aws_bench.logging.logger import file_logging, get_logger
-from aws_bench.resource_management.constants import RESOURCE_MANAGEMENT_SESSION
 from aws_bench.resource_management.export_collector import collect_account_exports
 from aws_bench.resource_management.manager import ResourceManager
 from aws_bench.resource_management.reset.models import ResetResult
@@ -133,6 +132,7 @@ class ScenarioTrial:
             host_logs_dir=self._paths.trial_dir,
             cred_provider=cred_provider,
             account_mapping=config.account_mapping,
+            labels=config.labels,
         )
         self._merged_env = merged_env
         self._result = ScenarioTrialResult(
@@ -655,7 +655,7 @@ class ScenarioTrial:
                 session = self._cred_provider.get_session_for_account(
                     account_id,
                     ORG_ACCESS_ROLE,
-                    build_session_name(RESOURCE_MANAGEMENT_SESSION, "changeset-cleanup"),
+                    build_session_name("session"),
                 )
             except Exception as exc:  # noqa: BLE001
                 logger.warning("Failed to get session for account %s: %s", account_id, exc)
@@ -750,7 +750,7 @@ class ScenarioTrial:
                 session = self._cred_provider.get_session_for_account(
                     account_id,
                     ORG_ACCESS_ROLE,
-                    build_session_name(RESOURCE_MANAGEMENT_SESSION, "terminal-cleanup"),
+                    build_session_name("session"),
                 )
             except Exception as exc:  # noqa: BLE001
                 logger.warning("Failed to get session for account %s: %s", account_id, exc)

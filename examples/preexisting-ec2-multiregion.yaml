@@ -1,0 +1,24 @@
+schema_version: "1.0"
+mode: preexisting
+
+# Must not match an OU name used by the managed backend: the same organization can
+# host both modes, and the two would resolve to each other's environment.
+name: acme-benchmark
+
+# The ambient identity only needs permission to assume this externally managed
+# role. Scenario setup and cleanup then run as the protected benchmark runner.
+runner_role: AWSBenchRunner
+
+# CloudFormation execution role, passed as RoleARN on DeleteStack so teardown does
+# not depend on the CDK bootstrap role. It must trust cloudformation.amazonaws.com;
+# it may be the same role as runner_role if that role's trust policy allows both.
+cfn_role: cfn-service-execution
+
+accounts:
+  ec2-multiregion:
+    PRIMARY: "111122223333"
+
+# Baseline snapshots and contamination flags default to ~/.aws-bench/state/,
+# outside every account under test. Set state_file to relocate the contamination
+# marker onto shared persistent storage for cluster runs.
+# state_file: /shared/aws-bench/acme-benchmark-contamination.json

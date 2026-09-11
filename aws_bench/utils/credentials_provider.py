@@ -10,6 +10,8 @@ from botocore.credentials import DeferredRefreshableCredentials, create_assume_r
 from botocore.exceptions import ClientError
 
 from aws_bench.account_management.constants import ORG_ACCESS_ROLE
+from aws_bench.account_management.exceptions import AccountResolutionError
+from aws_bench.account_management.preexisting import active_account_config
 from aws_bench.constants import DEFAULT_REGION
 from aws_bench.exceptions import CredentialError
 from aws_bench.logging.logger import get_logger
@@ -35,24 +37,30 @@ def _apply_client_defaults(session: boto3.Session) -> boto3.Session:
 
 
 # Building blocks for STS RoleSessionNames. Every name is composed as
-# ``aws-bench[-<segment>...]`` so CloudTrail entries are uniformly attributable
-# to the tool. ``AWS_BENCH_PREFIX`` is the single source of truth for that prefix.
-AWS_BENCH_PREFIX = "aws-bench"
+# ``app[-<segment>...]`` so CloudTrail entries are uniformly attributable and the
+# name stays neutral — it must not reveal to an evaluated agent that it is running
+# inside aws-bench. ``SESSION_NAME_PREFIX`` is the single source of truth.
+SESSION_NAME_PREFIX = "app"
 # STS caps RoleSessionName at 64 chars.
 MAX_SESSION_NAME_LEN = 64
 
 
 def build_session_name(*segments: str) -> str:
-    """Compose an ``aws-bench``-prefixed STS RoleSessionName from ``segments``.
+    """Compose a ``SESSION_NAME_PREFIX``-prefixed STS RoleSessionName from ``segments``.
 
-    Joins ``AWS_BENCH_PREFIX`` and ``segments`` with ``-`` and truncates to STS's
+    Joins ``SESSION_NAME_PREFIX`` and ``segments`` with ``-`` and truncates to STS's
     64-char limit. This is the single constructor for session names, so the
-    CloudTrail-attribution prefix lives in exactly one place.
+    prefix lives in exactly one place.
 
     Example:
-        ``build_session_name("rm", "cleanup")`` -> ``"aws-bench-rm-cleanup"``
+        ``build_session_name("session")`` -> ``"app-session"``
+
+    Segments must stay neutral: they must not reveal to an evaluated agent (via
+    ``sts:GetCallerIdentity`` or CloudTrail) that it is running inside aws-bench.
+    Callers use the ``"session"`` token plus opaque identifiers (e.g. an account-id
+    tail) only — never a task, benchmark, or operation description.
     """
-    return "-".join([AWS_BENCH_PREFIX, *segments])[:MAX_SESSION_NAME_LEN]
+    return "-".join([SESSION_NAME_PREFIX, *segments])[:MAX_SESSION_NAME_LEN]
 
 
 def enforce_session_name(session_name: str) -> str:
@@ -60,16 +68,15 @@ def enforce_session_name(session_name: str) -> str:
 
     Backstop at the generic STS choke points all assume-role paths funnel
     through: even a hand-written name (not built via :func:`build_session_name`)
-    must carry the ``aws-bench-`` prefix, so the convention is enforced at runtime.
+    must carry the ``app-`` prefix, so the convention is enforced at runtime.
 
-    Returns the name truncated to STS's 64-char limit; callers historically
-    relied on this truncation (e.g. the ``aws-bench-<role>-<task>-<job>`` builder
-    drops its job-id tail rather than the audit-meaningful prefix).
+    Returns the name truncated to STS's 64-char limit (e.g. the
+    ``app-session-<job>`` builder drops its job-id tail rather than the prefix).
 
     Raises:
-        ValueError: If the name does not start with ``aws-bench-``.
+        ValueError: If the name does not start with ``app-``.
     """
-    required_prefix = AWS_BENCH_PREFIX + "-"
+    required_prefix = SESSION_NAME_PREFIX + "-"
     if not session_name.startswith(required_prefix):
         raise ValueError(
             f"RoleSessionName must start with {required_prefix!r} for CloudTrail "
@@ -334,6 +341,42 @@ class CredentialProvider:
         )
         return assumed_credentials_dict_to_credentials_env(response["Credentials"])
 
+    def _preexisting_role(self, account_id: str, role_name: str | None) -> str:
+        """Resolve the direct role used for an externally owned account.
+
+        ``OrganizationAccountAccessRole`` is an implementation detail of accounts
+        created by aws-bench.  In pre-existing mode it means "the configured
+        runner identity" instead.  Explicit task roles remain explicit.
+
+        Raises:
+            CredentialError: If no config is active.
+            AccountResolutionError: If ``account_id`` is outside the allowlist.
+        """
+        active = active_account_config()
+        if active is None:
+            raise CredentialError(
+                f"No pre-existing account config is active; cannot resolve a role for "
+                f"account {account_id}"
+            )
+        config, _ = active
+        allowed = {
+            configured_id for tags in config.accounts.values() for configured_id in tags.values()
+        }
+        if account_id not in allowed:
+            raise AccountResolutionError(
+                f"Account {account_id} is not in the active pre-existing allowlist"
+            )
+        if role_name in (None, ORG_ACCESS_ROLE):
+            return config.runner_role
+        return role_name
+
+    def _ambient_is_target_role(self, account_id: str, role_name: str) -> bool:
+        """Return whether the ambient STS identity already is ``role_name``."""
+        identity = self._sts.get_caller_identity()
+        arn = str(identity.get("Arn", ""))
+        marker = f"arn:aws:sts::{account_id}:assumed-role/{role_name}/"
+        return arn.startswith(marker)
+
     def chain_assume_role(
         self,
         account_id: str,
@@ -358,11 +401,44 @@ class CredentialProvider:
         Returns:
             Dict with AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_SESSION_TOKEN.
         """
+        parent_session = self._session
+        preexisting = active_account_config()
+        if preexisting is not None:
+            config, _ = preexisting
+            target_role = self._preexisting_role(account_id, role_name)
+            # Already running as the target role — self-assume would fail, so reuse it.
+            if self._ambient_is_target_role(account_id, target_role):
+                return session_to_env_credentials(self._session)
+            if target_role != config.runner_role and not self._ambient_is_target_role(
+                account_id, config.runner_role
+            ):
+                runner_creds = self.assume_role(
+                    account_id,
+                    config.runner_role,
+                    build_session_name("session", account_id[-6:]),
+                    duration_seconds=duration_seconds,
+                )
+                parent_session = env_credentials_dict_to_session(runner_creds)
+            if parent_session is not self._session:
+                role_arn = f"arn:aws:iam::{account_id}:role/{target_role}"
+                response = build_client(parent_session, "sts").assume_role(
+                    RoleArn=role_arn,
+                    RoleSessionName=enforce_session_name(session_name),
+                    DurationSeconds=duration_seconds,
+                )
+                return assumed_credentials_dict_to_credentials_env(response["Credentials"])
+            return self.assume_role(
+                account_id,
+                target_role,
+                session_name,
+                duration_seconds=duration_seconds,
+            )
+
         # Hop 1: always go through the org access role
         hop1_session_name = (
             session_name
             if (not role_name or role_name == ORG_ACCESS_ROLE)
-            else build_session_name("org", account_id[-6:])
+            else build_session_name("session", account_id[-6:])
         )
         try:
             org_creds = self.assume_role(
@@ -431,7 +507,7 @@ class CredentialProvider:
             try:
                 self._sts.assume_role(
                     RoleArn=role_arn,
-                    RoleSessionName=build_session_name("role-probe"),
+                    RoleSessionName=build_session_name("session"),
                     DurationSeconds=900,
                 )
                 logger.debug("Role %s is now assumable.", role_arn)
@@ -468,5 +544,30 @@ class CredentialProvider:
         Returns:
             A boto3.Session with refreshable credentials that auto-refresh before expiry.
         """
+        parent_session = self._session
+        preexisting = active_account_config()
+        if preexisting is not None:
+            config, _ = preexisting
+            target_role = self._preexisting_role(account_id, role_name)
+            # Already running as the target role — self-assume would fail, so reuse it.
+            if self._ambient_is_target_role(account_id, target_role):
+                return create_regional_session(self._session, region)
+            parent_session = self._session
+            if target_role != config.runner_role and not self._ambient_is_target_role(
+                account_id, config.runner_role
+            ):
+                runner_arn = f"arn:aws:iam::{account_id}:role/{config.runner_role}"
+                parent_session = _create_refreshable_session(
+                    self._session,
+                    runner_arn,
+                    build_session_name("session", account_id[-6:]),
+                    region,
+                )
+            role_name = target_role
         role_arn = f"arn:aws:iam::{account_id}:role/{role_name}"
-        return _create_refreshable_session(self._session, role_arn, session_name, region)
+        return _create_refreshable_session(
+            parent_session,
+            role_arn,
+            session_name,
+            region,
+        )

@@ -265,6 +265,42 @@ def test_start_runs_container_with_resource_limits(sc, env_config):
     assert "sleep infinity" in flat
 
 
+def test_start_emits_labels(tmp_path, env_config):
+    """Labels become --label k=v args in the docker run command."""
+    sd = _make_scenario_dir(tmp_path)
+    paths = ScenarioPaths(sd)
+    container = ScenarioContainer(
+        paths,
+        env_config,
+        image_tag="awsbench-sc",
+        container_name="awsbench-sc-trial-0",
+        host_logs_dir=tmp_path / "trial-logs",
+        cred_provider=_fake_cred_provider(),
+        account_mapping={"PRIMARY": "111111111111"},
+        labels={"awsbench.role": "scenario-reset"},
+    )
+    with FakeDocker() as fake:
+        fake.when("rm", rc=1, stderr=b"No such container")
+        fake.when("run", rc=0)
+        fake.when("exec", rc=0)
+        asyncio.run(container.start())
+
+    runs = fake.calls_with_prefix("run")
+    label_args = [a for i, a in enumerate(runs[0]) if i > 0 and runs[0][i - 1] == "--label"]
+    assert label_args == ["awsbench.role=scenario-reset"]
+
+
+def test_start_no_labels_emits_no_label_flag(sc):
+    """With no labels (the default), start() emits no --label flag."""
+    with FakeDocker() as fake:
+        fake.when("rm", rc=1, stderr=b"No such container")
+        fake.when("run", rc=0)
+        fake.when("exec", rc=0)
+        asyncio.run(sc.start())
+    runs = fake.calls_with_prefix("run")
+    assert "--label" not in runs[0]
+
+
 def test_start_removes_stale_container_with_same_name(sc):
     with FakeDocker() as fake:
         fake.when("rm", rc=0)  # stale was present, removed

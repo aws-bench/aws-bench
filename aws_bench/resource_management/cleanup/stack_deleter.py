@@ -61,7 +61,13 @@ PROGRESS_LOG_INTERVAL_SEC = 60  # Log progress every 60 seconds during stack del
 # indicating CFN silently refused because another stack imports its exports.
 _EXPORT_BLOCKED = "EXPORT_BLOCKED"
 _EXPORT_BLOCKED_REASON = "Blocked by cross-stack export dependencies"
+
 DEADLINE_EXTENSION_SEC = 600  # Extend deadline by 10 minutes when stack still in progress
+
+# UNKNOWN is swept because the check did not answer, not because the resource is gone. The
+# excluded outcomes: ABSENT is confirmed gone, SKIPPED is a type CCAPI cannot act on, and
+# UNCHECKED_SUBRESOURCE is left to its parent's delete.
+_SWEEPABLE_EXISTENCE = frozenset({ExistenceStatus.EXISTS, ExistenceStatus.UNKNOWN})
 
 # A subnet/VPC/security-group is the only thing a requester-managed ENI can pin in
 # DELETE_FAILED. When a stack's outstanding failures are confined to these types and
@@ -515,9 +521,9 @@ class StackDeleter:
 
         ``snapshot`` is the stack's resource list captured just before the
         force-delete. Everything not already ``DELETE_COMPLETE`` there is a
-        candidate leftover; the verifier narrows that to resources that still
-        EXIST, and the cleaner deletes them (``prepare`` empties buckets via the
-        S3 handler, then custom handlers / CCAPI remove the resource itself).
+        candidate leftover; only those in ``_SWEEPABLE_EXISTENCE`` reach the cleaner,
+        which deletes them (``prepare`` empties buckets via the S3 handler, then
+        custom handlers / CCAPI remove the resource itself).
 
         Orphaned fixed-name resources are the motivating case: a bucket whose
         name is baked into the template blocks every future deploy with
@@ -543,9 +549,25 @@ class StackDeleter:
             survivors = [
                 by_key[(v.logical_id, v.physical_id)]
                 for v in verified
-                if v.existence_status == ExistenceStatus.EXISTS
+                if v.existence_status in _SWEEPABLE_EXISTENCE
                 and (v.logical_id, v.physical_id) in by_key
             ]
+            dropped = [
+                (v.existence_status, by_key[(v.logical_id, v.physical_id)])
+                for v in verified
+                if v.existence_status not in _SWEEPABLE_EXISTENCE
+                and (v.logical_id, v.physical_id) in by_key
+            ]
+            if dropped:
+                logger.debug(
+                    "Stack '%s': %d abandoned candidate(s) not swept: %s",
+                    stack_name,
+                    len(dropped),
+                    ", ".join(
+                        f"{r.logical_id}({r.resource_type}, {status.value})"
+                        for status, r in dropped
+                    ),
+                )
             if not survivors:
                 return []
             logger.debug(

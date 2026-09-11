@@ -22,6 +22,7 @@ classifiers = [
 dependencies = [
     "boto3>=1.42.0",
     "docker>=7.1.0",
+    "filelock>=3.29.4",
     "harbor==0.9.0",
     "jinja2>=3.1.6",
     "mcp>=1.28.1",
@@ -42,7 +43,7 @@ aws-bench = "aws_bench.cli.main:app"
 mlflow = [
     "mlflow-skinny>=3.0.0",
     "requests-auth-aws-sigv4",
-    "gitpython>=3.1.52",
+    "gitpython>=3.1.59",
     "pyasn1>=0.6.4",
 ]
 

@@ -263,6 +263,60 @@ def test_generate_bearer_token_reuses_cached(mock_get_creds, mock_ensure):
 
 
 @mock_aws
+@patch("aws_bench.utils.bedrock_credentials._get_existing_credentials")
+@patch("aws_bench.utils.bedrock_credentials._ensure_iam_user")
+@patch("aws_bench.utils.bedrock_credentials.urllib.request.urlopen")
+@patch("aws_bench.utils.bedrock_credentials.time.sleep")
+def test_generate_bearer_token_reuses_cached_token_that_403s_once(
+    mock_sleep, mock_urlopen, mock_ensure, mock_get_creds
+):
+    """A cached token rejected once, then accepted, is reused without rotating."""
+    import urllib.error
+    from http.client import HTTPMessage
+
+    # Arrange: a live credential on the account plus a cached token in SSM — the
+    # state in which rotating would delete a credential that is still good.
+    mock_get_creds.return_value = [
+        {
+            "Status": "Active",
+            "ServiceSpecificCredentialId": "cred-live",
+            "ExpirationDate": datetime.now(timezone.utc) + timedelta(days=29),
+        }
+    ]
+    session = boto3.Session(region_name="us-east-1")
+    ssm = session.client("ssm")
+    ssm.put_parameter(Name=SSM_PARAMETER, Value="cached-token", Type="SecureString", Overwrite=True)
+
+    accepted = MagicMock()
+    accepted.status = 200
+    accepted.__enter__ = lambda s: s
+    accepted.__exit__ = MagicMock(return_value=False)
+    mock_urlopen.side_effect = [
+        urllib.error.HTTPError(url="", code=403, msg="Forbidden", hdrs=HTTPMessage(), fp=None),
+        accepted,
+    ]
+
+    mock_iam = MagicMock()
+    original_client = session.client
+
+    def _patched_client(svc, **kw):
+        return mock_iam if svc == "iam" else original_client(svc, **kw)
+
+    # Act
+    with (
+        patch("aws_bench.utils.bedrock_credentials.boto3.Session", return_value=session),
+        patch.object(session, "client", side_effect=_patched_client),
+    ):
+        token = generate_bearer_token()
+
+    # Assert
+    assert token == "cached-token"
+    assert mock_urlopen.call_count == 2
+    mock_iam.create_service_specific_credential.assert_not_called()
+    mock_iam.delete_service_specific_credential.assert_not_called()
+
+
+@mock_aws
 @patch("aws_bench.utils.bedrock_credentials._ensure_iam_user")
 @patch("aws_bench.utils.bedrock_credentials._get_existing_credentials", return_value=[])
 @patch("aws_bench.utils.bedrock_credentials._verify_token", return_value=False)

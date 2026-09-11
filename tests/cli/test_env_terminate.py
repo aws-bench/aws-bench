@@ -32,6 +32,7 @@ class TestEnvTerminate:
         with patch(f"{ENV}.AccountManager") as mock_acct_cls:
             mock_acct = MagicMock()
             mock_acct_cls.return_value = mock_acct
+            mock_acct.is_preexisting = False
             mock_acct._org.get_org_info.return_value = _make_org_info()
             mock_acct._require_ou.return_value = "ou-test1"
             mock_acct._org.list_accounts_in_ou.return_value = accounts
@@ -56,6 +57,7 @@ class TestEnvTerminate:
         with patch(f"{ENV}.AccountManager") as mock_acct_cls:
             mock_acct = MagicMock()
             mock_acct_cls.return_value = mock_acct
+            mock_acct.is_preexisting = False
             mock_acct._org.get_org_info.return_value = _make_org_info()
             mock_acct._require_ou.return_value = "ou-test1"
             mock_acct._org.list_accounts_in_ou.return_value = accounts
@@ -71,6 +73,7 @@ class TestEnvTerminate:
         with patch(f"{ENV}.AccountManager") as mock_acct_cls:
             mock_acct = MagicMock()
             mock_acct_cls.return_value = mock_acct
+            mock_acct.is_preexisting = False
             mock_acct._org.get_org_info.return_value = _make_org_info()
             mock_acct._require_ou.return_value = "ou-test1"
             mock_acct._org.list_accounts_in_ou.return_value = []
@@ -82,6 +85,22 @@ class TestEnvTerminate:
         mock_acct._org.detach_all_scps.assert_called_once_with("ou-test1")
         mock_acct._org.delete_organizational_unit.assert_called_once_with("ou-test1")
 
+    def test_terminate_in_preexisting_mode_issues_no_organizations_calls(self):
+        """The refusal lands before any mutation: no SCP detach, no OU delete, no lookup."""
+        with patch(f"{ENV}.AccountManager") as mock_acct_cls:
+            mock_acct = MagicMock()
+            mock_acct_cls.return_value = mock_acct
+            mock_acct.is_preexisting = True
+
+            result = runner.invoke(app, ["env", "terminate", "--env-name", "acme-benchmark"])
+
+        assert result.exit_code == 1
+        assert "not available in pre-existing account mode" in result.stdout
+        mock_acct._org.assert_not_called()
+        assert not mock_acct._org.method_calls
+        mock_acct._require_ou.assert_not_called()
+        mock_acct.terminate_environment.assert_not_called()
+
     def test_terminate_ou_not_found(self):
         """Terminate with nonexistent OU exits with error."""
         from aws_bench.account_management.exceptions import TestEnvironmentNotFoundError
@@ -89,6 +108,7 @@ class TestEnvTerminate:
         with patch(f"{ENV}.AccountManager") as mock_acct_cls:
             mock_acct = MagicMock()
             mock_acct_cls.return_value = mock_acct
+            mock_acct.is_preexisting = False
             mock_acct._org.get_org_info.return_value = _make_org_info()
             mock_acct._require_ou.side_effect = TestEnvironmentNotFoundError("not found")
 

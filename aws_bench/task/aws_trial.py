@@ -39,6 +39,16 @@ from aws_bench.utils.placeholders import substitute_placeholders, update_placeho
 
 PLACEHOLDER_OUTPUT_FILE_NAME = "placeholder.json"
 
+# Trial-name prefix and Docker-label value for the post-trial account reset. The
+# invoking task trial name (unique per attempt) is appended to the prefix so the
+# derived scenario container name is unique per reset: overlapping resets of
+# different scenarios on one Docker daemon no longer share the fixed
+# ``awsbench-scenario-reset`` name and force-remove each other mid-reset. The
+# ``awsbench.role`` label lets operational tooling match reset containers by role
+# rather than by name.
+_SCENARIO_RESET_ROLE = "scenario-reset"
+_ROLE_LABEL_KEY = "awsbench.role"
+
 # In-container AWS credentials file at the SDK's default location, so tools
 # resolve it with no extra env. ``$HOME`` is expanded by the in-container shell,
 # which runs as the stage's own user, so the file lands in that user's home.
@@ -120,15 +130,19 @@ class AwsBenchSingleStepTrial(SingleStepTrial):
 
         Runs the env-side recovery flow (reset.sh, infra diff/restore, redeploy +
         re-snapshot on un-revertable stacks), writing under
-        ``<trial_dir>/scenario-reset/``. A reset failure is logged, never raised:
-        it must not fail a finished benchmark. Only cancellation propagates.
+        ``<trial_dir>/scenario-reset-<trial_name>/``. The reset trial name (and
+        thus the scenario container name) is suffixed with the invoking trial name
+        so concurrent resets of different scenarios never collide on one Docker
+        daemon. A reset failure is logged, never raised: it must not fail a
+        finished benchmark. Only cancellation propagates.
         """
         reset_config = ScenarioTrialConfig(
             scenario=self.config.scenario,
             output_dir=self.paths.trial_dir,
-            trial_name="scenario-reset",
+            trial_name=f"{_SCENARIO_RESET_ROLE}-{self.config.trial_name}",
             account_mapping=self.config.account_mapping,
             timeout_multiplier=self.config.timeout_multiplier,
+            labels={_ROLE_LABEL_KEY: _SCENARIO_RESET_ROLE},
         )
         try:
             trial = await ScenarioTrial.create(reset_config, CredentialProvider.get())

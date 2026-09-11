@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -1269,6 +1270,89 @@ def test_sweep_force_abandoned_noop_when_nothing_survives(deleter):
 
     mock_cleanup.assert_not_awaited()
     assert "force_abandoned_swept" not in deleter._manifest.get("my-stack", {})
+
+
+def test_sweep_force_abandoned_attempts_unverified_resources(deleter):
+    """An UNKNOWN resource is swept; a SKIPPED one is not.
+
+    UNKNOWN means the existence check could not answer, not that the resource is gone, and
+    deleting an already-absent resource is a no-op. SKIPPED asserts CCAPI cannot act on the
+    type, so a delete through it is equally impossible.
+    """
+    snapshot = _abandoned_snapshot()
+    verifications = [
+        _verification(snapshot[0], ExistenceStatus.SKIPPED),
+        _verification(snapshot[1], ExistenceStatus.UNKNOWN),
+        _verification(snapshot[2], ExistenceStatus.ABSENT),
+    ]
+    with (
+        patch.object(
+            deleter._verifier,
+            "verify_resources",
+            new_callable=AsyncMock,
+            return_value=verifications,
+        ),
+        patch.object(
+            deleter._cleaner, "cleanup", new_callable=AsyncMock, return_value={}
+        ) as mock_cleanup,
+    ):
+        asyncio.run(deleter._sweep_force_abandoned("my-stack", snapshot))
+
+    mock_cleanup.assert_awaited_once()
+    cleanup_args, _ = mock_cleanup.call_args_list[0]
+    assert [r.logical_id for r in cleanup_args[0]] == ["ALBLogsBucket"]
+    assert deleter._manifest["my-stack"]["force_abandoned_swept"] == ["ALBLogsBucket"]
+
+
+def test_sweep_force_abandoned_leaves_unchecked_subresources_to_their_parent(deleter):
+    """An UNCHECKED_SUBRESOURCE candidate is not swept.
+
+    A sub-resource cannot be verified or deleted without its parent's context, so it is
+    reclaimed by deleting the parent rather than attempted on its own.
+    """
+    snapshot = _abandoned_snapshot()
+    verifications = [
+        _verification(snapshot[0], ExistenceStatus.UNCHECKED_SUBRESOURCE),
+        _verification(snapshot[1], ExistenceStatus.UNCHECKED_SUBRESOURCE),
+    ]
+    with (
+        patch.object(
+            deleter._verifier,
+            "verify_resources",
+            new_callable=AsyncMock,
+            return_value=verifications,
+        ),
+        patch.object(deleter._cleaner, "cleanup", new_callable=AsyncMock) as mock_cleanup,
+    ):
+        stuck = asyncio.run(deleter._sweep_force_abandoned("my-stack", snapshot))
+
+    mock_cleanup.assert_not_awaited()
+    assert stuck == []
+
+
+def test_sweep_force_abandoned_logs_dropped_candidates(deleter, caplog):
+    """Candidates excluded from the sweep are logged even when others are swept."""
+    snapshot = _abandoned_snapshot()
+    verifications = [
+        _verification(snapshot[0], ExistenceStatus.SKIPPED),
+        _verification(snapshot[1], ExistenceStatus.EXISTS),
+    ]
+    with (
+        patch.object(
+            deleter._verifier,
+            "verify_resources",
+            new_callable=AsyncMock,
+            return_value=verifications,
+        ),
+        patch.object(deleter._cleaner, "cleanup", new_callable=AsyncMock, return_value={}),
+        caplog.at_level(
+            logging.DEBUG, logger="aws_bench.resource_management.cleanup.stack_deleter"
+        ),
+    ):
+        asyncio.run(deleter._sweep_force_abandoned("my-stack", snapshot))
+
+    assert "not swept" in caplog.text
+    assert "AutoDeleteCR" in caplog.text
 
 
 def test_sweep_force_abandoned_is_best_effort(deleter):

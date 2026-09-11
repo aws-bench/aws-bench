@@ -3,10 +3,13 @@
 import signal
 import sys
 from datetime import datetime, timezone
+from pathlib import Path
+from typing import Annotated
 
 import typer
-from typer import Typer
+from typer import Option, Typer
 
+from aws_bench.account_management.preexisting import activate_account_config
 from aws_bench.cli.env import env_app
 from aws_bench.cli.jobs import jobs_app, start
 from aws_bench.cli.view import view
@@ -77,7 +80,20 @@ def _handle_shutdown(signum, frame):
 
 
 @app.callback()
-def _root(ctx: typer.Context) -> None:
+def _root(
+    ctx: typer.Context,
+    account_config: Annotated[
+        Path | None,
+        Option(
+            "--account-config",
+            envvar="AWSBENCH_ACCOUNT_CONFIG",
+            help=(
+                "YAML/JSON pre-existing account allowlist. External IaC retains "
+                "account, OU, SCP, and termination ownership."
+            ),
+        ),
+    ] = None,
+) -> None:
     """Install shutdown handlers and open the command ledger for every command.
 
     Runs on the main thread before any subcommand and any ``asyncio.run``, so
@@ -88,6 +104,9 @@ def _root(ctx: typer.Context) -> None:
     """
     signal.signal(signal.SIGTERM, _handle_shutdown)
     signal.signal(signal.SIGINT, _handle_shutdown)
+
+    if account_config is not None:
+        activate_account_config(account_config)
 
     argv = list(sys.argv)
     entry = open_entry(_command_label(argv), argv, now=datetime.now(timezone.utc))

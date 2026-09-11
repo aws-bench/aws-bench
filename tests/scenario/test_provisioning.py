@@ -265,6 +265,55 @@ def test_provision_scenarios_happy_path(mocks, tmp_path):
     qm.request_quotas.assert_called_once()
 
 
+def test_preexisting_mode_validates_without_provisioning(mocks, tmp_path, _stub_deploy):
+    """External accounts use read-only readiness checks during env init."""
+    am, qm, cp = mocks
+    am.is_preexisting = True
+    am.runner_role = "AWSBenchRunner"
+    cp.get_session_for_account.return_value.client.return_value.get_caller_identity.return_value = {
+        "Account": "111111111111"
+    }
+    qm.verify_quotas.return_value = [
+        QuotaIncreaseResult(
+            service_code="lambda",
+            quota_code="L-1",
+            desired_value=10.0,
+            status=QuotaStatus.ALREADY_MET,
+        )
+    ]
+    sc = _make_scenario_with_quota(
+        tmp_path,
+        "sc",
+        quotas=[
+            {
+                "account_tag": "PRIMARY",
+                "region": "us-east-1",
+                "service_code": "lambda",
+                "quota_code": "L-1",
+                "desired_value": 10.0,
+            }
+        ],
+    )
+    with patch("aws_bench.scenario.provisioning._validate_cfn_ops_role") as validate_role:
+        result = asyncio.run(
+            provision_scenarios(
+                [sc],
+                "ou",
+                n_concurrent=1,
+                wait_for_quotas=False,
+                account_manager=am,
+                quota_manager=qm,
+                cred_provider=cp,
+            )
+        )
+    assert result.all_succeeded
+    _stub_deploy.assert_not_called()
+    cp.wait_for_role.assert_not_called()
+    validate_role.assert_called_once_with(cp, "111111111111")
+    qm.request_quotas.assert_not_called()
+    qm.verify_quotas.assert_called_once()
+
+
 def test_provision_scenarios_deploys_discovery_lambda_once(mocks, tmp_path, _stub_deploy):
     """The discovery Lambda is deployed once per run on the happy path."""
     am, qm, cp = mocks

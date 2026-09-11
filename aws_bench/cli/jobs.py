@@ -31,6 +31,7 @@ from aws_bench.cli.preflight import (
     preflight_aws_credentials,
     preflight_docker_cli,
     preflight_docker_daemon,
+    preflight_docker_plugins,
 )
 from aws_bench.cli.ui import console
 from aws_bench.dataset.config import AwsBenchDatasetConfig
@@ -826,7 +827,8 @@ def start(
         ):
             # Preflight inside the span so the AWS identity line lands in job.log.
             preflight_docker_cli()
-            preflight_docker_daemon()
+            plugins = preflight_docker_daemon()
+            preflight_docker_plugins(plugins)
             preflight_aws_credentials(CredentialProvider.get(), ou_name=config.env_name)
             run_async(_run_job())
     except Exception as exc:
