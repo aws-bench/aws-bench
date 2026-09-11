@@ -197,6 +197,7 @@ def stub_external_deps(mocker):
     # No daemon / live credentials in tests, so stub all three.
     mocker.patch("aws_bench.cli.jobs.preflight_docker_cli")
     mocker.patch("aws_bench.cli.jobs.preflight_docker_daemon")
+    mocker.patch("aws_bench.cli.jobs.preflight_docker_plugins")
     mocker.patch("aws_bench.cli.jobs.preflight_aws_credentials")
 
     return ns

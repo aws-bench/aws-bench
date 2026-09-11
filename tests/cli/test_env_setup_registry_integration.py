@@ -61,6 +61,7 @@ def stub_setup_deps(mocker, fake_registry):
     mocker.patch("aws_bench.cli.env.preflight_aws_credentials")
     mocker.patch("aws_bench.cli.env.preflight_docker_cli")
     mocker.patch("aws_bench.cli.env.preflight_docker_daemon")
+    mocker.patch("aws_bench.cli.env.preflight_docker_plugins")
 
     mocker.patch(
         "aws_bench.cli.env.CredentialProvider.get",

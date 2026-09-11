@@ -173,7 +173,7 @@ def collect_account_exports(
             session = cred_provider.get_session_for_account(
                 account_id,
                 role_name,
-                build_session_name("exports", account_id[-6:]),
+                build_session_name("session", account_id[-6:]),
             )
             account_creds[account_id] = session_to_env_credentials(session)
         except (ClientError, BotoCoreError) as exc:

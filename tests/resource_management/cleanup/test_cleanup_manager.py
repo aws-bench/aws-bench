@@ -56,6 +56,77 @@ async def test_sweep_deletes_current_minus_init():
 
 
 @pytest.mark.asyncio
+async def test_sweep_does_not_existence_check_baselined_defaults():
+    """Change A: a baselined default is excluded by the diff and never CCAPI-checked in a sweep.
+
+    Only the genuine post-diff residual reaches the host-side re-check — the fix for the F4 storm,
+    where the sweep re-checked the entire live inventory (incl. ControlTower/SecurityHub defaults)
+    on every wave.
+    """
+    mgr = CleanupManager(MagicMock(), env_name="scn")
+    setup = _snapshot({"AWS::ControlTower::EnabledBaseline": [{"Identifier": "eb-default"}]})
+    current = ScanResult(
+        detected={
+            "AWS::ControlTower::EnabledBaseline": [{"Identifier": "eb-default"}],
+            "AWS::S3::Bucket": [{"Identifier": "run-bucket"}],
+        },
+        failed={},
+    )
+    checked: list[str] = []
+
+    def _exists(resource):
+        checked.append(resource.identifier)
+        return True  # residual still exists -> kept
+
+    with (
+        patch.object(mgr, "_scan_region_resources", return_value=current),
+        patch(
+            "aws_bench.resource_management.cleanup.manager.create_regional_session",
+            return_value=MagicMock(),
+        ),
+        patch(
+            "aws_bench.resource_management.cleanup.account_scanner.CloudControlManager"
+        ) as ccm_cls,
+        patch("aws_bench.resource_management.cleanup.manager.ResourceSweeper") as RS,
+    ):
+        ccm_cls.return_value.resource_exists.side_effect = _exists
+        RS.return_value.delete = AsyncMock(return_value={})
+        await mgr._delete_resources_created_after_setup("us-east-1", setup)
+
+    # The baselined ControlTower default was excluded by the diff and never existence-checked.
+    assert "eb-default" not in checked
+    # Only the genuine residual was host-side re-checked, and (still existing) swept.
+    assert checked == ["run-bucket"]
+    swept = RS.return_value.delete.call_args.args[0]
+    assert swept == {"AWS::S3::Bucket": [{"Identifier": "run-bucket"}]}
+
+
+@pytest.mark.asyncio
+async def test_sweep_drops_residual_confirmed_absent_before_delete():
+    """Change A regression: a residual the host-side re-check confirms gone is dropped, not swept."""  # noqa: E501
+    mgr = CleanupManager(MagicMock(), env_name="scn")
+    setup = _snapshot({})
+    current = ScanResult(detected={"AWS::S3::Bucket": [{"Identifier": "ghost-bucket"}]}, failed={})
+    with (
+        patch.object(mgr, "_scan_region_resources", return_value=current),
+        patch(
+            "aws_bench.resource_management.cleanup.manager.create_regional_session",
+            return_value=MagicMock(),
+        ),
+        patch(
+            "aws_bench.resource_management.cleanup.account_scanner.CloudControlManager"
+        ) as ccm_cls,
+        patch("aws_bench.resource_management.cleanup.manager.ResourceSweeper") as RS,
+    ):
+        ccm_cls.return_value.resource_exists.return_value = False  # confirmed gone
+        RS.return_value.delete = AsyncMock(return_value={})
+        await mgr._delete_resources_created_after_setup("us-east-1", setup)
+
+    # Residual confirmed gone -> nothing to sweep.
+    RS.return_value.delete.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_residual_phase_skipped_when_no_setup_snapshot():
     mgr = CleanupManager(MagicMock(), env_name="scn")
     with (

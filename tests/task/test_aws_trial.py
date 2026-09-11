@@ -964,12 +964,59 @@ async def test_reset_scenario_account_builds_config_and_runs_reset(tmp_path, moc
     await trial._reset_scenario_account()
 
     reset_cfg = create.call_args.args[0]
-    assert reset_cfg.trial_name == "scenario-reset"
+    assert reset_cfg.trial_name == "scenario-reset-trial-0"
+    assert reset_cfg.labels == {"awsbench.role": "scenario-reset"}
     assert reset_cfg.output_dir == trial.paths.trial_dir
     assert reset_cfg.scenario is trial.config.scenario
     assert reset_cfg.account_mapping == {"PRIMARY": "111111111111"}
     assert create.call_args.args[1] == "CREDS"
     scenario_trial.run.assert_awaited_once_with(ScenarioPhase.RESET)
+
+
+@pytest.mark.asyncio
+async def test_concurrent_resets_from_different_trials_get_distinct_names(tmp_path, mocker):
+    """Two overlapping resets of different trials must not share a container name.
+
+    Regression guard for the fixed-name collision (F3): the reset trial name is
+    suffixed with the invoking trial name, so the derived scenario container name
+    (``awsbench-<trial_name>``) is unique per reset and overlapping resets on one
+    Docker daemon no longer force-remove each other on start.
+    """
+    from aws_bench.dataset.task_config import ConcurrencyMode
+    from aws_bench.scenario.container import sanitize_container_name
+
+    trial_a = _reset_ready_trial(tmp_path / "a", mode=ConcurrencyMode.MUTATING)
+    trial_a.config.trial_name = "task-alpha__AAAAAAA"
+    trial_b = _reset_ready_trial(tmp_path / "b", mode=ConcurrencyMode.MUTATING)
+    trial_b.config.trial_name = "task-beta__BBBBBBB"
+
+    scenario_trial = MagicMock()
+    scenario_trial.run = AsyncMock(return_value=SimpleNamespace(success=True))
+    create = mocker.patch(
+        "aws_bench.task.aws_trial.ScenarioTrial.create",
+        AsyncMock(return_value=scenario_trial),
+    )
+    mocker.patch("aws_bench.task.aws_trial.CredentialProvider.get", return_value="CREDS")
+
+    await asyncio.gather(
+        trial_a._reset_scenario_account(),
+        trial_b._reset_scenario_account(),
+    )
+
+    captured = [call.args[0] for call in create.call_args_list]
+    assert len(captured) == 2
+    # Each reset trial name derives from its invoking trial, so the two differ.
+    assert {c.trial_name for c in captured} == {
+        f"scenario-reset-{trial_a.config.trial_name}",
+        f"scenario-reset-{trial_b.config.trial_name}",
+    }
+    # The Docker container names ScenarioTrial derives from these are distinct.
+    names = {sanitize_container_name(f"awsbench-{c.trial_name}") for c in captured}
+    assert len(names) == 2
+    # Both stay within Docker's 128-char container-name cap.
+    assert all(len(n) <= 128 for n in names)
+    # Both still carry the role label so ops tooling can match by role, not name.
+    assert all(c.labels == {"awsbench.role": "scenario-reset"} for c in captured)
 
 
 @pytest.mark.asyncio

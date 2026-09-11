@@ -18,8 +18,9 @@ ScenarioPathOption = Annotated[
     Option(
         "--scenario-path",
         help=(
-            "Path to a directory of scenarios (or a single scenario directory). "
-            "Mutually exclusive with --dataset."
+            "Path to a directory containing scenario directories (each "
+            "immediate subdirectory is treated as one scenario). Mutually "
+            "exclusive with --dataset."
         ),
         rich_help_panel="Scenario Source",
         show_default=False,

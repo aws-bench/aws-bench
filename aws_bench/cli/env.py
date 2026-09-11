@@ -40,6 +40,7 @@ from aws_bench.cli.preflight import (
     preflight_aws_credentials,
     preflight_docker_cli,
     preflight_docker_daemon,
+    preflight_docker_plugins,
 )
 from aws_bench.cli.scenario_progress import (
     provision_scenarios_with_progress,
@@ -220,7 +221,8 @@ def _run_phase_command(
 
     with file_logging(paths.log_path):
         preflight_docker_cli()
-        preflight_docker_daemon()
+        plugins = preflight_docker_daemon()
+        preflight_docker_plugins(plugins)
         preflight_aws_credentials(CredentialProvider.get(), ou_name=job_cfg.ou_name)
         return asyncio.run(_run_job_phase(job_cfg, phase, CredentialProvider.get(), quiet=quiet))
 
