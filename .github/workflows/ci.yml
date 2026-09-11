@@ -30,7 +30,7 @@ jobs:
           persist-credentials: false
           fetch-depth: 0
 
-      - uses: astral-sh/setup-uv@v8.3.2
+      - uses: astral-sh/setup-uv@v10.0.1
 
       - name: Install package
         run: uv sync
@@ -63,7 +63,7 @@ jobs:
           persist-credentials: false
           fetch-depth: 0
 
-      - uses: astral-sh/setup-uv@v8.3.2
+      - uses: astral-sh/setup-uv@v10.0.1
 
       - name: Install package
         run: uv sync
@@ -86,7 +86,7 @@ jobs:
           persist-credentials: false
           fetch-depth: 0
 
-      - uses: astral-sh/setup-uv@v8.3.2
+      - uses: astral-sh/setup-uv@v10.0.1
 
       - name: Build docs
         run: uv run --group docs mkdocs build --strict
