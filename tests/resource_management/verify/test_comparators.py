@@ -459,3 +459,15 @@ class TestPhase2AwsOwnedFilters:
         assert predicate("arn:aws:mediaconvert:us-east-1:123456789012:queues/Default", {})
         # A task-created on-demand queue carries its own name and is NOT filtered.
         assert not predicate("arn:aws:mediaconvert:us-east-1:123456789012:queues/my-queue", {})
+
+    def test_default_elasticache_subnet_group_filtered_custom_kept(self):
+        predicate = self._predicate("AWS::ElastiCache::SubnetGroup")
+        # The account/Region singleton ``default`` cache subnet group is AWS-reserved, lazily
+        # materialized on first ElastiCache use, and undeletable ("default is reserved and cannot
+        # be modified") — filtered.
+        assert predicate("default", {})
+        # An agent/task-created group carries a custom name and is NOT filtered.
+        assert not predicate("storage-app-valkey-subnet-group", {})
+        # Regression guard: the match MUST be exact equality, not startswith("default") — a
+        # legitimately named group that merely starts with "default" is real, deletable drift.
+        assert not predicate("default-valkey-subnets", {})
