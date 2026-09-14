@@ -22,6 +22,10 @@ AWS_MANAGED_FILTERS: dict[str, Callable[[str, dict], bool]] = {
     "AWS::EC2::PrefixList": lambda _, r: _is_aws_owned(r),
     # AWS-reserved ``default.*`` parameter groups (redis/memcached/valkey) are undeletable.
     "AWS::ElastiCache::ParameterGroup": lambda id, _: id.startswith("default."),
+    # AWS-reserved ``default`` cache subnet group: an account/Region singleton, lazily created on
+    # first ElastiCache use, and undeletable ("default is reserved and cannot be modified",
+    # verified live). Agent/task-created groups carry a custom name and are NOT filtered.
+    "AWS::ElastiCache::SubnetGroup": lambda id, _: id == "default",
     # AWS-reserved default RDS/Neptune parameter & option groups are per-engine, account-created,
     # and undeletable ("Default DBParameterGroup cannot be deleted" / "Default option groups cannot
     # be deleted", verified live). The lister emits the group NAME: param groups are
