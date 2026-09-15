@@ -471,3 +471,49 @@ class TestPhase2AwsOwnedFilters:
         # Regression guard: the match MUST be exact equality, not startswith("default") — a
         # legitimately named group that merely starts with "default" is real, deletable drift.
         assert not predicate("default-valkey-subnets", {})
+
+
+def test_filter_aws_managed_resources_removes_autoscaling_managed_rule():
+    """EC2 Auto Scaling's ``AutoScalingManagedRule`` is filtered; task rules are kept.
+
+    The rule is a lazily-created, account-persistent, AWS-managed EventBridge rule
+    absent from the pre-deploy snapshot, so reset flagged it as new/orphan. It must
+    be excluded (by exact name) while any task/agent-created rule is preserved.
+    """
+    resources = {
+        "AWS::Events::Rule": [
+            {"Identifier": "arn:aws:events:us-east-1:123456789012:rule/AutoScalingManagedRule"},
+            {"Identifier": "AutoScalingManagedRule"},
+            {"Identifier": "arn:aws:events:us-east-1:123456789012:rule/my-task-rule"},
+            {"Identifier": "my-bare-rule"},
+        ]
+    }
+
+    filtered = filter_aws_managed_resources(resources)
+
+    kept = {r["Identifier"] for r in filtered["AWS::Events::Rule"]}
+    assert kept == {
+        "arn:aws:events:us-east-1:123456789012:rule/my-task-rule",
+        "my-bare-rule",
+    }
+
+
+def test_filter_keeps_custom_bus_rule_named_like_managed_rule_suffix():
+    """A custom rule whose name merely ends in the managed name is still filtered by exact match.
+
+    ``…:rule/<bus>/AutoScalingManagedRule`` (custom-bus ARN) resolves to the exact
+    managed name on its trailing segment, so it is excluded; a differently-named
+    rule is not.
+    """
+    prefix = "arn:aws:events:us-east-1:123456789012:rule/mybus"
+    resources = {
+        "AWS::Events::Rule": [
+            {"Identifier": f"{prefix}/AutoScalingManagedRule"},
+            {"Identifier": f"{prefix}/NotManaged"},
+        ]
+    }
+
+    filtered = filter_aws_managed_resources(resources)
+
+    kept = {r["Identifier"] for r in filtered["AWS::Events::Rule"]}
+    assert kept == {f"{prefix}/NotManaged"}

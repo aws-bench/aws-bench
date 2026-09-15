@@ -61,6 +61,15 @@ AWS_MANAGED_FILTERS: dict[str, Callable[[str, dict], bool]] = {
     # AWS-reserved default IoT domain configurations. Custom domains
     # (which cannot use the ``iot:`` prefix) still surface as real orphans.
     "AWS::IoT::DomainConfiguration": lambda id, _: id.startswith("iot:"),
+    # EC2 Auto Scaling's account-level managed EventBridge rule
+    # (``AutoScalingManagedRule``) is created lazily by the service the first time
+    # an Auto Scaling group is used (e.g. an EKS managed node group's ASG). It is
+    # account-persistent, is not part of any CloudFormation stack, and is absent
+    # from the pre-deploy snapshot, so every reset would otherwise flag it as a
+    # new/orphan resource. It is AWS-managed drift, not agent drift. The lister
+    # emits the rule ARN (``…:rule/AutoScalingManagedRule``); a task/agent-created
+    # rule carries a custom name and is NOT filtered.
+    "AWS::Events::Rule": lambda id, _: _is_autoscaling_managed_rule(id),
     # AWS-preconfigured default dashboard (documented in AWS S3 docs)
     "AWS::S3::StorageLens": lambda id, _: id == "default-account-dashboard",
     # AWS-managed RAM permissions live in the ::aws: partition (no account id);
@@ -133,6 +142,22 @@ def _is_service_managed_secret(identifier: str) -> bool:
     """
     name = identifier.split(":secret:")[-1] if ":secret:" in identifier else identifier
     return name.startswith(_SERVICE_MANAGED_SECRET_PREFIXES)
+
+
+_AUTOSCALING_MANAGED_RULE_NAME = "AutoScalingManagedRule"
+
+
+def _is_autoscaling_managed_rule(identifier: str) -> bool:
+    """Whether an ``AWS::Events::Rule`` identifier names EC2 Auto Scaling's managed rule.
+
+    The identifier may be the rule ARN — default bus
+    ``arn:aws:events:<region>:<acct>:rule/AutoScalingManagedRule`` or custom bus
+    ``…:rule/<bus>/AutoScalingManagedRule`` — or a bare rule name. Only the exact
+    AWS-managed name is matched (on the trailing name segment), so a task/agent
+    rule with a different name is never excluded.
+    """
+    name = identifier.rsplit("/", 1)[-1] if "/" in identifier else identifier
+    return name == _AUTOSCALING_MANAGED_RULE_NAME
 
 
 def _is_aws_owned(resource: dict) -> bool:
