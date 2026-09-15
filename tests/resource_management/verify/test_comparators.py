@@ -166,6 +166,40 @@ def test_filter_aws_managed_resources_removes_service_managed_secrets():
     }
 
 
+def test_filter_aws_managed_resources_removes_dynamodb_import_jobs():
+    """DynamoDB Import-from-S3 job records are filtered; real tables/exports/backups kept.
+
+    Import jobs (``ImportArn``) are permanent, undeletable import history (no DeleteImport
+    API, no CCAPI handler), so the orphan/drift check flags them forever. The ``ListImports``
+    lister has no ``cfn_type``, so its ARNs land in the synthetic ``AWS::dynamodb::*`` bucket
+    next to backups/exports/global tables. Only the ``/import/`` ARN segment is matched, so a
+    real table ARN (no ``/import/``) and the sibling ``/export/`` / ``/backup/`` records — none
+    of which are import jobs — are NOT filtered.
+    """
+    acct = "arn:aws:dynamodb:us-east-1:123456789012:table"
+    resources = {
+        "AWS::dynamodb::*": [
+            {"Identifier": f"{acct}/order_items.csv/import/01789480117964-fb5eb55b"},
+            {"Identifier": f"{acct}/products.csv/import/01789480117000-aa11bb22"},
+            # Sibling DynamoDB metadata in the same synthetic bucket — must be KEPT.
+            {"Identifier": f"{acct}/orders/export/01700000000000-deadbeef"},
+            {"Identifier": f"{acct}/orders/backup/01700000000000-cafed00d"},
+        ],
+        # A real agent-created table (proper CCAPI type, no ``/import/``) — must be KEPT.
+        "AWS::DynamoDB::Table": [
+            {"Identifier": f"{acct}/order_items"},
+        ],
+    }
+
+    filtered = filter_aws_managed_resources(resources)
+
+    assert {r["Identifier"] for r in filtered["AWS::dynamodb::*"]} == {
+        f"{acct}/orders/export/01700000000000-deadbeef",
+        f"{acct}/orders/backup/01700000000000-cafed00d",
+    }
+    assert {r["Identifier"] for r in filtered["AWS::DynamoDB::Table"]} == {f"{acct}/order_items"}
+
+
 def test_filter_aws_managed_resources_removes_custom_types():
     """Test filtering removes custom CloudFormation types."""
     resources = {
