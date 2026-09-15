@@ -9,14 +9,17 @@ import pytest
 
 from aws_bench.resource_management.ccapi.models import Resource
 from aws_bench.resource_management.cleanup.models import (
+    CustomDeletionResult,
     HandlerResult,
     HandlerStatus,
     StackResource,
     to_ccapi_resources,
 )
 from aws_bench.resource_management.cleanup.resource_cleaner import (
+    DELETE_BEFORE_PREPARE_TYPES,
     ResourceCleaner,
     format_sample_list,
+    partition_delete_before_prepare,
     truncate_for_log,
 )
 
@@ -490,3 +493,190 @@ def test_cleanup_logs_stuck_resources():
     # Check that stuck resource handling was logged
     info_calls = [call for call in mock_log.debug.call_args_list if "stuck" in str(call).lower()]
     assert len(info_calls) > 0
+
+
+# -- nodegroup-first dependency barrier --
+
+
+def test_delete_before_prepare_types_contains_nodegroup():
+    assert "AWS::EKS::Nodegroup" in DELETE_BEFORE_PREPARE_TYPES
+
+
+def test_partition_delete_before_prepare_splits_nodegroups():
+    nodegroup = StackResource("Ng", "c1|ng1", "AWS::EKS::Nodegroup", "CREATE_COMPLETE")
+    bucket = StackResource("B", "b1", "AWS::S3::Bucket", "CREATE_COMPLETE")
+    barrier, rest = partition_delete_before_prepare([nodegroup, bucket])
+    assert barrier == [nodegroup]
+    assert rest == [bucket]
+
+
+def test_barrier_nodegroup_deletes_before_asg_prepare_starts():
+    """The nodegroup custom deletion must complete before any ASG prepare runs."""
+    cleaner = ResourceCleaner(MagicMock())
+    nodegroup = StackResource("Ng", "c1|ng1", "AWS::EKS::Nodegroup", "CREATE_COMPLETE")
+    asg = StackResource("Asg", "asg-1", "AWS::AutoScaling::AutoScalingGroup", "CREATE_COMPLETE")
+    resources = [nodegroup, asg]
+
+    order: list[tuple[str, tuple[str, ...]]] = []
+
+    def fake_custom_delete(res, *args, **kwargs):
+        order.append(("custom_delete", tuple(r.type for r in res)))
+        return CustomDeletionResult(skipped=[], succeeded=list(res), failed={})
+
+    def fake_prepare_all(res, *args, **kwargs):
+        order.append(("prepare_all", tuple(r.type for r in res)))
+        return []
+
+    with (
+        patch.object(cleaner, "_custom_delete", side_effect=fake_custom_delete),
+        patch.object(cleaner, "_prepare_all", side_effect=fake_prepare_all),
+    ):
+        result = asyncio.run(cleaner.cleanup(resources, prepare=True, custom_delete=True))
+
+    assert result == {}
+    # First operation is the barrier custom-delete of the nodegroup alone.
+    assert order[0] == ("custom_delete", ("AWS::EKS::Nodegroup",))
+    first_prepare = next(i for i, (kind, _) in enumerate(order) if kind == "prepare_all")
+    assert first_prepare > 0
+    # The nodegroup is never routed through prepare, and the ASG is.
+    for kind, types in order:
+        if kind == "prepare_all":
+            assert "AWS::EKS::Nodegroup" not in types
+    assert any(
+        kind == "prepare_all" and "AWS::AutoScaling::AutoScalingGroup" in types
+        for kind, types in order
+    )
+
+
+def test_barrier_success_continues_prepare_custom_and_ccapi():
+    """A handled nodegroup is removed; remaining prepare/custom/CCAPI work proceeds."""
+    cleaner = ResourceCleaner(MagicMock())
+    nodegroup = StackResource("Ng", "c1|ng1", "AWS::EKS::Nodegroup", "CREATE_COMPLETE")
+    bucket = StackResource("B", "b1", "AWS::S3::Bucket", "CREATE_COMPLETE")
+    resources = [nodegroup, bucket]
+
+    def fake_ng_delete(resource, session):
+        return HandlerResult(resource.identifier, resource.type, "delete", HandlerStatus.SUCCESS)
+
+    with (
+        patch(
+            "aws_bench.resource_management.cleanup.resource_cleaner.CUSTOM_DELETION_REGISTRY",
+            {"AWS::EKS::Nodegroup": fake_ng_delete},
+        ),
+        patch.object(cleaner, "_prepare_all", return_value=[]) as mock_prepare,
+        patch(
+            "aws_bench.resource_management.cleanup.resource_cleaner.CloudControlManager"
+        ) as mock_ccm_cls,
+    ):
+        mock_ccm_cls.return_value.delete_resources.return_value = {}
+        result = asyncio.run(
+            cleaner.cleanup(resources, prepare=True, custom_delete=True, ccapi_fallback=True)
+        )
+
+    assert result == {}
+    # Prepare ran on the remaining resource only — never the nodegroup.
+    prepared_types = {r.type for r in mock_prepare.call_args.args[0]}
+    assert prepared_types == {"AWS::S3::Bucket"}
+    # The unregistered bucket fell through to CCAPI; the nodegroup did not.
+    ccapi_types = {r.type for r in mock_ccm_cls.return_value.delete_resources.call_args.args[0]}
+    assert "AWS::S3::Bucket" in ccapi_types
+    assert "AWS::EKS::Nodegroup" not in ccapi_types
+
+
+def test_barrier_nodegroup_failure_blocks_prepare_and_ccapi():
+    """A failing nodegroup handler fails closed: the failure is returned, nothing else runs."""
+    cleaner = ResourceCleaner(MagicMock())
+    nodegroup = StackResource("Ng", "c1|ng1", "AWS::EKS::Nodegroup", "CREATE_COMPLETE")
+    asg = StackResource("Asg", "asg-1", "AWS::AutoScaling::AutoScalingGroup", "CREATE_COMPLETE")
+    resources = [nodegroup, asg]
+
+    def fake_ng_delete(resource, session):
+        return HandlerResult(
+            resource.identifier, resource.type, "delete", HandlerStatus.FAILED, "drain stuck"
+        )
+
+    with (
+        patch(
+            "aws_bench.resource_management.cleanup.resource_cleaner.CUSTOM_DELETION_REGISTRY",
+            {"AWS::EKS::Nodegroup": fake_ng_delete},
+        ),
+        patch.object(cleaner, "_prepare_all") as mock_prepare,
+        patch(
+            "aws_bench.resource_management.cleanup.resource_cleaner.CloudControlManager"
+        ) as mock_ccm_cls,
+    ):
+        result = asyncio.run(
+            cleaner.cleanup(resources, prepare=True, custom_delete=True, ccapi_fallback=True)
+        )
+
+    assert len(result) == 1
+    failed = next(iter(result))
+    assert failed.type == "AWS::EKS::Nodegroup"
+    assert result[failed].status_message == "drain stuck"
+    mock_prepare.assert_not_called()
+    mock_ccm_cls.return_value.delete_resources.assert_not_called()
+
+
+def test_barrier_unregistered_nodegroup_handler_fails_closed():
+    """No registered handler (skipped by _custom_delete) is a fail-closed failure."""
+    cleaner = ResourceCleaner(MagicMock())
+    nodegroup = StackResource("Ng", "c1|ng1", "AWS::EKS::Nodegroup", "CREATE_COMPLETE")
+
+    with (
+        patch(
+            "aws_bench.resource_management.cleanup.resource_cleaner.CUSTOM_DELETION_REGISTRY",
+            {},
+        ),
+        patch.object(cleaner, "_prepare_all") as mock_prepare,
+        patch(
+            "aws_bench.resource_management.cleanup.resource_cleaner.CloudControlManager"
+        ) as mock_ccm_cls,
+    ):
+        result = asyncio.run(
+            cleaner.cleanup([nodegroup], prepare=True, custom_delete=True, ccapi_fallback=True)
+        )
+
+    assert len(result) == 1
+    failed = next(iter(result))
+    assert failed.type == "AWS::EKS::Nodegroup"
+    assert "No custom deletion handler registered" in result[failed].status_message
+    mock_prepare.assert_not_called()
+    mock_ccm_cls.return_value.delete_resources.assert_not_called()
+
+
+def test_prepare_only_does_not_invoke_barrier():
+    """prepare-only never triggers the barrier; the nodegroup flows through prepare unchanged."""
+    cleaner = ResourceCleaner(MagicMock())
+    nodegroup = StackResource("Ng", "c1|ng1", "AWS::EKS::Nodegroup", "CREATE_COMPLETE")
+
+    with (
+        patch.object(cleaner, "_delete_before_prepare") as mock_barrier,
+        patch.object(cleaner, "_prepare_all", return_value=[]) as mock_prepare,
+    ):
+        asyncio.run(cleaner.cleanup([nodegroup], prepare=True))
+
+    mock_barrier.assert_not_called()
+    prepared_types = {r.type for r in mock_prepare.call_args.args[0]}
+    assert prepared_types == {"AWS::EKS::Nodegroup"}
+
+
+def test_custom_delete_only_does_not_invoke_barrier():
+    """custom-delete-only never triggers the barrier; existing ordering/behavior is retained."""
+    cleaner = ResourceCleaner(MagicMock())
+    nodegroup = StackResource("Ng", "c1|ng1", "AWS::EKS::Nodegroup", "CREATE_COMPLETE")
+    handler = MagicMock(
+        return_value=HandlerResult("c1|ng1", "AWS::EKS::Nodegroup", "delete", HandlerStatus.SUCCESS)
+    )
+
+    with (
+        patch.object(cleaner, "_delete_before_prepare") as mock_barrier,
+        patch(
+            "aws_bench.resource_management.cleanup.resource_cleaner.CUSTOM_DELETION_REGISTRY",
+            {"AWS::EKS::Nodegroup": handler},
+        ),
+    ):
+        result = asyncio.run(cleaner.cleanup([nodegroup], custom_delete=True))
+
+    mock_barrier.assert_not_called()
+    handler.assert_called_once()
+    assert result == {}
