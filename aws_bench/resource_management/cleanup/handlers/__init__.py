@@ -6,6 +6,7 @@ and failed-resource handlers.
 
 from aws_bench.resource_management.cleanup.handlers import (
     acm,  # noqa: F401
+    acmpca,  # noqa: F401
     asg,  # noqa: F401
     athena,  # noqa: F401
     batch,  # noqa: F401
