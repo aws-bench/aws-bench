@@ -191,19 +191,35 @@ def _rotate_credential(
     *,
     days: int,
     no_verify: bool,
+    reclaim_slot: bool = False,
 ) -> str:
     """Mint a replacement credential gracefully and return its bearer token.
 
     Rotation is ordered mint -> verify -> store-in-SSM -> delete-old, so a run
     already holding the old key is not invalidated before the new key is proven
     and published. The old credential is retired only after the new one is in
-    SSM. IAM caps a user at 2 service-specific credentials per service; if both
-    slots are full we free the soonest-to-expire one first (the only
-    unavoidable delete-before-mint case).
+    SSM.
+
+    IAM caps a user at 2 service-specific credentials per service. When both
+    slots are full a rotation cannot mint without first deleting an existing
+    credential. That delete is destructive and may surprise a caller who
+    manages ``bedrock-api-user`` themselves, so it is opt-in: only when
+    ``reclaim_slot`` is set do we free the soonest-to-expire credential.
+    Otherwise we refuse and tell the caller how to authorize it.
     """
     if len(existing) >= 2:
+        if not reclaim_slot:
+            raise BedrockCredentialError(
+                f"Both service-specific credential slots for IAM user '{IAM_USER_NAME}' are in "
+                "use (IAM allows a maximum of 2 per user/service), so rotating requires deleting "
+                "one of them. Re-run with --reclaim-slot to authorize deleting the "
+                "soonest-to-expire credential, or --force to replace all existing credentials."
+            )
         to_free = min(existing, key=_expiration_key)
-        logger.info("Both credential slots in use; freeing the soonest-to-expire one to rotate.")
+        logger.warning(
+            "Both credential slots in use; --reclaim-slot set, freeing soonest-to-expire "
+            f"credential {to_free['ServiceSpecificCredentialId']} to rotate."
+        )
         _delete_all_credentials(iam_client, IAM_USER_NAME, [to_free])
         existing = [c for c in existing if c is not to_free]
 
@@ -257,6 +273,7 @@ def generate_bearer_token(
     no_verify: bool = False,
     days: int = DEFAULT_DAYS,
     min_remaining_days: int = DEFAULT_MIN_REMAINING_DAYS,
+    reclaim_slot: bool = False,
 ) -> str:
     """Generate or retrieve a cached Bedrock bearer token.
 
@@ -265,6 +282,11 @@ def generate_bearer_token(
         no_verify: Skip token verification against Bedrock API.
         days: Credential lifetime in days.
         min_remaining_days: Minimum remaining days to consider a credential reusable.
+        reclaim_slot: When both service-specific credential slots are in use and a
+            rotation is required, authorize deleting the soonest-to-expire
+            credential to free a slot. Off by default so a caller who manages
+            ``bedrock-api-user`` themselves is never surprised by a deletion;
+            ``force`` implies it.
 
     Returns:
         The bearer token string.
@@ -321,7 +343,14 @@ def generate_bearer_token(
     # Steps 3-5: Rotate gracefully (mint -> verify -> store -> delete-old) so a
     # run holding the old key is not invalidated before the new key is proven.
     if credential_expiring or force or need_regenerate:
-        return _rotate_credential(iam_client, ssm_client, existing, days=days, no_verify=no_verify)
+        return _rotate_credential(
+            iam_client,
+            ssm_client,
+            existing,
+            days=days,
+            no_verify=no_verify,
+            reclaim_slot=reclaim_slot or force,
+        )
 
     # Unreachable: one of reuse / rotate always returns above. Guard for safety.
     raise BedrockCredentialError("Unable to obtain a Bedrock bearer token.")
