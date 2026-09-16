@@ -329,3 +329,21 @@ def test_v2_teardown_timeout_is_best_effort_success(_sleep: MagicMock):
 
     assert result.status == HandlerStatus.SUCCESS
     cfn.delete_stack.assert_not_called()
+
+
+@patch(_SLEEP)
+def test_v2_teardown_backs_off_between_polls(sleep_mock: MagicMock):
+    """The poll interval grows (backoff) and is capped, rather than a fixed delay."""
+    kda = MagicMock()
+    kda.describe_application.return_value = _detail()  # always present -> full window
+    cfn = MagicMock()
+    cfn.describe_stacks.return_value = {"Stacks": [{"StackStatus": "DELETE_IN_PROGRESS"}]}
+    session = _multi_session(kda, cfn)
+
+    _delete_v2(_resource(_V2_TYPE, _STUDIO_NAME), session)
+
+    delays = [call.args[0] for call in sleep_mock.call_args_list]
+    assert delays[0] == 10  # initial delay
+    assert delays == sorted(delays)  # non-decreasing (backoff)
+    assert max(delays) <= 60  # capped
+    assert delays[-1] == 60  # reaches the cap over the window

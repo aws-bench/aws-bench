@@ -51,11 +51,16 @@ _NOT_FOUND_CODES = ("ResourceNotFoundException",)
 # Raised by the v1 API for an application the v2 SDK created/manages.
 _V2_MANAGED_CODE = "UnsupportedOperationException"
 # The KDA Studio application AND its service-managed backing stack are torn down
-# ASYNCHRONOUSLY (several minutes) after DeleteApplication — no direct DeleteStack
-# is issued. Poll for the true absence of both, with a generous window well above
-# the observed removal time (~10 min: 40 attempts * 15s).
-_TEARDOWN_POLL_DELAY = 15
-_TEARDOWN_MAX_ATTEMPTS = 40
+# ASYNCHRONOUSLY after DeleteApplication — the stack may transiently show
+# DELETE_FAILED but self-completes, so no direct DeleteStack is issued. Poll for
+# the true absence of both, backing off up to a grace window sized to comfortably
+# exceed the (minutes-scale) teardown latency. The window intentionally does NOT
+# target the multi-hour horizon seen when a framework re-issues the delete late;
+# tune _TEARDOWN_MAX_ATTEMPTS if the measured pure latency ever approaches it.
+_TEARDOWN_INITIAL_DELAY = 10
+_TEARDOWN_MAX_DELAY = 60
+_TEARDOWN_BACKOFF = 2.0
+_TEARDOWN_MAX_ATTEMPTS = 18  # ~16 min total with the backoff above
 _TERMINAL_STACK_STATUSES = ("DELETE_COMPLETE",)
 
 
@@ -178,10 +183,11 @@ def _await_studio_teardown(resource: Resource, session: boto3.Session) -> None:
 
     ``DeleteApplication`` on a Managed Flink "Studio" application triggers AWS to
     tear down both the application and its ``environment-*-flink-studio`` backing
-    stack **asynchronously**, over several minutes. No ``DeleteStack`` is issued —
-    a direct delete of the service-managed stack goes terminal ``DELETE_FAILED``.
-    Poll for the true absence of both so the reset's re-verify (which lists both
-    the application and the stack) sees a clean account.
+    stack **asynchronously**, over several minutes. The stack may transiently show
+    ``DELETE_FAILED`` but self-completes, so no ``DeleteStack`` is issued here — a
+    direct delete only races the service. Poll (with backoff) for the true absence
+    of both so the reset's re-verify — which lists both the application and the
+    stack — does not fail-close before the async teardown finishes.
 
     Best-effort: on timeout the residual is left to the reset's fail-closed
     re-verify. Non-Studio applications have no managed stack and are skipped.
@@ -192,13 +198,15 @@ def _await_studio_teardown(resource: Resource, session: boto3.Session) -> None:
     kda_client = build_client(session, "kinesisanalyticsv2")
     cfn_client = build_client(session, "cloudformation")
     app_gone = stack_gone = False
+    delay = _TEARDOWN_INITIAL_DELAY
     for _ in range(_TEARDOWN_MAX_ATTEMPTS):
         app_gone = _application_absent(kda_client, name)
         stack_gone = _stack_absent(cfn_client, name)
         if app_gone and stack_gone:
             logger.debug("Kinesis Analytics Studio teardown complete for '%s'", name)
             return
-        time.sleep(_TEARDOWN_POLL_DELAY)
+        time.sleep(delay)
+        delay = min(delay * _TEARDOWN_BACKOFF, _TEARDOWN_MAX_DELAY)
     logger.warning(
         "Kinesis Analytics Studio '%s' not fully torn down within the grace window "
         "(application_gone=%s, stack_gone=%s); leaving it to the reset re-verify",
