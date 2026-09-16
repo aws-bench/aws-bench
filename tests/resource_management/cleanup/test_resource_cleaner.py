@@ -587,10 +587,51 @@ def test_cfn_fallback_skips_service_managed_studio_stack():
 
 def test_is_service_managed_studio_stack_matches_name_and_arn():
     assert is_service_managed_studio_stack("environment-2h384hj-flink-studio")
+    # CDK-deployed variant (the ATK path) with the -notebook suffix.
+    assert is_service_managed_studio_stack("environment-2h384hj-flink-studio-notebook")
     assert is_service_managed_studio_stack(
         "arn:aws:cloudformation:us-east-1:123456789012:stack/environment-2h384hj-flink-studio/uuid"
     )
+    assert is_service_managed_studio_stack(
+        "arn:aws:cloudformation:us-east-1:123456789012:stack/"
+        "environment-2h384hj-flink-studio-notebook/uuid"
+    )
     assert not is_service_managed_studio_stack("agent-stack")
+    assert not is_service_managed_studio_stack("studio-notebook-2h384hj")  # stack-less app name
     assert not is_service_managed_studio_stack(
         "arn:aws:cloudformation:us-east-1:123456789012:stack/my-app/uuid"
     )
+
+
+def test_cfn_fallback_logs_studio_stack_delete_blockers_without_deleting():
+    """A service-managed Studio stack is diagnosed (DescribeStackEvents) but never deleted.
+
+    The blocking DELETE_FAILED resource is surfaced (it is the missing input for the
+    Studio-stack teardown fix), and the stack stays in ``failures`` for the re-verify.
+    """
+    cfn = MagicMock()
+    cfn.describe_stack_events.return_value = {
+        "StackEvents": [
+            {
+                "LogicalResourceId": "StudioNotebook",
+                "ResourceType": "AWS::KinesisAnalyticsV2::Application",
+                "ResourceStatus": "DELETE_FAILED",
+                "ResourceStatusReason": "blocked",
+            },
+            {"LogicalResourceId": "Other", "ResourceStatus": "DELETE_COMPLETE"},
+        ]
+    }
+    session = MagicMock()
+    session.client.return_value = cfn
+    cleaner = ResourceCleaner(session, "us-east-1")
+
+    studio_key = Resource(_CFN_TYPE, "environment-2h384hj-flink-studio-notebook")
+    result = cleaner._delete_failed_cfn_stacks(
+        {studio_key: DeletionFailureEvent("CCAPI cannot delete")}
+    )
+
+    cfn.describe_stack_events.assert_called_once_with(
+        StackName="environment-2h384hj-flink-studio-notebook"
+    )
+    cfn.delete_stack.assert_not_called()  # never direct-delete a service-managed Studio stack
+    assert studio_key in result  # left for the (still-open) Studio-stack teardown fix

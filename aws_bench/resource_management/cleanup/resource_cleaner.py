@@ -309,24 +309,37 @@ class ResourceCleaner:
         Only stacks CCAPI already failed on are retried, and CDK bootstrap/toolkit
         infrastructure stacks (``CDKToolkit``, ``cdk-hnb659fds-*``) are never
         touched. Service-managed Managed Flink "Studio" stacks
-        (``environment-*-flink-studio``) are also skipped: a direct ``DeleteStack``
-        on one goes terminal ``DELETE_FAILED``, so AWS auto-removes them after the
-        backing application is deleted (handled by the KDA handler's wait) instead.
-        Callers pass only out-of-baseline resources (reset diffs against the
-        baseline snapshot), so a baseline stack never reaches this path. Returns
-        ``failures`` with any successfully deleted stack removed.
+        (``environment-*-flink-studio*``) are NOT direct-deleted here — a direct
+        ``DeleteStack`` on one goes terminal ``DELETE_FAILED``. Their teardown is a
+        separate, still-open fix; to unblock it, this logs the stack's DELETE_FAILED
+        blocking resource(s) via ``DescribeStackEvents`` (this runs in the member
+        account, where those events are readable). Callers pass only out-of-baseline
+        resources (reset diffs against the baseline snapshot), so a baseline stack
+        never reaches this path. Returns ``failures`` with any successfully deleted
+        stack removed.
         """
+        cfn_stacks = [r for r in failures if r.type == _CFN_STACK_TYPE]
+        studio_stacks = [r for r in cfn_stacks if is_service_managed_studio_stack(r.identifier)]
         stacks = [
             resource
-            for resource in failures
-            if resource.type == _CFN_STACK_TYPE
-            and not is_infra_identifier(resource.identifier)
+            for resource in cfn_stacks
+            if not is_infra_identifier(resource.identifier)
             and not is_service_managed_studio_stack(resource.identifier)
         ]
-        if not stacks:
+        if not studio_stacks and not stacks:
             return failures
 
         client = build_client(self._session, "cloudformation")
+
+        # Service-managed Studio stacks: do NOT DeleteStack (goes terminal
+        # DELETE_FAILED). Surface the blocking resource(s) so the stack-teardown
+        # fix can be finalized; the stack is left in `failures` for the re-verify.
+        for resource in studio_stacks:
+            self._log_studio_stack_delete_blockers(client, resource.identifier)
+
+        if not stacks:
+            return failures
+
         waiter = client.get_waiter("stack_delete_complete")
         for resource in stacks:
             stack_name = resource.identifier
@@ -349,6 +362,38 @@ class ResourceCleaner:
             logger.debug("Native DeleteStack fallback deleted stack '%s'", stack_name)
             del failures[resource]
         return failures
+
+    @staticmethod
+    def _log_studio_stack_delete_blockers(client, stack_name: str) -> None:
+        """Log the DELETE_FAILED resource(s) blocking a service-managed Studio stack.
+
+        Best-effort diagnostic (read-only ``DescribeStackEvents``): the blocking
+        resource is not otherwise recorded in the reset log, and identifying it is
+        the missing input for the Studio-stack teardown fix. Never raises.
+        """
+        try:
+            events = client.describe_stack_events(StackName=stack_name).get("StackEvents", [])
+        except (ClientError, BotoCoreError) as e:
+            logger.debug("Could not read stack events for '%s': %s", stack_name, e)
+            return
+        blockers = [
+            (e.get("LogicalResourceId"), e.get("ResourceType"), e.get("ResourceStatusReason"))
+            for e in events
+            if e.get("ResourceStatus") == DELETE_FAILED
+        ]
+        if blockers:
+            logger.warning(
+                "Service-managed Flink Studio stack '%s' left in place (not direct-deleted); "
+                "DELETE_FAILED blocking resource(s): %s",
+                truncate_for_log(stack_name, LOG_TRUNCATE_SHORT),
+                blockers[:5],
+            )
+        else:
+            logger.debug(
+                "Service-managed Flink Studio stack '%s' left in place; no DELETE_FAILED "
+                "events yet",
+                stack_name,
+            )
 
     @staticmethod
     def _log_failures(failures: dict[Resource, DeletionFailureEvent]) -> None:

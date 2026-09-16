@@ -65,8 +65,9 @@ def is_infra_identifier(identifier: str) -> bool:
 
 
 # Managed Service for Apache Flink "Studio" service-managed stacks are named
-# ``environment-<id>-flink-studio``; the KDA v2 Studio application owns them.
-_STUDIO_STACK_NAME_RE = re.compile(r"^environment-.+-flink-studio$")
+# ``environment-<id>-flink-studio`` (and the CDK-deployed variant
+# ``environment-<id>-flink-studio-notebook``); the KDA Studio application owns them.
+_STUDIO_STACK_NAME_RE = re.compile(r"^environment-.+-flink-studio")
 
 
 def _stack_name_from_identifier(identifier: str) -> str:
