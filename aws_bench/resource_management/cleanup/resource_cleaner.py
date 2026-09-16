@@ -8,6 +8,7 @@ from concurrent.futures import as_completed
 from typing import Any
 
 import boto3
+from botocore.exceptions import BotoCoreError, ClientError, WaiterError
 
 from aws_bench.logging.logger import get_logger
 from aws_bench.resource_management.ccapi.manager import CloudControlManager, Resource
@@ -29,14 +30,21 @@ from aws_bench.resource_management.cleanup.models import (
     HandlerResult,
     HandlerStatus,
     StackResource,
+    is_infra_identifier,
     to_ccapi_resources,
 )
-from aws_bench.utils.concurrent import interruptible_executor
+from aws_bench.utils.concurrent import build_client, interruptible_executor
 
 logger = get_logger(__name__)
 
 # Sample size for log messages
 LOG_SAMPLE_SIZE = 3
+
+# Native CloudFormation DeleteStack fallback (see _delete_failed_cfn_stacks).
+_CFN_STACK_TYPE = "AWS::CloudFormation::Stack"
+# Bounded wait for the fallback delete: ~3 minutes (18 attempts * 10s).
+_STACK_DELETE_WAITER_DELAY = 10
+_STACK_DELETE_WAITER_MAX_ATTEMPTS = 18
 
 
 def truncate_for_log(text: str, limit: int) -> str:
@@ -146,6 +154,8 @@ class ResourceCleaner:
         if ccapi_succeeded > 0:
             logger.debug("CCAPI-deleted %d resource(s)", ccapi_succeeded)
         failures.update(custom_failures)
+        if failures:
+            failures = await asyncio.to_thread(self._delete_failed_cfn_stacks, failures)
         self._log_failures(failures)
         return failures
 
@@ -282,6 +292,56 @@ class ResourceCleaner:
                         priority,
                         e,
                     )
+
+    def _delete_failed_cfn_stacks(
+        self, failures: dict[Resource, DeletionFailureEvent]
+    ) -> dict[Resource, DeletionFailureEvent]:
+        """Retry CCAPI-failed CloudFormation stacks via native ``DeleteStack``.
+
+        CCAPI cannot delete some agent-created, out-of-baseline stacks — the
+        nested Managed Flink Studio (``environment-*-flink-studio``), EMR, EKS and
+        IPAM stacks that otherwise survive and fail reset closed. A native
+        ``cloudformation:DeleteStack`` lets CloudFormation tear the stack down in
+        its own dependency order, catching the residual the per-resource handlers
+        leave behind.
+
+        Only stacks CCAPI already failed on are retried, and CDK bootstrap/toolkit
+        infrastructure stacks (``CDKToolkit``, ``cdk-hnb659fds-*``) are never
+        touched. Callers pass only out-of-baseline resources (reset diffs against
+        the baseline snapshot), so a baseline stack never reaches this path.
+        Returns ``failures`` with any successfully deleted stack removed.
+        """
+        stacks = [
+            resource
+            for resource in failures
+            if resource.type == _CFN_STACK_TYPE and not is_infra_identifier(resource.identifier)
+        ]
+        if not stacks:
+            return failures
+
+        client = build_client(self._session, "cloudformation")
+        waiter = client.get_waiter("stack_delete_complete")
+        for resource in stacks:
+            stack_name = resource.identifier
+            try:
+                client.delete_stack(StackName=stack_name)
+                waiter.wait(
+                    StackName=stack_name,
+                    WaiterConfig={
+                        "Delay": _STACK_DELETE_WAITER_DELAY,
+                        "MaxAttempts": _STACK_DELETE_WAITER_MAX_ATTEMPTS,
+                    },
+                )
+            except (ClientError, WaiterError, BotoCoreError) as e:
+                logger.warning(
+                    "Native DeleteStack fallback failed for stack '%s': %s",
+                    truncate_for_log(stack_name, LOG_TRUNCATE_SHORT),
+                    truncate_for_log(str(e), LOG_TRUNCATE_LONG),
+                )
+                continue
+            logger.debug("Native DeleteStack fallback deleted stack '%s'", stack_name)
+            del failures[resource]
+        return failures
 
     @staticmethod
     def _log_failures(failures: dict[Resource, DeletionFailureEvent]) -> None:
