@@ -11,9 +11,11 @@ stack) leaves Kinesis Analytics resources that normal reset cannot remove:
   raises ``UnsupportedOperationException`` ("created/updated by kinesisanalyticsv2
   SDK"). The v1 handler treats that as already-handled rather than a failure.
 - The application's backing ``environment-*-flink-studio`` stack is
-  **service-managed**: AWS removes it asynchronously once the application is
-  deleted, and a direct ``DeleteStack`` goes terminal ``DELETE_FAILED``. After
-  deleting the v2 application the handler waits for AWS to auto-remove the stack.
+  **service-managed**: AWS removes both the application and the stack
+  **asynchronously** (over several minutes) once the application is deleted, and
+  a direct ``DeleteStack`` goes terminal ``DELETE_FAILED``. After deleting the v2
+  application the handler polls for the true absence of both — it never issues a
+  ``DeleteStack`` for the service-managed stack.
 
 Both application APIs delete the same way, and both require the application's
 ``CreateTimestamp`` (a conditional token that guards against a stale delete):
@@ -27,9 +29,11 @@ removing the applications here lets the reset succeed.
 
 from __future__ import annotations
 
+import time
+
 import boto3
 from botocore.client import BaseClient
-from botocore.exceptions import BotoCoreError, ClientError, WaiterError
+from botocore.exceptions import BotoCoreError, ClientError
 
 from aws_bench.logging.logger import get_logger
 from aws_bench.resource_management.ccapi.models import Resource
@@ -46,10 +50,13 @@ logger = get_logger(__name__)
 _NOT_FOUND_CODES = ("ResourceNotFoundException",)
 # Raised by the v1 API for an application the v2 SDK created/manages.
 _V2_MANAGED_CODE = "UnsupportedOperationException"
-# Grace window for AWS to auto-remove a service-managed Studio stack after the
-# backing application is deleted (~10 min: 40 attempts * 15s).
-_STUDIO_STACK_WAIT_DELAY = 15
-_STUDIO_STACK_WAIT_MAX_ATTEMPTS = 40
+# The KDA Studio application AND its service-managed backing stack are torn down
+# ASYNCHRONOUSLY (several minutes) after DeleteApplication — no direct DeleteStack
+# is issued. Poll for the true absence of both, with a generous window well above
+# the observed removal time (~10 min: 40 attempts * 15s).
+_TEARDOWN_POLL_DELAY = 15
+_TEARDOWN_MAX_ATTEMPTS = 40
+_TERMINAL_STACK_STATUSES = ("DELETE_COMPLETE",)
 
 
 def _application_name_from_identifier(identifier: str) -> str:
@@ -138,48 +145,82 @@ def _delete_application(
     )
 
 
-def _await_studio_stack_removal(resource: Resource, session: boto3.Session) -> None:
-    """Wait for a deleted Studio application's service-managed stack to auto-remove.
+def _application_absent(kda_client: BaseClient, name: str) -> bool:
+    """True once the v2 application no longer exists (its async delete completed)."""
+    try:
+        kda_client.describe_application(ApplicationName=name)
+    except ClientError as e:
+        return e.response.get("Error", {}).get("Code", "") in _NOT_FOUND_CODES
+    except BotoCoreError:
+        return False
+    return False
 
-    The ``environment-*-flink-studio`` stack shares the application's name and is
-    torn down by AWS after the application is deleted; a direct ``DeleteStack``
-    would go terminal ``DELETE_FAILED``. Best-effort: on timeout / ``DELETE_FAILED``
-    the residual is left for the reset's fail-closed re-verify. Non-Studio
-    applications have no such backing stack and are skipped.
+
+def _stack_not_found(error: ClientError) -> bool:
+    """True when describe_stacks reports the stack no longer exists."""
+    err = error.response.get("Error", {})
+    return err.get("Code", "") == "ValidationError" and "does not exist" in err.get("Message", "")
+
+
+def _stack_absent(cfn_client: BaseClient, name: str) -> bool:
+    """True once the service-managed stack is gone or fully DELETE_COMPLETE."""
+    try:
+        stacks = cfn_client.describe_stacks(StackName=name).get("Stacks", [])
+    except ClientError as e:
+        return _stack_not_found(e)
+    except BotoCoreError:
+        return False
+    return all(s.get("StackStatus") in _TERMINAL_STACK_STATUSES for s in stacks)
+
+
+def _await_studio_teardown(resource: Resource, session: boto3.Session) -> None:
+    """Wait for a deleted Studio application AND its service-managed stack to vanish.
+
+    ``DeleteApplication`` on a Managed Flink "Studio" application triggers AWS to
+    tear down both the application and its ``environment-*-flink-studio`` backing
+    stack **asynchronously**, over several minutes. No ``DeleteStack`` is issued —
+    a direct delete of the service-managed stack goes terminal ``DELETE_FAILED``.
+    Poll for the true absence of both so the reset's re-verify (which lists both
+    the application and the stack) sees a clean account.
+
+    Best-effort: on timeout the residual is left to the reset's fail-closed
+    re-verify. Non-Studio applications have no managed stack and are skipped.
     """
     name = _application_name_from_identifier(resource.identifier)
     if not is_service_managed_studio_stack(name):
         return
-    client = build_client(session, "cloudformation")
-    try:
-        client.get_waiter("stack_delete_complete").wait(
-            StackName=name,
-            WaiterConfig={
-                "Delay": _STUDIO_STACK_WAIT_DELAY,
-                "MaxAttempts": _STUDIO_STACK_WAIT_MAX_ATTEMPTS,
-            },
-        )
-        logger.debug("Managed Flink Studio stack '%s' removed after application delete", name)
-    except (ClientError, WaiterError, BotoCoreError) as e:
-        logger.warning(
-            "Managed Flink Studio stack '%s' not confirmed removed after application delete: %s",
-            name,
-            e,
-        )
+    kda_client = build_client(session, "kinesisanalyticsv2")
+    cfn_client = build_client(session, "cloudformation")
+    app_gone = stack_gone = False
+    for _ in range(_TEARDOWN_MAX_ATTEMPTS):
+        app_gone = _application_absent(kda_client, name)
+        stack_gone = _stack_absent(cfn_client, name)
+        if app_gone and stack_gone:
+            logger.debug("Kinesis Analytics Studio teardown complete for '%s'", name)
+            return
+        time.sleep(_TEARDOWN_POLL_DELAY)
+    logger.warning(
+        "Kinesis Analytics Studio '%s' not fully torn down within the grace window "
+        "(application_gone=%s, stack_gone=%s); leaving it to the reset re-verify",
+        name,
+        app_gone,
+        stack_gone,
+    )
 
 
 @resource_handler("AWS::KinesisAnalyticsV2::Application", role="delete")
 def _delete_v2(resource: Resource, session: boto3.Session) -> HandlerResult:
     """Delete a Kinesis Data Analytics v2 (Managed Flink / Studio) application.
 
-    After the application is deleted, wait for AWS to auto-remove its
-    service-managed ``environment-*-flink-studio`` backing stack (if any).
+    After the application is deleted, wait for AWS to asynchronously tear down the
+    application and its service-managed ``environment-*-flink-studio`` backing
+    stack (if any) — never issuing a direct ``DeleteStack``.
     """
     result = _delete_application(
         resource, session, service="kinesisanalyticsv2", label="Kinesis Analytics v2"
     )
     if result.status is HandlerStatus.SUCCESS:
-        _await_studio_stack_removal(resource, session)
+        _await_studio_teardown(resource, session)
     return result
 
 

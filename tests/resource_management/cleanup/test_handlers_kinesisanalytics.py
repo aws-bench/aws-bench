@@ -11,7 +11,7 @@ tests use for their failure paths. They assert the handler reads the
 from __future__ import annotations
 
 import datetime
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 from botocore.exceptions import ClientError, EndpointConnectionError
 
@@ -238,10 +238,36 @@ def _requested_services(session: MagicMock) -> list[str]:
     return [call.args[0] for call in session.client.call_args_list]
 
 
-def test_v2_waits_for_studio_stack_removal_without_deleting_it():
-    """After deleting a Studio app, the handler WAITS for stack removal, never DeleteStack."""
-    kda = _app_client()
+_SLEEP = "aws_bench.resource_management.cleanup.handlers.kinesisanalytics.time.sleep"
+
+
+def _detail() -> dict:
+    return {"ApplicationDetail": {"CreateTimestamp": _CREATE_TS}}
+
+
+def _app_not_found() -> ClientError:
+    return ClientError({"Error": {"Code": "ResourceNotFoundException"}}, "DescribeApplication")
+
+
+def _stack_gone_error() -> ClientError:
+    return ClientError(
+        {"Error": {"Code": "ValidationError", "Message": f"Stack {_STUDIO_NAME} does not exist"}},
+        "DescribeStacks",
+    )
+
+
+@patch(_SLEEP)
+def test_v2_polls_until_app_and_stack_absent_never_deleting_stack(_sleep: MagicMock):
+    """The handler polls for TRUE absence of the app AND its managed stack, no DeleteStack."""
+    kda = MagicMock()
+    # describe: delete path -> present (poll 1) -> absent (poll 2)
+    kda.describe_application.side_effect = [_detail(), _detail(), _app_not_found()]
     cfn = MagicMock()
+    # stack: still deleting (poll 1) -> gone (poll 2)
+    cfn.describe_stacks.side_effect = [
+        {"Stacks": [{"StackStatus": "DELETE_IN_PROGRESS"}]},
+        _stack_gone_error(),
+    ]
     session = _multi_session(kda, cfn)
 
     result = _delete_v2(_resource(_V2_TYPE, _STUDIO_NAME), session)
@@ -250,14 +276,35 @@ def test_v2_waits_for_studio_stack_removal_without_deleting_it():
     kda.delete_application.assert_called_once_with(
         ApplicationName=_STUDIO_NAME, CreateTimestamp=_CREATE_TS
     )
-    cfn.get_waiter.assert_called_once_with("stack_delete_complete")
-    cfn.get_waiter.return_value.wait.assert_called_once()
-    assert cfn.get_waiter.return_value.wait.call_args.kwargs["StackName"] == _STUDIO_NAME
-    cfn.delete_stack.assert_not_called()  # AWS auto-removes it; never delete directly
+    # 1 describe for the delete + 2 absence polls; 2 stack polls; never a direct DeleteStack.
+    assert kda.describe_application.call_count == 3
+    assert cfn.describe_stacks.call_count == 2
+    cfn.delete_stack.assert_not_called()
+
+
+@patch(_SLEEP)
+def test_v2_waits_while_app_still_present_then_stack(_sleep: MagicMock):
+    """The wait does not end until BOTH are absent — a lingering app keeps it polling."""
+    kda = MagicMock()
+    # app absent immediately after delete, but only on the 2nd poll here
+    kda.describe_application.side_effect = [_detail(), _app_not_found(), _app_not_found()]
+    cfn = MagicMock()
+    # stack present on poll 1, gone on poll 2
+    cfn.describe_stacks.side_effect = [
+        {"Stacks": [{"StackStatus": "DELETE_IN_PROGRESS"}]},
+        {"Stacks": []},
+    ]
+    session = _multi_session(kda, cfn)
+
+    result = _delete_v2(_resource(_V2_TYPE, _STUDIO_NAME), session)
+
+    assert result.status == HandlerStatus.SUCCESS
+    assert cfn.describe_stacks.call_count == 2  # kept polling until the stack was gone
+    cfn.delete_stack.assert_not_called()
 
 
 def test_v2_non_studio_application_does_not_touch_cloudformation():
-    """A regular (non-Studio) v2 application triggers no stack wait."""
+    """A regular (non-Studio) v2 application triggers no teardown wait."""
     kda = _app_client()
     cfn = MagicMock()
     session = _multi_session(kda, cfn)
@@ -266,20 +313,19 @@ def test_v2_non_studio_application_does_not_touch_cloudformation():
 
     assert result.status == HandlerStatus.SUCCESS
     assert "cloudformation" not in _requested_services(session)
-    cfn.get_waiter.assert_not_called()
+    cfn.describe_stacks.assert_not_called()
 
 
-def test_v2_stack_wait_failure_does_not_fail_the_application_delete():
-    """A stack-removal wait timeout is best-effort: the app delete still SUCCEEDS."""
-    from botocore.exceptions import WaiterError
-
-    kda = _app_client()
+@patch(_SLEEP)
+def test_v2_teardown_timeout_is_best_effort_success(_sleep: MagicMock):
+    """If the app/stack never vanish within the window, the app delete still SUCCEEDS."""
+    kda = MagicMock()
+    kda.describe_application.return_value = _detail()  # always present
     cfn = MagicMock()
-    cfn.get_waiter.return_value.wait.side_effect = WaiterError(
-        name="StackDeleteComplete", reason="Max attempts exceeded", last_response={}
-    )
+    cfn.describe_stacks.return_value = {"Stacks": [{"StackStatus": "DELETE_IN_PROGRESS"}]}
     session = _multi_session(kda, cfn)
 
     result = _delete_v2(_resource(_V2_TYPE, _STUDIO_NAME), session)
 
     assert result.status == HandlerStatus.SUCCESS
+    cfn.delete_stack.assert_not_called()
