@@ -314,6 +314,28 @@ def test_v2_stackless_waits_until_app_absent_from_both_listings(_sleep: MagicMoc
 
 
 @patch(_SLEEP)
+def test_teardown_polls_the_listing_not_describe(_sleep: MagicMock):
+    """Regression: the wait consults list_applications each poll, NEVER DescribeApplication.
+
+    Guards against the "2 ms return" seen when the wait was gated on a managed
+    stack and/or polled DescribeApplication (which reports the app gone at once).
+    Here the listing returns the app for several polls; the handler must keep
+    waiting and only return once the LISTING is clear.
+    """
+    name = "studio-notebook-2h384hj"  # stack-less variant — nothing to gate on
+    v2 = _v2_list_client(name, present_polls=3)
+    v1 = _empty_list_client()
+    session = _multi3_session(v2, v1, MagicMock())
+
+    _delete_v2(_resource(_V2_TYPE, name), session)
+
+    # describe_application is called exactly once — for the delete, not for polling.
+    assert v2.describe_application.call_count == 1
+    # the listing was polled until the app cleared: 3 present + 1 absent.
+    assert v2.list_applications.call_count == 4
+
+
+@patch(_SLEEP)
 def test_v2_stackbacked_waits_for_listings_and_stack_never_deletestack(_sleep: MagicMock):
     """Stack-backed Studio app: also wait for the managed stack, still no DeleteStack."""
     name = _STUDIO_NAME  # environment-2h384hj-flink-studio
