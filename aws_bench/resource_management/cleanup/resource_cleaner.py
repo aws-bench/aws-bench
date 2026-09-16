@@ -53,6 +53,14 @@ _STACK_DELETE_WAITER_MAX_ATTEMPTS = 18
 # removes that dependency before the ASG is ever touched.
 DELETE_BEFORE_PREPARE_TYPES = frozenset({"AWS::EKS::Nodegroup"})
 
+# Failure reason recorded for a resource that was never attempted because a
+# delete-before-prepare barrier resource failed to delete. The barrier fails
+# closed for the whole cleanup wave, so the remainder never reaches
+# prepare/custom/CCAPI.
+_BARRIER_BLOCKED_MESSAGE = (
+    "Not attempted: prerequisite delete-before-prepare barrier deletion failed"
+)
+
 
 def partition_delete_before_prepare(
     resources: list[StackResource],
@@ -135,6 +143,15 @@ class ResourceCleaner:
             barrier_resources, resources = partition_delete_before_prepare(resources)
             barrier_failures = await self._delete_before_prepare(barrier_resources)
             if barrier_failures:
+                # Fail closed for the whole stack: the barrier failed, so
+                # prepare/custom/CCAPI never run on the remainder. Preserve each
+                # real barrier failure and mark every remaining resource
+                # unattempted, so a downstream sweep cannot mistake a
+                # never-touched survivor for a successfully deleted one.
+                for resource in to_ccapi_resources(resources):
+                    barrier_failures.setdefault(
+                        resource, DeletionFailureEvent(_BARRIER_BLOCKED_MESSAGE)
+                    )
                 self._log_failures(barrier_failures)
                 return barrier_failures
 

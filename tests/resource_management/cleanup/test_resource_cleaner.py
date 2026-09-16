@@ -647,11 +647,17 @@ def test_barrier_success_continues_prepare_custom_and_ccapi():
 
 
 def test_barrier_nodegroup_failure_blocks_prepare_and_ccapi():
-    """A failing nodegroup handler fails closed: the failure is returned, nothing else runs."""
+    """A failing nodegroup barrier fails closed for the whole cleanup wave.
+
+    The real nodegroup error is preserved verbatim; the ASG and the unrelated
+    bucket are explicitly marked unattempted (never touched because the barrier
+    failed); and prepare/CCAPI stay blocked.
+    """
     cleaner = ResourceCleaner(MagicMock())
     nodegroup = StackResource("Ng", "c1|ng1", "AWS::EKS::Nodegroup", "CREATE_COMPLETE")
     asg = StackResource("Asg", "asg-1", "AWS::AutoScaling::AutoScalingGroup", "CREATE_COMPLETE")
-    resources = [nodegroup, asg]
+    bucket = StackResource("B", "b1", "AWS::S3::Bucket", "CREATE_COMPLETE")
+    resources = [nodegroup, asg, bucket]
 
     def fake_ng_delete(resource, session):
         return HandlerResult(
@@ -672,12 +678,47 @@ def test_barrier_nodegroup_failure_blocks_prepare_and_ccapi():
             cleaner.cleanup(resources, prepare=True, custom_delete=True, ccapi_fallback=True)
         )
 
-    assert len(result) == 1
-    failed = next(iter(result))
-    assert failed.type == "AWS::EKS::Nodegroup"
-    assert result[failed].status_message == "drain stuck"
+    by_id = {resource.identifier: (resource, event) for resource, event in result.items()}
+    # Every remaining resource with a physical ID is in the returned map.
+    assert set(by_id) == {"c1|ng1", "asg-1", "b1"}
+    # The real nodegroup error is preserved verbatim.
+    assert by_id["c1|ng1"][0].type == "AWS::EKS::Nodegroup"
+    assert by_id["c1|ng1"][1].status_message == "drain stuck"
+    # The ASG and the unrelated bucket are explicitly marked unattempted.
+    assert by_id["asg-1"][0].type == "AWS::AutoScaling::AutoScalingGroup"
+    assert "not attempted" in by_id["asg-1"][1].status_message.lower()
+    assert by_id["b1"][0].type == "AWS::S3::Bucket"
+    assert "not attempted" in by_id["b1"][1].status_message.lower()
+    # Prepare and CCAPI stay blocked behind the failed barrier.
     mock_prepare.assert_not_called()
     mock_ccm_cls.return_value.delete_resources.assert_not_called()
+
+
+def test_barrier_includes_delete_failed_nodegroup_and_invokes_handler():
+    """A nodegroup already in DELETE_FAILED still enters the barrier and is handled.
+
+    The barrier partitions purely by resource type, so a stuck (DELETE_FAILED)
+    nodegroup is routed to its custom delete handler — not left to the
+    ``handle_stuck`` path — before any general prepare runs.
+    """
+    cleaner = ResourceCleaner(MagicMock())
+    nodegroup = StackResource("Ng", "c1|ng1", "AWS::EKS::Nodegroup", "DELETE_FAILED")
+    handler = MagicMock(
+        return_value=HandlerResult("c1|ng1", "AWS::EKS::Nodegroup", "delete", HandlerStatus.SUCCESS)
+    )
+
+    with (
+        patch(
+            "aws_bench.resource_management.cleanup.resource_cleaner.CUSTOM_DELETION_REGISTRY",
+            {"AWS::EKS::Nodegroup": handler},
+        ),
+        patch.object(cleaner, "_prepare_all", return_value=[]),
+    ):
+        result = asyncio.run(cleaner.cleanup([nodegroup], prepare=True, custom_delete=True))
+
+    handler.assert_called_once()
+    assert handler.call_args.args[0].identifier == "c1|ng1"
+    assert result == {}
 
 
 def test_barrier_unregistered_nodegroup_handler_fails_closed():
