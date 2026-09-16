@@ -553,3 +553,44 @@ def test_cfn_fallback_is_noop_without_stack_failures():
     failures = {Resource("AWS::S3::Bucket", "bucket"): DeletionFailureEvent("boom")}
 
     assert cleaner._delete_failed_cfn_stacks(dict(failures)) == failures
+
+
+# -- cleanup: service-managed Flink Studio stacks are NOT direct-deleted --
+
+from aws_bench.resource_management.cleanup.models import (  # noqa: E402
+    is_service_managed_studio_stack,
+)
+
+_STUDIO_STACK_NAME = "environment-abc123-flink-studio"
+
+
+@mock_aws
+def test_cfn_fallback_skips_service_managed_studio_stack():
+    """A Studio (service-managed) stack is left for AWS auto-removal, never DeleteStack'd."""
+    region = "us-east-1"
+    cfn = boto3.client("cloudformation", region_name=region)
+    cfn.create_stack(StackName=_STUDIO_STACK_NAME, TemplateBody=_CFN_TEMPLATE)
+
+    cleaner = ResourceCleaner(boto3.Session(region_name=region), region)
+    resources = [StackResource("L", _STUDIO_STACK_NAME, _CFN_TYPE, "CREATE_COMPLETE")]
+    studio_key = Resource(_CFN_TYPE, _STUDIO_STACK_NAME)
+
+    with patch(_CCM_PATH) as mock_ccm_cls:
+        mock_ccm_cls.return_value.delete_resources.return_value = {
+            studio_key: DeletionFailureEvent("CCAPI cannot delete")
+        }
+        result = asyncio.run(cleaner.cleanup(resources, ccapi_fallback=True))
+
+    assert studio_key in result  # not direct-deleted here (KDA handler owns its teardown)
+    assert _STUDIO_STACK_NAME in _stack_names(cfn)  # untouched — no terminal DELETE_FAILED
+
+
+def test_is_service_managed_studio_stack_matches_name_and_arn():
+    assert is_service_managed_studio_stack("environment-2h384hj-flink-studio")
+    assert is_service_managed_studio_stack(
+        "arn:aws:cloudformation:us-east-1:123456789012:stack/environment-2h384hj-flink-studio/uuid"
+    )
+    assert not is_service_managed_studio_stack("agent-stack")
+    assert not is_service_managed_studio_stack(
+        "arn:aws:cloudformation:us-east-1:123456789012:stack/my-app/uuid"
+    )

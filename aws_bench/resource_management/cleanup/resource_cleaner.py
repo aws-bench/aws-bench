@@ -31,6 +31,7 @@ from aws_bench.resource_management.cleanup.models import (
     HandlerStatus,
     StackResource,
     is_infra_identifier,
+    is_service_managed_studio_stack,
     to_ccapi_resources,
 )
 from aws_bench.utils.concurrent import build_client, interruptible_executor
@@ -307,14 +308,20 @@ class ResourceCleaner:
 
         Only stacks CCAPI already failed on are retried, and CDK bootstrap/toolkit
         infrastructure stacks (``CDKToolkit``, ``cdk-hnb659fds-*``) are never
-        touched. Callers pass only out-of-baseline resources (reset diffs against
-        the baseline snapshot), so a baseline stack never reaches this path.
-        Returns ``failures`` with any successfully deleted stack removed.
+        touched. Service-managed Managed Flink "Studio" stacks
+        (``environment-*-flink-studio``) are also skipped: a direct ``DeleteStack``
+        on one goes terminal ``DELETE_FAILED``, so AWS auto-removes them after the
+        backing application is deleted (handled by the KDA handler's wait) instead.
+        Callers pass only out-of-baseline resources (reset diffs against the
+        baseline snapshot), so a baseline stack never reaches this path. Returns
+        ``failures`` with any successfully deleted stack removed.
         """
         stacks = [
             resource
             for resource in failures
-            if resource.type == _CFN_STACK_TYPE and not is_infra_identifier(resource.identifier)
+            if resource.type == _CFN_STACK_TYPE
+            and not is_infra_identifier(resource.identifier)
+            and not is_service_managed_studio_stack(resource.identifier)
         ]
         if not stacks:
             return failures

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from enum import Enum
 
@@ -61,6 +62,34 @@ SWEEPABLE_INFRA_TYPES = frozenset(
 def is_infra_identifier(identifier: str) -> bool:
     """Return True if the identifier belongs to CDK bootstrap/toolkit infrastructure."""
     return identifier.startswith(INFRA_PREFIXES) or any(s in identifier for s in INFRA_SUBSTRINGS)
+
+
+# Managed Service for Apache Flink "Studio" service-managed stacks are named
+# ``environment-<id>-flink-studio``; the KDA v2 Studio application owns them.
+_STUDIO_STACK_NAME_RE = re.compile(r"^environment-.+-flink-studio$")
+
+
+def _stack_name_from_identifier(identifier: str) -> str:
+    """Return the stack name from a CloudFormation identifier (ARN or bare name).
+
+    A stack ARN is ``arn:aws:cloudformation:<region>:<account>:stack/<name>/<id>``;
+    a bare name is returned unchanged.
+    """
+    if ":stack/" in identifier:
+        return identifier.split(":stack/", 1)[1].split("/", 1)[0]
+    return identifier
+
+
+def is_service_managed_studio_stack(identifier: str) -> bool:
+    """Return True for a Managed Service for Apache Flink "Studio" backing stack.
+
+    These ``environment-*-flink-studio`` stacks are created and owned by a KDA v2
+    Studio application. AWS removes them asynchronously when that application is
+    deleted, and a direct ``DeleteStack`` goes terminal ``DELETE_FAILED`` — so
+    they must be torn down by deleting the application and waiting for the
+    auto-removal, never deleted directly. Accepts a stack name or ARN.
+    """
+    return bool(_STUDIO_STACK_NAME_RE.match(_stack_name_from_identifier(identifier)))
 
 
 def partition_by_scope(
