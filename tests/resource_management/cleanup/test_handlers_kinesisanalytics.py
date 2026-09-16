@@ -41,9 +41,16 @@ def _mock_session(client: MagicMock) -> MagicMock:
 
 
 def _app_client(create_ts: datetime.datetime = _CREATE_TS) -> MagicMock:
-    """A mock KDA client that describes an existing application."""
+    """A mock KDA client that describes an existing application.
+
+    Also configured so the post-delete teardown poll (``collect`` over
+    ``list_applications``) sees the application already absent, so the wait
+    returns immediately for the plain happy-path tests.
+    """
     client = MagicMock()
     client.describe_application.return_value = {"ApplicationDetail": {"CreateTimestamp": create_ts}}
+    client.can_paginate.return_value = False
+    client.list_applications.return_value = {"ApplicationSummaries": []}
     return client
 
 
@@ -223,15 +230,7 @@ def test_v2_managed_dedupe_does_not_apply_to_v2_handler():
     assert result.status == HandlerStatus.FAILED
 
 
-# -- Bug 2: v2 handler waits for the service-managed Studio stack to auto-remove --
-
-
-def _multi_session(kda_client: MagicMock, cfn_client: MagicMock) -> MagicMock:
-    """A session whose client(service) returns the KDA or CloudFormation mock."""
-    session = MagicMock()
-    clients = {"kinesisanalyticsv2": kda_client, "cloudformation": cfn_client}
-    session.client.side_effect = lambda service, *a, **k: clients[service]
-    return session
+# -- Bug 2: the deleted KDA app lingers in the scanner LISTING; poll it, not describe --
 
 
 def _requested_services(session: MagicMock) -> list[str]:
@@ -245,10 +244,6 @@ def _detail() -> dict:
     return {"ApplicationDetail": {"CreateTimestamp": _CREATE_TS}}
 
 
-def _app_not_found() -> ClientError:
-    return ClientError({"Error": {"Code": "ResourceNotFoundException"}}, "DescribeApplication")
-
-
 def _stack_gone_error() -> ClientError:
     return ClientError(
         {"Error": {"Code": "ValidationError", "Message": f"Stack {_STUDIO_NAME} does not exist"}},
@@ -256,91 +251,137 @@ def _stack_gone_error() -> ClientError:
     )
 
 
+def _list_page(app_ids: list[dict]) -> dict:
+    return {"ApplicationSummaries": app_ids}
+
+
+def _v2_list_client(name: str, present_polls: int) -> MagicMock:
+    """v2 client: supports the delete path and lists ``name`` present then absent."""
+    client = MagicMock()
+    client.describe_application.return_value = _detail()
+    client.can_paginate.return_value = False
+    present = _list_page([{"ApplicationName": name}])
+    client.list_applications.side_effect = [present] * present_polls + [_list_page([])] * 50
+    return client
+
+
+def _v1_list_client(name: str, present_polls: int) -> MagicMock:
+    """v1 client: supports the delete path and lists ``name`` (by ARN) present then absent."""
+    client = MagicMock()
+    client.describe_application.return_value = _detail()
+    client.can_paginate.return_value = False
+    arn = f"arn:aws:kinesisanalytics:{_REGION}:{_ACCOUNT}:application/{name}"
+    present = _list_page([{"ApplicationARN": arn}])
+    client.list_applications.side_effect = [present] * present_polls + [_list_page([])] * 50
+    return client
+
+
+def _empty_list_client() -> MagicMock:
+    """A KDA client that lists nothing (the app is absent from this service)."""
+    client = MagicMock()
+    client.can_paginate.return_value = False
+    client.list_applications.return_value = _list_page([])
+    return client
+
+
+def _multi3_session(v2: MagicMock, v1: MagicMock, cfn: MagicMock) -> MagicMock:
+    session = MagicMock()
+    clients = {"kinesisanalyticsv2": v2, "kinesisanalytics": v1, "cloudformation": cfn}
+    session.client.side_effect = lambda service, *a, **k: clients[service]
+    return session
+
+
 @patch(_SLEEP)
-def test_v2_polls_until_app_and_stack_absent_never_deleting_stack(_sleep: MagicMock):
-    """The handler polls for TRUE absence of the app AND its managed stack, no DeleteStack."""
-    kda = MagicMock()
-    # describe: delete path -> present (poll 1) -> absent (poll 2)
-    kda.describe_application.side_effect = [_detail(), _detail(), _app_not_found()]
+def test_v2_stackless_waits_until_app_absent_from_both_listings(_sleep: MagicMock):
+    """Stack-less Studio app: poll the v2 AND v1 listings until the app clears; no CFN."""
+    name = "studio-notebook-2h384hj"  # not an environment-*-flink-studio name
+    v2 = _v2_list_client(name, present_polls=2)
+    v1 = _v1_list_client(name, present_polls=2)
     cfn = MagicMock()
-    # stack: still deleting (poll 1) -> gone (poll 2)
-    cfn.describe_stacks.side_effect = [
-        {"Stacks": [{"StackStatus": "DELETE_IN_PROGRESS"}]},
-        _stack_gone_error(),
-    ]
-    session = _multi_session(kda, cfn)
+    session = _multi3_session(v2, v1, cfn)
 
-    result = _delete_v2(_resource(_V2_TYPE, _STUDIO_NAME), session)
+    result = _delete_v2(_resource(_V2_TYPE, name), session)
 
     assert result.status == HandlerStatus.SUCCESS
-    kda.delete_application.assert_called_once_with(
-        ApplicationName=_STUDIO_NAME, CreateTimestamp=_CREATE_TS
-    )
-    # 1 describe for the delete + 2 absence polls; 2 stack polls; never a direct DeleteStack.
-    assert kda.describe_application.call_count == 3
-    assert cfn.describe_stacks.call_count == 2
-    cfn.delete_stack.assert_not_called()
-
-
-@patch(_SLEEP)
-def test_v2_waits_while_app_still_present_then_stack(_sleep: MagicMock):
-    """The wait does not end until BOTH are absent — a lingering app keeps it polling."""
-    kda = MagicMock()
-    # app absent immediately after delete, but only on the 2nd poll here
-    kda.describe_application.side_effect = [_detail(), _app_not_found(), _app_not_found()]
-    cfn = MagicMock()
-    # stack present on poll 1, gone on poll 2
-    cfn.describe_stacks.side_effect = [
-        {"Stacks": [{"StackStatus": "DELETE_IN_PROGRESS"}]},
-        {"Stacks": []},
-    ]
-    session = _multi_session(kda, cfn)
-
-    result = _delete_v2(_resource(_V2_TYPE, _STUDIO_NAME), session)
-
-    assert result.status == HandlerStatus.SUCCESS
-    assert cfn.describe_stacks.call_count == 2  # kept polling until the stack was gone
-    cfn.delete_stack.assert_not_called()
-
-
-def test_v2_non_studio_application_does_not_touch_cloudformation():
-    """A regular (non-Studio) v2 application triggers no teardown wait."""
-    kda = _app_client()
-    cfn = MagicMock()
-    session = _multi_session(kda, cfn)
-
-    result = _delete_v2(_resource(_V2_TYPE, "my-regular-app"), session)
-
-    assert result.status == HandlerStatus.SUCCESS
+    v2.delete_application.assert_called_once_with(ApplicationName=name, CreateTimestamp=_CREATE_TS)
+    # Kept polling the LISTING (not describe) until absent: 2 present + 1 absent.
+    assert v2.list_applications.call_count == 3
+    assert v1.list_applications.call_count == 3
+    # Stack-less variant: never touches CloudFormation, never a DeleteStack.
     assert "cloudformation" not in _requested_services(session)
     cfn.describe_stacks.assert_not_called()
+    cfn.delete_stack.assert_not_called()
 
 
 @patch(_SLEEP)
-def test_v2_teardown_timeout_is_best_effort_success(_sleep: MagicMock):
-    """If the app/stack never vanish within the window, the app delete still SUCCEEDS."""
-    kda = MagicMock()
-    kda.describe_application.return_value = _detail()  # always present
+def test_v2_stackbacked_waits_for_listings_and_stack_never_deletestack(_sleep: MagicMock):
+    """Stack-backed Studio app: also wait for the managed stack, still no DeleteStack."""
+    name = _STUDIO_NAME  # environment-2h384hj-flink-studio
+    v2 = _v2_list_client(name, present_polls=2)
+    v1 = _v1_list_client(name, present_polls=2)
+    cfn = MagicMock()
+    cfn.describe_stacks.side_effect = [
+        {"Stacks": [{"StackStatus": "DELETE_IN_PROGRESS"}]},
+        {"Stacks": [{"StackStatus": "DELETE_IN_PROGRESS"}]},
+        _stack_gone_error(),
+    ] + [_stack_gone_error()] * 50
+    session = _multi3_session(v2, v1, cfn)
+
+    result = _delete_v2(_resource(_V2_TYPE, name), session)
+
+    assert result.status == HandlerStatus.SUCCESS
+    assert cfn.describe_stacks.call_count == 3  # waited out the transient DELETE_IN_PROGRESS
+    cfn.delete_stack.assert_not_called()
+
+
+@patch(_SLEEP)
+def test_v1_genuine_delete_also_waits_for_listing(_sleep: MagicMock):
+    """A real v1-only delete waits for the app to clear the listing too."""
+    name = "legacy-analytics-app"
+    v1 = _v1_list_client(name, present_polls=1)
+    v2 = _empty_list_client()  # no v2 entry for a v1-only app
+    cfn = MagicMock()
+    session = _multi3_session(v2, v1, cfn)
+
+    arn = f"arn:aws:kinesisanalytics:{_REGION}:{_ACCOUNT}:application/{name}"
+    result = _delete_v1(_resource(_V1_TYPE, arn), session)
+
+    assert result.status == HandlerStatus.SUCCESS
+    v1.delete_application.assert_called_once()
+    assert v1.list_applications.call_count >= 2  # waited past the first (present) poll
+
+
+@patch(_SLEEP)
+def test_teardown_timeout_is_best_effort_success(_sleep: MagicMock):
+    """If the app never clears the listing within the window, the delete still SUCCEEDS."""
+    name = _STUDIO_NAME
+    v2 = MagicMock()
+    v2.describe_application.return_value = _detail()
+    v2.can_paginate.return_value = False
+    v2.list_applications.return_value = _list_page([{"ApplicationName": name}])  # always present
+    v1 = _empty_list_client()
     cfn = MagicMock()
     cfn.describe_stacks.return_value = {"Stacks": [{"StackStatus": "DELETE_IN_PROGRESS"}]}
-    session = _multi_session(kda, cfn)
+    session = _multi3_session(v2, v1, cfn)
 
-    result = _delete_v2(_resource(_V2_TYPE, _STUDIO_NAME), session)
+    result = _delete_v2(_resource(_V2_TYPE, name), session)
 
     assert result.status == HandlerStatus.SUCCESS
     cfn.delete_stack.assert_not_called()
 
 
 @patch(_SLEEP)
-def test_v2_teardown_backs_off_between_polls(sleep_mock: MagicMock):
+def test_teardown_backs_off_between_polls(sleep_mock: MagicMock):
     """The poll interval grows (backoff) and is capped, rather than a fixed delay."""
-    kda = MagicMock()
-    kda.describe_application.return_value = _detail()  # always present -> full window
-    cfn = MagicMock()
-    cfn.describe_stacks.return_value = {"Stacks": [{"StackStatus": "DELETE_IN_PROGRESS"}]}
-    session = _multi_session(kda, cfn)
+    name = "studio-notebook-2h384hj"
+    v2 = MagicMock()
+    v2.describe_application.return_value = _detail()
+    v2.can_paginate.return_value = False
+    v2.list_applications.return_value = _list_page([{"ApplicationName": name}])  # always present
+    v1 = _empty_list_client()
+    session = _multi3_session(v2, v1, MagicMock())
 
-    _delete_v2(_resource(_V2_TYPE, _STUDIO_NAME), session)
+    _delete_v2(_resource(_V2_TYPE, name), session)
 
     delays = [call.args[0] for call in sleep_mock.call_args_list]
     assert delays[0] == 10  # initial delay

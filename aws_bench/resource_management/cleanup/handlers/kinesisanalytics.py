@@ -10,12 +10,15 @@ stack) leaves Kinesis Analytics resources that normal reset cannot remove:
   (v1). The v2 handler deletes it; the v1 entry's ``DescribeApplication`` then
   raises ``UnsupportedOperationException`` ("created/updated by kinesisanalyticsv2
   SDK"). The v1 handler treats that as already-handled rather than a failure.
-- The application's backing ``environment-*-flink-studio`` stack is
-  **service-managed**: AWS removes both the application and the stack
-  **asynchronously** (over several minutes) once the application is deleted, and
-  a direct ``DeleteStack`` goes terminal ``DELETE_FAILED``. After deleting the v2
-  application the handler polls for the true absence of both — it never issues a
-  ``DeleteStack`` for the service-managed stack.
+- ``DeleteApplication`` returns success while the application stays **visible to
+  the reset scanner's ``list_applications``** (under both the v2 and v1 types) for
+  minutes — the core residual, present whether or not the Studio app has a managed
+  CloudFormation stack. After any real delete the handler polls that same listing
+  until the application clears from both types. For the stack-backed variant (an
+  ``environment-*-flink-studio`` app), it additionally waits for the
+  service-managed backing stack to clear — AWS tears it down as the application is
+  removed (the transient ``DELETE_FAILED`` self-completes), so no ``DeleteStack``
+  is ever issued.
 
 Both application APIs delete the same way, and both require the application's
 ``CreateTimestamp`` (a conditional token that guards against a stale delete):
@@ -43,6 +46,7 @@ from aws_bench.resource_management.cleanup.models import (
     HandlerStatus,
     is_service_managed_studio_stack,
 )
+from aws_bench.resource_management.fastscan.runtime import collect
 from aws_bench.utils.concurrent import build_client
 
 logger = get_logger(__name__)
@@ -50,13 +54,13 @@ logger = get_logger(__name__)
 _NOT_FOUND_CODES = ("ResourceNotFoundException",)
 # Raised by the v1 API for an application the v2 SDK created/manages.
 _V2_MANAGED_CODE = "UnsupportedOperationException"
-# The KDA Studio application AND its service-managed backing stack are torn down
-# ASYNCHRONOUSLY after DeleteApplication — the stack may transiently show
-# DELETE_FAILED but self-completes, so no direct DeleteStack is issued. Poll for
-# the true absence of both, backing off up to a grace window sized to comfortably
-# exceed the (minutes-scale) teardown latency. The window intentionally does NOT
-# target the multi-hour horizon seen when a framework re-issues the delete late;
-# tune _TEARDOWN_MAX_ATTEMPTS if the measured pure latency ever approaches it.
+# A deleted KDA application stays VISIBLE to the reset scanner's list_applications
+# for minutes (DeleteApplication is async), and a stack-backed Studio app's managed
+# stack self-completes over a similar window. Poll the scanner listing (and the
+# managed stack, when present) for true absence, backing off up to a grace window
+# sized to comfortably exceed the observed latency. The window intentionally does
+# NOT target the multi-hour horizon seen when a delete is re-issued late; tune
+# _TEARDOWN_MAX_ATTEMPTS if the measured pure latency ever approaches it.
 _TEARDOWN_INITIAL_DELAY = 10
 _TEARDOWN_MAX_DELAY = 60
 _TEARDOWN_BACKOFF = 2.0
@@ -142,6 +146,9 @@ def _delete_application(
             message=f"Connection error deleting {label} application '{name}': {e}",
         )
     logger.debug(f"Deleted {label} application '{name}'")
+    # DeleteApplication returns success while the application stays visible to the
+    # reset scanner's list_applications for minutes; wait for it to actually clear.
+    _await_kda_teardown(resource, session)
     return HandlerResult(
         resource_id=resource.identifier,
         resource_type=resource.type,
@@ -150,15 +157,22 @@ def _delete_application(
     )
 
 
-def _application_absent(kda_client: BaseClient, name: str) -> bool:
-    """True once the v2 application no longer exists (its async delete completed)."""
+def _application_listed(client: BaseClient, id_field: str, name: str) -> bool:
+    """True if ``name`` still appears in this service's ``list_applications`` output.
+
+    Polls the SAME source the reset scanner reads (``collect`` over
+    ``list_applications`` / ``ApplicationSummaries``), not ``DescribeApplication``
+    — the control-plane describe reports the app gone immediately while the lister
+    keeps returning it for minutes. ``id_field`` is ``ApplicationName`` (v2) or
+    ``ApplicationARN`` (v1); both normalise to the bare name for comparison. A
+    failed listing counts as "still present" so the poll keeps waiting rather than
+    declaring a false absence.
+    """
     try:
-        kda_client.describe_application(ApplicationName=name)
-    except ClientError as e:
-        return e.response.get("Error", {}).get("Code", "") in _NOT_FOUND_CODES
-    except BotoCoreError:
-        return False
-    return False
+        listed = collect(client, "list_applications", "ApplicationSummaries", id_field)
+    except (ClientError, BotoCoreError):
+        return True
+    return any(_application_name_from_identifier(str(app_id)) == name for app_id in listed)
 
 
 def _stack_not_found(error: ClientError) -> bool:
@@ -178,40 +192,47 @@ def _stack_absent(cfn_client: BaseClient, name: str) -> bool:
     return all(s.get("StackStatus") in _TERMINAL_STACK_STATUSES for s in stacks)
 
 
-def _await_studio_teardown(resource: Resource, session: boto3.Session) -> None:
-    """Wait for a deleted Studio application AND its service-managed stack to vanish.
+def _await_kda_teardown(resource: Resource, session: boto3.Session) -> None:
+    """Wait until a deleted KDA application clears the reset scanner's listing.
 
-    ``DeleteApplication`` on a Managed Flink "Studio" application triggers AWS to
-    tear down both the application and its ``environment-*-flink-studio`` backing
-    stack **asynchronously**, over several minutes. The stack may transiently show
-    ``DELETE_FAILED`` but self-completes, so no ``DeleteStack`` is issued here — a
-    direct delete only races the service. Poll (with backoff) for the true absence
-    of both so the reset's re-verify — which lists both the application and the
-    stack — does not fail-close before the async teardown finishes.
+    ``kinesisanalyticsv2:DeleteApplication`` returns success while the application
+    remains visible to the scanner's ``list_applications`` for minutes — the core
+    residual, present in BOTH Studio task variants (stack-backed and stack-less).
+    This wait is therefore UNCONDITIONAL after any real delete: poll the v2 AND v1
+    ``list_applications`` (the app is listed under both types) until it clears from
+    both. For the stack-backed variant (a ``environment-*-flink-studio`` app name),
+    additionally wait for the service-managed backing stack to clear — no
+    ``DeleteStack`` is issued (AWS tears it down as the application is removed; the
+    transient ``DELETE_FAILED`` self-completes).
 
-    Best-effort: on timeout the residual is left to the reset's fail-closed
-    re-verify. Non-Studio applications have no managed stack and are skipped.
+    Poll with capped exponential backoff over a grace window sized to comfortably
+    exceed the observed removal latency. Best-effort: on timeout the residual is
+    left to the reset's fail-closed re-verify.
     """
     name = _application_name_from_identifier(resource.identifier)
-    if not is_service_managed_studio_stack(name):
-        return
-    kda_client = build_client(session, "kinesisanalyticsv2")
-    cfn_client = build_client(session, "cloudformation")
-    app_gone = stack_gone = False
+    v2_client = build_client(session, "kinesisanalyticsv2")
+    v1_client = build_client(session, "kinesisanalytics")
+    cfn_client = (
+        build_client(session, "cloudformation") if is_service_managed_studio_stack(name) else None
+    )
+    v2_gone = v1_gone = stack_gone = False
     delay = _TEARDOWN_INITIAL_DELAY
     for _ in range(_TEARDOWN_MAX_ATTEMPTS):
-        app_gone = _application_absent(kda_client, name)
-        stack_gone = _stack_absent(cfn_client, name)
-        if app_gone and stack_gone:
-            logger.debug("Kinesis Analytics Studio teardown complete for '%s'", name)
+        v2_gone = not _application_listed(v2_client, "ApplicationName", name)
+        v1_gone = not _application_listed(v1_client, "ApplicationARN", name)
+        stack_gone = cfn_client is None or _stack_absent(cfn_client, name)
+        if v2_gone and v1_gone and stack_gone:
+            logger.debug("Kinesis Analytics application '%s' cleared from the scanner", name)
             return
         time.sleep(delay)
         delay = min(delay * _TEARDOWN_BACKOFF, _TEARDOWN_MAX_DELAY)
     logger.warning(
-        "Kinesis Analytics Studio '%s' not fully torn down within the grace window "
-        "(application_gone=%s, stack_gone=%s); leaving it to the reset re-verify",
+        "Kinesis Analytics application '%s' still present after the grace window "
+        "(v2_listed_gone=%s, v1_listed_gone=%s, stack_gone=%s); leaving it to the "
+        "reset re-verify",
         name,
-        app_gone,
+        v2_gone,
+        v1_gone,
         stack_gone,
     )
 
@@ -220,16 +241,13 @@ def _await_studio_teardown(resource: Resource, session: boto3.Session) -> None:
 def _delete_v2(resource: Resource, session: boto3.Session) -> HandlerResult:
     """Delete a Kinesis Data Analytics v2 (Managed Flink / Studio) application.
 
-    After the application is deleted, wait for AWS to asynchronously tear down the
-    application and its service-managed ``environment-*-flink-studio`` backing
-    stack (if any) — never issuing a direct ``DeleteStack``.
+    The delete waits (in ``_delete_application``) for the application to clear the
+    scanner's listing — and, for a stack-backed Studio app, for its service-managed
+    backing stack — never issuing a direct ``DeleteStack``.
     """
-    result = _delete_application(
+    return _delete_application(
         resource, session, service="kinesisanalyticsv2", label="Kinesis Analytics v2"
     )
-    if result.status is HandlerStatus.SUCCESS:
-        _await_studio_teardown(resource, session)
-    return result
 
 
 @resource_handler("AWS::KinesisAnalytics::Application", role="delete")
@@ -238,7 +256,7 @@ def _delete_v1(resource: Resource, session: boto3.Session) -> HandlerResult:
 
     A v2 Studio application is listed under this type too; the v1 API rejects it
     with ``UnsupportedOperationException``, which is treated as already handled by
-    the v2 handler rather than a failure.
+    the v2 handler rather than a failure (no wait — the v2 handler's delete waits).
     """
     return _delete_application(
         resource,
