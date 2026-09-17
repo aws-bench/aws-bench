@@ -30,6 +30,7 @@ from aws_bench.resource_management.cleanup.handlers import (
     imagebuilder,  # noqa: F401
     iot,  # noqa: F401
     ipam,  # noqa: F401
+    kinesisanalytics,  # noqa: F401
     lakeformation,  # noqa: F401
     lambda_,  # noqa: F401
     medialive,  # noqa: F401

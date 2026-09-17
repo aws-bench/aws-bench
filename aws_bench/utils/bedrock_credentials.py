@@ -8,6 +8,7 @@ import time
 import urllib.error
 import urllib.request
 from datetime import datetime, timedelta, timezone
+from enum import Enum
 
 import boto3
 from botocore.exceptions import ClientError
@@ -24,6 +25,23 @@ SSM_PARAMETER = "/bedrock-aws-bench/bedrock-api-key"
 
 DEFAULT_DAYS = 30
 DEFAULT_MIN_REMAINING_DAYS = 1
+
+# HTTP statuses that indicate a transient condition on the verification probe
+# (throttling / server-side load), not a statement about the key's validity.
+_TRANSIENT_HTTP_CODES = frozenset({429, 500, 502, 503, 504})
+
+
+class TokenVerification(Enum):
+    """Outcome of probing a bearer token against the Bedrock API.
+
+    The three states exist so the caller can distinguish a key that is actually
+    bad from a probe that merely failed under load. Rotating on the latter
+    deletes the shared credential and 403s every concurrent run holding it.
+    """
+
+    VALID = "valid"  # HTTP 200 — the key authenticated.
+    INVALID = "invalid"  # HTTP 403 after the IAM-propagation retry budget.
+    INDETERMINATE = "indeterminate"  # 429/5xx/network/timeout — validity unknown.
 
 
 class BedrockCredentialError(Exception):
@@ -96,26 +114,157 @@ def _store_token_in_ssm(ssm_client, parameter_name: str, api_key: str) -> None:
     logger.info(f"Token stored in SSM: {parameter_name}")
 
 
-def _verify_token(api_key: str, retries: int = 3, delay: int = 5) -> bool:
-    """Verify the token works with a lightweight Bedrock API call."""
+def _verify_token(api_key: str, retries: int = 3, delay: int = 5) -> TokenVerification:
+    """Probe the token with a lightweight Bedrock API call.
+
+    Returns a tri-state so the caller never rotates a valid, in-use key on a
+    transient blip:
+
+    - ``VALID``: authenticated (HTTP 200).
+    - ``INVALID``: rejected for auth reasons (HTTP 403) even after the
+      IAM-propagation retry budget. Safe to rotate.
+    - ``INDETERMINATE``: the probe hit a transient condition (throttling, 5xx,
+      other non-auth HTTP status, network/timeout). The key's validity is
+      unknown; the caller MUST NOT rotate on this.
+
+    403 (propagation) and transient conditions are both retried with a fixed
+    delay; the final state reflects the last attempt.
+    """
     url = "https://bedrock.us-east-1.amazonaws.com/foundation-models/amazon.titan-embed-text-v1"
+    last_outcome = TokenVerification.INDETERMINATE
     for attempt in range(retries):
         req = urllib.request.Request(url, headers={"Authorization": f"Bearer {api_key}"})
         try:
             with urllib.request.urlopen(req, timeout=10) as resp:
                 if resp.status == 200:
-                    return True
+                    return TokenVerification.VALID
+                # A non-200 without an exception is unusual and not an auth
+                # signal; treat as inconclusive rather than rotating.
+                last_outcome = TokenVerification.INDETERMINATE
+                break
         except urllib.error.HTTPError as e:
-            if e.code == 403 and attempt < retries - 1:
-                logger.info(f"Got 403, retrying in {delay}s (IAM propagation delay)...")
+            if e.code == 403:
+                last_outcome = TokenVerification.INVALID
+                if attempt < retries - 1:
+                    logger.info(f"Got 403, retrying in {delay}s (IAM propagation delay)...")
+                    time.sleep(delay)
+                    continue
+                logger.error(f"Token verification failed: HTTP 403 - {e.reason}")
+                break
+            if e.code in _TRANSIENT_HTTP_CODES:
+                last_outcome = TokenVerification.INDETERMINATE
+                if attempt < retries - 1:
+                    logger.warning(
+                        f"Transient HTTP {e.code} verifying token; retrying in {delay}s..."
+                    )
+                    time.sleep(delay)
+                    continue
+                logger.warning(f"Token verification inconclusive after retries: HTTP {e.code}")
+                break
+            # Other HTTP errors (e.g. 400/404) are not auth failures.
+            logger.warning(f"Token verification inconclusive: HTTP {e.code} - {e.reason}")
+            last_outcome = TokenVerification.INDETERMINATE
+            break
+        except (urllib.error.URLError, TimeoutError, OSError) as e:
+            last_outcome = TokenVerification.INDETERMINATE
+            if attempt < retries - 1:
+                logger.warning(
+                    f"Transient network error verifying token ({e}); retrying in {delay}s..."
+                )
                 time.sleep(delay)
                 continue
-            logger.error(f"Token verification failed: HTTP {e.code} - {e.reason}")
+            logger.warning(f"Token verification inconclusive after retries (network): {e}")
             break
-        except Exception as e:
-            logger.error(f"Token verification failed: {e}")
-            break
-    return False
+    return last_outcome
+
+
+def _expiration_key(cred: dict) -> datetime:
+    """Sort key for choosing which credential to retire first (soonest expiry)."""
+    expiration = cred.get("ExpirationDate")
+    return expiration or datetime.max.replace(tzinfo=timezone.utc)
+
+
+def _rotate_credential(
+    iam_client,
+    ssm_client,
+    existing: list[dict],
+    *,
+    days: int,
+    no_verify: bool,
+    reclaim_slot: bool = False,
+) -> str:
+    """Mint a replacement credential gracefully and return its bearer token.
+
+    Rotation is ordered mint -> verify -> store-in-SSM -> delete-old, so a run
+    already holding the old key is not invalidated before the new key is proven
+    and published. The old credential is retired only after the new one is in
+    SSM.
+
+    IAM caps a user at 2 service-specific credentials per service. When both
+    slots are full a rotation cannot mint without first deleting an existing
+    credential. That delete is destructive and may surprise a caller who
+    manages ``bedrock-api-user`` themselves, so it is opt-in: only when
+    ``reclaim_slot`` is set do we free the soonest-to-expire credential.
+    Otherwise we refuse and tell the caller how to authorize it.
+    """
+    if len(existing) >= 2:
+        if not reclaim_slot:
+            raise BedrockCredentialError(
+                f"Both service-specific credential slots for IAM user '{IAM_USER_NAME}' are in "
+                "use (IAM allows a maximum of 2 per user/service), so rotating requires deleting "
+                "one of them. Re-run with --reclaim-slot to authorize deleting the "
+                "soonest-to-expire credential, or --force to replace all existing credentials."
+            )
+        to_free = min(existing, key=_expiration_key)
+        logger.warning(
+            "Both credential slots in use; --reclaim-slot set, freeing soonest-to-expire "
+            f"credential {to_free['ServiceSpecificCredentialId']} to rotate."
+        )
+        _delete_all_credentials(iam_client, IAM_USER_NAME, [to_free])
+        existing = [c for c in existing if c is not to_free]
+
+    logger.info(f"Generating long-term Bedrock key (valid {days} days)...")
+    try:
+        response = iam_client.create_service_specific_credential(
+            UserName=IAM_USER_NAME, ServiceName=SERVICE_NAME, CredentialAgeDays=days
+        )
+        credential = response["ServiceSpecificCredential"]
+        api_key = credential["ServiceCredentialSecret"]
+        new_id = credential["ServiceSpecificCredentialId"]
+        logger.info(f"Credential ID: {new_id}")
+    except ClientError as e:
+        error_code = e.response["Error"]["Code"]
+        if error_code == "LimitExceeded":
+            raise BedrockCredentialError(
+                "Limit exceeded: max 2 service-specific credentials per user per service. "
+                "Use --force to delete existing credentials and create a fresh one."
+            ) from e
+        raise BedrockCredentialError(f"Failed to generate key: {e}") from e
+
+    # Verify the NEW key. A transient probe failure is not fatal for a key IAM
+    # just minted; only a hard 403 after the propagation window is.
+    if not no_verify:
+        logger.info("Verifying new token against Bedrock API...")
+        outcome = _verify_token(api_key)
+        if outcome is TokenVerification.INVALID:
+            # New key is unusable — roll it back and keep the old credential(s)
+            # intact so nothing that still works is destroyed.
+            _delete_all_credentials(
+                iam_client, IAM_USER_NAME, [{"ServiceSpecificCredentialId": new_id}]
+            )
+            raise BedrockCredentialError(
+                "New token failed verification - the key may not be usable yet."
+            )
+        if outcome is TokenVerification.INDETERMINATE:
+            logger.warning("New token verification inconclusive (transient); storing anyway.")
+        else:
+            logger.info("Token verified successfully.")
+
+    # Publish the new key first, THEN retire the old credentials.
+    _store_token_in_ssm(ssm_client, SSM_PARAMETER, api_key)
+    if existing:
+        _delete_all_credentials(iam_client, IAM_USER_NAME, existing)
+    return api_key
 
 
 def generate_bearer_token(
@@ -124,6 +273,7 @@ def generate_bearer_token(
     no_verify: bool = False,
     days: int = DEFAULT_DAYS,
     min_remaining_days: int = DEFAULT_MIN_REMAINING_DAYS,
+    reclaim_slot: bool = False,
 ) -> str:
     """Generate or retrieve a cached Bedrock bearer token.
 
@@ -132,6 +282,11 @@ def generate_bearer_token(
         no_verify: Skip token verification against Bedrock API.
         days: Credential lifetime in days.
         min_remaining_days: Minimum remaining days to consider a credential reusable.
+        reclaim_slot: When both service-specific credential slots are in use and a
+            rotation is required, authorize deleting the soonest-to-expire
+            credential to free a slot. Off by default so a caller who manages
+            ``bedrock-api-user`` themselves is never surprised by a deletion;
+            ``force`` implies it.
 
     Returns:
         The bearer token string.
@@ -159,51 +314,43 @@ def generate_bearer_token(
     if not force and not credential_expiring:
         cached_token = _get_token_from_ssm(ssm_client, SSM_PARAMETER)
         if cached_token:
+            if no_verify:
+                logger.info("Reusing token from SSM (verification skipped).")
+                return cached_token
             logger.info(f"Found token in SSM ({SSM_PARAMETER}), verifying...")
-            # Full retry budget: a credential 403s until IAM propagates, which
-            # routinely outlasts a single interval. Reading that as failure would
-            # discard a valid token and delete the credential backing it.
-            if no_verify or _verify_token(cached_token):
+            outcome = _verify_token(cached_token)
+            if outcome is TokenVerification.VALID:
                 logger.info("Reusing valid token from SSM.")
                 return cached_token
-            logger.info("Token from SSM failed verification. Generating a new one...")
+            if outcome is TokenVerification.INDETERMINATE:
+                # A probe that failed transiently (throttling / 5xx / network)
+                # says nothing about the token's validity. Reuse it WITHOUT
+                # rotating: rotation deletes the shared credential and 403s every
+                # concurrent run already holding this key.
+                logger.warning(
+                    "Token verification inconclusive (transient failure); "
+                    "reusing cached token without rotation."
+                )
+                return cached_token
+            # INVALID: a hard 403 after the propagation window - the key really
+            # is bad, so rotation is warranted.
+            logger.info("Token from SSM rejected by Bedrock (403). Rotating...")
             need_regenerate = True
         else:
             logger.info(f"No token found in SSM ({SSM_PARAMETER}).")
             need_regenerate = True
 
-    # Step 3: Rotate - delete expiring/invalid/force credentials
+    # Steps 3-5: Rotate gracefully (mint -> verify -> store -> delete-old) so a
+    # run holding the old key is not invalidated before the new key is proven.
     if credential_expiring or force or need_regenerate:
-        if existing:
-            _delete_all_credentials(iam_client, IAM_USER_NAME, existing)
-            existing = []
-
-    # Step 4: Generate a new credential
-    logger.info(f"Generating long-term Bedrock key (valid {days} days)...")
-    try:
-        response = iam_client.create_service_specific_credential(
-            UserName=IAM_USER_NAME, ServiceName=SERVICE_NAME, CredentialAgeDays=days
+        return _rotate_credential(
+            iam_client,
+            ssm_client,
+            existing,
+            days=days,
+            no_verify=no_verify,
+            reclaim_slot=reclaim_slot or force,
         )
-        credential = response["ServiceSpecificCredential"]
-        api_key = credential["ServiceCredentialSecret"]
-        logger.info(f"Credential ID: {credential['ServiceSpecificCredentialId']}")
-    except ClientError as e:
-        error_code = e.response["Error"]["Code"]
-        if error_code == "LimitExceeded":
-            raise BedrockCredentialError(
-                "Limit exceeded: max 2 service-specific credentials per user per service. "
-                "Use --force to delete existing credentials and create a fresh one."
-            ) from e
-        raise BedrockCredentialError(f"Failed to generate key: {e}") from e
 
-    # Step 5: Verify and store in SSM
-    if not no_verify:
-        logger.info("Verifying token against Bedrock API...")
-        if not _verify_token(api_key):
-            raise BedrockCredentialError(
-                "Token verification failed - the key may not be usable yet."
-            )
-        logger.info("Token verified successfully.")
-
-    _store_token_in_ssm(ssm_client, SSM_PARAMETER, api_key)
-    return api_key
+    # Unreachable: one of reuse / rotate always returns above. Guard for safety.
+    raise BedrockCredentialError("Unable to obtain a Bedrock bearer token.")
