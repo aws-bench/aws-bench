@@ -32,18 +32,26 @@ directory transitions through ``Deleting``, and ``describe_directories`` keeps
 listing it until it is fully gone. The reset re-verifies exactly once, right
 after deletion, so the delete step must WAIT for terminal deletion or the still-
 ``Deleting`` directory is re-flagged as a new resource and reset fails.
+
+A directory that still has a PCA Connector AD connector or directory
+registration attached cannot be deleted ("still has authorized applications").
+The ``prepare`` handler removes those authorized applications first — see
+``_pca_connector_ad`` — so ``DeleteDirectory`` succeeds.
 """
 
 from __future__ import annotations
 
 import boto3
 from botocore.client import BaseClient
-from botocore.exceptions import ClientError
+from botocore.exceptions import BotoCoreError, ClientError
 
 from aws_bench.resource_management.ccapi.models import Resource
 from aws_bench.resource_management.cleanup.handler_registry import resource_handler
+from aws_bench.resource_management.cleanup.handlers._pca_connector_ad import (
+    remove_directory_authorized_apps,
+)
 from aws_bench.resource_management.cleanup.handlers._service_delete import service_delete
-from aws_bench.resource_management.cleanup.models import HandlerResult
+from aws_bench.resource_management.cleanup.models import HandlerResult, HandlerStatus
 from aws_bench.resource_management.utils.polling import wait_until
 
 _NOT_FOUND_CODES = ("EntityDoesNotExistException",)
@@ -80,6 +88,44 @@ def _wait_for_terminal_deletion(client: BaseClient, directory_id: str) -> None:
             }
         },
         "DescribeDirectories",
+    )
+
+
+@resource_handler("AWS::DirectoryService::SimpleAD", role="prepare")
+def _prepare(resource: Resource, session: boto3.Session) -> HandlerResult:
+    """Remove the directory's PCA Connector AD authorized applications first.
+
+    A directory that still has a PCA Connector AD connector or directory
+    registration attached cannot be deleted (``DeleteDirectory`` fails with "still
+    has authorized applications"). Those types are CCAPI-deletable, but CCAPI runs
+    only AFTER the custom-delete ``DeleteDirectory``, so the delete races ahead and
+    fails. The prepare phase runs before custom-delete, so removing them here
+    unblocks the directory teardown deterministically.
+
+    Returns SUCCESS whether or not any app was removed (so the delete still runs);
+    only a real removal failure maps to FAILED.
+    """
+    try:
+        removed = remove_directory_authorized_apps(session, resource.identifier)
+    except (ClientError, BotoCoreError) as e:
+        return HandlerResult(
+            resource_id=resource.identifier,
+            resource_type=resource.type,
+            action="prepare",
+            status=HandlerStatus.FAILED,
+            message=f"Failed to remove PCA Connector AD authorized applications: {e}",
+        )
+    message = (
+        f"Removed {removed} PCA Connector AD authorized application(s)"
+        if removed
+        else "No PCA Connector AD authorized applications"
+    )
+    return HandlerResult(
+        resource_id=resource.identifier,
+        resource_type=resource.type,
+        action="prepare",
+        status=HandlerStatus.SUCCESS,
+        message=message,
     )
 
 
