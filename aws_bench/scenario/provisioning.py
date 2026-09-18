@@ -3,9 +3,9 @@
 Provisions accounts and submits quota increases for a set of scenarios:
 
   Provisioning — bounded by ``n_concurrent``. For each
-    ``(scenario, account_tag)`` pair, ensure an account exists, wait for
-    the org-access role, and submit each scenario's ``[[quotas]]`` without
-    waiting for approval.
+    ``(scenario, account_tag)`` pair, ensure an account exists, reconcile
+    its region SCP, wait for the org-access role, and submit each scenario's
+    ``[[quotas]]`` without waiting for approval.
 
   Account-limit reaction — if account creation fails because the AWS
     Organizations "maximum number of accounts" limit is hit, file a Service
@@ -57,6 +57,7 @@ from aws_bench.resource_management.quota_manager import (
     QuotaManager,
 )
 from aws_bench.resource_management.scanner import _FASTSCAN_LAMBDA, scan_method
+from aws_bench.resource_management.snapshot.manager import SnapshotManager
 from aws_bench.resource_management.snapshot.models import SnapshotResult
 from aws_bench.scenario.config import QuotaIncrease, ScenarioManifest
 from aws_bench.scenario.exceptions import (
@@ -234,6 +235,8 @@ async def provision_scenarios(
     Each account's pristine PRE_SETUP baseline is captured as the final step
     of provisioning that account (the baseline ``env cleanup`` later
     subtracts). A capture failure fails that account's ``provisioned`` status.
+    An existing baseline must cover the same regions; otherwise cleanup is
+    required before reinitializing.
 
     ``on_event`` (optional) receives one typed event per lifecycle
     transition per account. Exceptions raised by the callback are logged
@@ -456,7 +459,8 @@ async def _provision_all(
     """Provision every (scenario, account_tag) pair in two phases.
 
     Phase 1 — Account creation, bounded by ``min(n_concurrent, _ACCOUNT_CREATION_MAX_CONCURRENT)``.
-    Phase 2 — Role wait + quota submission + baseline capture, bounded by ``n_concurrent``.
+    Phase 2 — Region SCP + role wait + quota submission + baseline capture,
+    bounded by ``n_concurrent``.
     """
     # Phase 1: Create accounts with hard cap of 3 concurrent.
     logger.info(
@@ -494,13 +498,12 @@ async def _provision_all(
             scenario = pair_map[(result.scenario_name, result.account_tag)]
             with log_context(result.scenario_name), log_context(result.account_tag):
                 return await _provision_account_lifecycle(
+                    account_manager,
                     quota_manager,
                     cred_provider,
                     scenario,
                     result,
                     on_event,
-                    preexisting=account_manager.is_preexisting is True,
-                    runner_role=account_manager.runner_role,
                 )
 
     # Split into successes (proceed to Phase 2) and failures (pass through).
@@ -638,16 +641,14 @@ def _validate_cfn_ops_role(cred_provider: CredentialProvider, account_id: str) -
 
 
 async def _provision_account_lifecycle(
+    account_manager: AccountManager,
     quota_manager: QuotaManager,
     cred_provider: CredentialProvider,
     scenario: ScenarioManifest,
     result: ProvisionedAccount,
     on_event: HookCallback | None,
-    *,
-    preexisting: bool = False,
-    runner_role: str | None = None,
 ) -> ProvisionedAccount:
-    """Phase 2: Role wait + quota submission + baseline capture for a provisioned account.
+    """Phase 2: Region SCP + role wait + quotas + baseline capture for a provisioned account.
 
     Expects ``result.account_id`` to be set (Phase 1 succeeded).
     Emits ROLE_START, QUOTAS_START, SNAPSHOT_START, and END events.
@@ -656,14 +657,34 @@ async def _provision_account_lifecycle(
     name = scenario.scenario.name
     account_tag = result.account_tag
     cancelled = False
-    # Phase 1 guarantees this (see docstring); assert to narrow str | None -> str.
-    assert result.account_id is not None
     account_id = result.account_id
+    preexisting = account_manager.is_preexisting is True
 
     async def emit(event: ProvisionEvent, **kw) -> None:
         await _emit(on_event, event, scenario_name=name, account_tag=account_tag, **kw)
 
     try:
+        try:
+            # Check baseline regions and reconcile a reused account's old SCP
+            # before quota requests or snapshot capture enter the declared regions.
+            await asyncio.to_thread(
+                SnapshotManager().validate_pre_setup_snapshot,
+                name,
+                account_id,
+                scenario.scenario.regions,
+                allow_missing=True,
+            )
+            await asyncio.to_thread(
+                account_manager.ensure_region_restriction_scp,
+                name,
+                scenario.scenario.regions,
+                [account_id],
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.error("Region SCP reconciliation failed for %s/%s: %s", name, account_tag, exc)
+            result.error = exc
+            return result
+
         await emit(ProvisionEvent.ROLE_START, account_id=account_id)
         if preexisting:
             try:
@@ -676,7 +697,7 @@ async def _provision_account_lifecycle(
             except Exception as exc:  # noqa: BLE001
                 logger.error(
                     "Runner role %s is unavailable in %s: %s",
-                    runner_role,
+                    account_manager.runner_role,
                     account_id,
                     exc,
                 )
