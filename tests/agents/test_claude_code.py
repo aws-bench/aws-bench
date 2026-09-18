@@ -50,15 +50,16 @@ def test_factory_resolves_claude_code_to_subclass():
     """Importing aws_bench.agents maps `claude-code` to this subclass."""
     import aws_bench.agents  # noqa: F401
 
-    assert AgentFactory._AGENT_MAP[AgentName("claude-code")] is ClaudeCode
+    assert AgentFactory.get_agent_class(AgentName("claude-code")) is ClaudeCode
 
 
 def test_subclass_replaces_builtin_in_agents_list():
-    """The subclass replaces Harbor's claude-code in the factory list."""
+    """The subclass replaces Harbor's claude-code entry in the factory map."""
     import aws_bench.agents  # noqa: F401
 
-    claude_entries = [a for a in AgentFactory._AGENTS if a.name() == "claude-code"]
-    assert claude_entries == [ClaudeCode]
+    assert AgentFactory._AGENT_MAP[AgentName("claude-code")] == (
+        f"{ClaudeCode.__module__}:{ClaudeCode.__qualname__}"
+    )
 
 
 # ── init ──

@@ -23,13 +23,15 @@ dependencies = [
     "boto3>=1.42.0",
     "docker>=7.1.0",
     "filelock>=3.29.4",
-    "harbor==0.9.0",
+    "harbor==0.22.0",
     "jinja2>=3.1.6",
     "mcp>=1.28.1",
+    "pandas>=2.0.0",
     "pydantic>=2.0.0",
     "python-dotenv>=1.2.2",
     "shortuuid>=1.0.13",
     "tenacity>=9.1.0",
+    "toml>=0.10.2",
     "typer>=0.15.0"
 ]
 

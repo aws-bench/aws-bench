@@ -40,6 +40,25 @@ def test_rejects_environment_import_path():
         AwsBenchJobConfig.model_validate({"environment": {"import_path": "pkg.mod:Env"}})
 
 
+def test_rejects_install_only():
+    # Harbor 0.22.0 disables the verifier for install_only, but the aws-bench
+    # trial config never receives the flag, so the agent would run in full unverified.
+    with pytest.raises(ValidationError, match="install_only"):
+        AwsBenchJobConfig.model_validate({"install_only": True})
+
+
+def test_install_only_off_is_valid():
+    assert AwsBenchJobConfig.model_validate({}).install_only is False
+    assert AwsBenchJobConfig.model_validate({"install_only": False}).install_only is False
+
+
+def test_full_run_config_still_validates():
+    cfg = AwsBenchJobConfig(
+        dataset=AwsBenchDatasetConfig(name="aws-bench-all"), env_name="ou", metrics=[]
+    )
+    assert cfg.install_only is False
+
+
 def test_docker_environment_is_valid():
     cfg = AwsBenchJobConfig.model_validate({"environment": {"type": "docker"}})
     assert cfg.environment.type is not None

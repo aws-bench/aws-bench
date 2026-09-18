@@ -16,9 +16,11 @@ from harbor.agents.oracle import OracleAgent
 from harbor.models.task.task import Task
 from harbor.models.trial.config import TrialConfig
 from harbor.models.trial.paths import TrialPaths
+from harbor.tasks.client import TaskClient, TaskDownloadResult
 from harbor.trial.single_step import SingleStepTrial
 
 from aws_bench.account_management.manager import AccountManager
+from aws_bench.constants import TASK_CACHE_DIR
 from aws_bench.dataset.models import RoleType, ScriptType
 from aws_bench.dataset.task_config import AwsBenchTask, ConcurrencyMode, PhaseScript
 from aws_bench.exceptions import AccountContaminatedError, OperationCancelled
@@ -79,7 +81,13 @@ class AwsBenchSingleStepTrial(SingleStepTrial):
     config: AwsBenchTrialConfig
     task: AwsBenchTask
 
-    def __init__(self, config: TrialConfig, *, _task: Task | None = None) -> None:
+    def __init__(
+        self,
+        config: TrialConfig,
+        *,
+        _task: Task | None = None,
+        _task_download_result: TaskDownloadResult,
+    ) -> None:
         """Initialize state before the base init so teardown paths can read it.
 
         Teardown can run before ``_prepare`` (failure/cancel during setup), so
@@ -90,7 +98,7 @@ class AwsBenchSingleStepTrial(SingleStepTrial):
         # Gates post-invoke: skipped if setup never produced a running container.
         self._agent_container_started = False
         self._account_manager = AccountManager()
-        super().__init__(config, _task=_task)
+        super().__init__(config, _task=_task, _task_download_result=_task_download_result)
 
     def _init_logger(self) -> None:
         """Give trial.log the aws-bench file format, replacing Harbor's bare handler.
@@ -460,11 +468,33 @@ class AwsBenchTrial:
 
     @classmethod
     async def create(cls, config: TrialConfig) -> AwsBenchSingleStepTrial:
-        """Build the concrete single-step trial, refusing multi-step AWS tasks."""
-        task = await AwsBenchTask.from_config(config.task, config.extra_instruction_paths)
+        """Download the task once, build the concrete single-step trial, refuse multi-step."""
+        download_result = await cls._resolve_download_result(config)
+        task = AwsBenchTask(download_result.path, config.extra_instruction_paths)
         if task.has_steps:
             raise NotImplementedError(
                 "multi-step AWS tasks are not yet supported (per-step pre/post-invoke "
                 "credentialing is undefined)."
             )
-        return AwsBenchSingleStepTrial(config, _task=task)
+        return AwsBenchSingleStepTrial(config, _task=task, _task_download_result=download_result)
+
+    @staticmethod
+    async def _resolve_download_result(config: TrialConfig) -> TaskDownloadResult:
+        """The trial's one task download; harbor's trial lock records the result.
+
+        Mirrors ``Trial._load_task``. A local task resolves to its own path without
+        I/O; a git task downloads under the config's ``download_dir`` or
+        ``TASK_CACHE_DIR``. Package references are refused (only git/local are
+        supported).
+        """
+        if config.task.is_package_task():
+            raise NotImplementedError(
+                "aws-bench does not support package task references; got "
+                f"{config.task.get_task_id()}."
+            )
+        batch = await TaskClient().download_tasks(
+            task_ids=[config.task.get_task_id()],
+            overwrite=config.task.overwrite,
+            output_dir=config.task.download_dir or TASK_CACHE_DIR,
+        )
+        return batch.results[0]

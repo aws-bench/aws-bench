@@ -644,7 +644,7 @@ def start(
                     name=agent_name,
                     import_path=agent_import_path,
                     model_name=model_name,
-                    skills=skills or [],
+                    skills=list(skills or []),
                     kwargs=parsed_kwargs,
                     env=parsed_env,
                     mcp_servers=parsed_mcp_servers,
@@ -656,7 +656,7 @@ def start(
                 AgentConfig(
                     name=agent_name,
                     import_path=agent_import_path,
-                    skills=skills or [],
+                    skills=list(skills or []),
                     kwargs=parsed_kwargs,
                     env=parsed_env,
                     mcp_servers=parsed_mcp_servers,
