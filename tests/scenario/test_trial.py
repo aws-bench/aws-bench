@@ -203,7 +203,7 @@ def test_run_creates_trial_dir(tmp_path, fake_container, fake_creds):
 
 
 def test_reset_redeploy_starts_container_when_reset_had_no_script(
-    tmp_path, fake_container, fake_creds, mock_account_manager
+    tmp_path, fake_container, fake_creds
 ):
     """A reset that deletes a stack must start the container before redeploying.
 
@@ -232,7 +232,6 @@ def test_reset_redeploy_starts_container_when_reset_had_no_script(
     # check must not re-raise on the (success=True) needs_redeploy result.
     assert result.success
     assert result.exception_info is None
-    mock_account_manager.ensure_region_restriction_scp.assert_not_called()
 
 
 async def trial_for_reset(tmp_path, fake_container, fake_creds):
@@ -1451,17 +1450,43 @@ def test_run_writes_trial_log(tmp_path, fake_container, fake_creds):
     assert trial.paths.log_path.stat().st_size > 0
 
 
-# -- region-restriction SCP ownership (env init only) -------------------
+# -- region-restriction SCP at DEPLOY ------------------------------------------
 
 
-@pytest.mark.parametrize("phase", list(ScenarioPhase))
-def test_phase_scripts_do_not_reconcile_region_scp(
+def test_deploy_ensures_region_scp_for_its_accounts(
+    tmp_path, fake_container, fake_creds, mock_account_manager
+):
+    """DEPLOY attaches the scenario's SCP to exactly the trial's accounts."""
+    trial = _build_trial(tmp_path, fake_container, fake_creds)
+
+    result = asyncio.run(trial.run(ScenarioPhase.DEPLOY))
+
+    assert result.success
+    mock_account_manager.ensure_region_restriction_scp.assert_called_once_with(
+        "sc", ["us-east-1"], ["111111111111"]
+    )
+
+
+def test_scp_failure_aborts_deploy_before_script(
+    tmp_path, fake_container, fake_creds, mock_account_manager
+):
+    """If the SCP cannot be attached, deploy.sh never runs."""
+    mock_account_manager.ensure_region_restriction_scp.side_effect = RuntimeError("scp boom")
+    trial = _build_trial(tmp_path, fake_container, fake_creds)
+
+    result = asyncio.run(trial.run(ScenarioPhase.DEPLOY))
+
+    assert not result.success
+    fake_container.run_phase.assert_not_called()
+    assert result.exception_info is not None
+    assert "scp boom" in result.exception_info.exception_message
+
+
+@pytest.mark.parametrize("phase", [p for p in ScenarioPhase if p is not ScenarioPhase.DEPLOY])
+def test_non_deploy_phases_do_not_touch_region_scp(
     tmp_path, fake_container, fake_creds, mock_account_manager, phase
 ):
-    """Phase scripts use the policy established by init without changing it."""
-    mock_account_manager.ensure_region_restriction_scp.side_effect = RuntimeError(
-        "SCP reconciliation belongs to env init"
-    )
+    """Every phase except DEPLOY runs its script without touching the SCP."""
     trial = _build_trial(tmp_path, fake_container, fake_creds)
 
     asyncio.run(trial._run_phase_in_container(phase))

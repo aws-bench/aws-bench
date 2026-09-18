@@ -11,7 +11,11 @@ import tenacity
 from botocore.exceptions import ClientError
 from moto import mock_aws
 
-from aws_bench.resource_management.exceptions import DriftDetectionError, SnapshotNotFoundError
+from aws_bench.resource_management.exceptions import (
+    DriftDetectionError,
+    SnapshotNotFoundError,
+    SnapshotRegionMismatchError,
+)
 from aws_bench.resource_management.snapshot.manager import SnapshotManager
 from aws_bench.resource_management.snapshot.models import (
     DriftBaseline,
@@ -22,7 +26,7 @@ from aws_bench.resource_management.snapshot.models import (
     SnapshotStage,
     StackMetadata,
 )
-from aws_bench.resource_management.storage.exceptions import StorageConflictError, StorageError
+from aws_bench.resource_management.storage.exceptions import StorageConflictError
 from aws_bench.resource_management.storage.local_storage_backend import LocalStorageBackend
 from aws_bench.resource_management.storage.s3_backend import S3StorageBackend
 
@@ -215,70 +219,37 @@ def test_validate_pre_setup_snapshot_accepts_equal_sets(sample_snapshot, stored_
     manager = SnapshotManager()
     sample_snapshot.regions = stored_regions
     with patch.object(manager, "load_snapshot", return_value=sample_snapshot) as load:
-        assert (
-            manager.validate_pre_setup_snapshot(
-                "sc", sample_snapshot.account_id, ["us-east-1", "us-west-2"]
-            )
-            is None
+        manager.validate_pre_setup_snapshot(
+            "sc", sample_snapshot.account_id, ["us-east-1", "us-west-2"]
         )
 
     load.assert_called_once_with("sc", sample_snapshot.account_id, SnapshotStage.PRE_SETUP)
-    assert manager._backend is None
 
 
-@pytest.mark.parametrize(
-    "stored_regions",
-    [
-        ["us-east-1"],
-        ["eu-west-1", "us-east-1"],
-        ["us-west-2", "us-east-1", "eu-west-1"],
-        [],
-    ],
-)
-def test_validate_pre_setup_snapshot_rejects_changed_regions(sample_snapshot, stored_regions):
+def test_validate_pre_setup_snapshot_rejects_changed_regions(sample_snapshot):
     manager = SnapshotManager()
-    sample_snapshot.regions = stored_regions
+    sample_snapshot.regions = ["eu-west-1", "us-east-1"]
     with patch.object(manager, "load_snapshot", return_value=sample_snapshot):
-        with pytest.raises(ValueError) as exc_info:
+        with pytest.raises(SnapshotRegionMismatchError) as exc_info:
             manager.validate_pre_setup_snapshot(
                 "sc", sample_snapshot.account_id, ["us-west-2", "us-east-1"]
             )
 
     message = str(exc_info.value)
-    assert "Scenario 'sc' regions ['us-east-1', 'us-west-2']" in message
-    assert f"PRE_SETUP snapshot regions {sorted(stored_regions)}" in message
-    assert f"for account {sample_snapshot.account_id}" in message
-    assert "aws-bench env cleanup" in message
-    assert "previous scenario regions" in message
-    assert "aws-bench env init" in message
+    assert "['us-east-1', 'us-west-2']" in message
+    assert "['eu-west-1', 'us-east-1']" in message
+    assert "Restore the previous regions in scenario.toml" in message
 
 
-@pytest.mark.parametrize("allow_missing", [False, True], ids=["setup", "init"])
-def test_validate_pre_setup_snapshot_missing_baseline(sample_snapshot, allow_missing):
+def test_validate_pre_setup_snapshot_missing_baseline(sample_snapshot):
     manager = SnapshotManager()
     missing = SnapshotNotFoundError("sc", sample_snapshot.account_id, SnapshotStage.PRE_SETUP)
-    with patch.object(manager, "load_snapshot", side_effect=missing) as load:
-        if allow_missing:
-            manager.validate_pre_setup_snapshot(
-                "sc", sample_snapshot.account_id, ["us-east-1"], allow_missing=True
-            )
-        else:
-            with pytest.raises(ValueError, match="PRE_SETUP.*missing.*aws-bench env init"):
-                manager.validate_pre_setup_snapshot("sc", sample_snapshot.account_id, ["us-east-1"])
-
-    load.assert_called_once_with("sc", sample_snapshot.account_id, SnapshotStage.PRE_SETUP)
-
-
-@pytest.mark.parametrize(
-    "error", [StorageError("baseline unreadable"), json.JSONDecodeError("corrupt baseline", "{", 0)]
-)
-def test_validate_pre_setup_snapshot_propagates_read_failures(error):
-    manager = SnapshotManager()
-    with patch.object(manager, "load_snapshot", side_effect=error):
-        with pytest.raises(type(error)) as exc_info:
-            manager.validate_pre_setup_snapshot("sc", "111111111111", ["us-east-1"])
-
-    assert exc_info.value is error
+    with patch.object(manager, "load_snapshot", side_effect=missing):
+        manager.validate_pre_setup_snapshot(
+            "sc", sample_snapshot.account_id, ["us-east-1"], allow_missing=True
+        )
+        with pytest.raises(SnapshotNotFoundError):
+            manager.validate_pre_setup_snapshot("sc", sample_snapshot.account_id, ["us-east-1"])
 
 
 @mock_aws

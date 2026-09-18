@@ -360,10 +360,8 @@ class AccountManager:
     ) -> None:
         """Lock ``account_ids`` to ``allowed_regions`` via a per-scenario SCP.
 
-        Public seam over :class:`OrganizationsClient` so callers (the CLI and
-        the trial lifecycle) don't reach into ``_org`` directly. Idempotent:
-        reuses the policy by name, updates its content when the region set
-        changes, and skips accounts that already have it attached.
+        Idempotent: reuses the policy by name, updates its content when the
+        region set changes, and skips accounts that already have it attached.
         """
         if self._preexisting is not None:
             self._validate_allowlisted_accounts(account_ids)

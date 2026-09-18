@@ -19,6 +19,7 @@ import pytest
 from aws_bench.account_management.models import OrgInfo, ScenarioAccount, TestEnvironment
 from aws_bench.dataset.config import AwsBenchDatasetConfig
 from aws_bench.resource_management.cleanup.models import AccountCleanupResult
+from aws_bench.resource_management.exceptions import SnapshotRegionMismatchError
 from aws_bench.resource_management.models import (
     QuotaConfiguration,
     QuotaIncreaseResult,
@@ -166,7 +167,7 @@ def patch_container():
 
 @pytest.fixture(autouse=True)
 def mock_account_manager():
-    """Stub account contamination reads and asynchronous tag updates."""
+    """Stub the trial's AccountManager: contamination reads, tag updates, and the SCP attach."""
     with patch("aws_bench.scenario.trial.AccountManager") as mock_cls:
         instance = mock_cls.return_value
         instance.get_contaminated_accounts.return_value = []
@@ -1058,16 +1059,37 @@ def test_create_passes_when_all_quotas_already_met(tmp_path):
 # -- init snapshot validation -------------------------------------------------
 
 
-@pytest.mark.parametrize(
-    "reason",
-    [
-        "Init snapshot missing. Run 'aws-bench env init' first.",
-        "Snapshot regions differ. Run cleanup, then 'aws-bench env init'.",
-    ],
-    ids=["missing", "regions"],
-)
-def test_deploy_fails_if_init_snapshot_invalid(tmp_path, patch_container, reason):
-    """Setup refuses missing or mismatched baselines before the deploy script."""
+def test_deploy_fails_on_init_snapshot_mismatch(tmp_path, patch_container, mock_account_manager):
+    """Setup refuses a mismatched baseline before the SCP attach and the deploy script."""
+    sdir = tmp_path / "scenarios"
+    sdir.mkdir()
+    _make_scenario(sdir, "lambda-a")
+
+    am = _fake_account_manager({"PRIMARY": "111"})
+    config = _make_job_config(tmp_path)
+
+    job = asyncio.run(ScenarioJob.create(config, _fake_creds(), account_manager=am))
+
+    mismatch = SnapshotRegionMismatchError("lambda-a", "111", ["us-east-1"], ["us-west-2"])
+    with patch(
+        "aws_bench.resource_management.snapshot.manager.SnapshotManager.validate_pre_setup_snapshot",
+        side_effect=mismatch,
+    ) as validate:
+        result = asyncio.run(job.run(ScenarioPhase.DEPLOY))
+
+    assert result.n_failed == 1
+    assert not result.all_passed
+    validate.assert_called_once_with("lambda-a", "111", ["us-east-1"])
+    mock_account_manager.ensure_region_restriction_scp.assert_not_called()
+    patch_container.run_phase.assert_not_awaited()
+    failure = result.trial_results[0].exception_info
+    assert failure is not None
+    assert failure.exception_type == "SetupValidationError"
+    assert str(mismatch) in failure.exception_message
+
+
+def test_deploy_reports_corrupt_init_snapshot_under_its_own_type(tmp_path, patch_container):
+    """A corrupt baseline surfaces under its own error type, not as a setup-validation failure."""
     sdir = tmp_path / "scenarios"
     sdir.mkdir()
     _make_scenario(sdir, "lambda-a")
@@ -1079,18 +1101,14 @@ def test_deploy_fails_if_init_snapshot_invalid(tmp_path, patch_container, reason
 
     with patch(
         "aws_bench.resource_management.snapshot.manager.SnapshotManager.validate_pre_setup_snapshot",
-        side_effect=ValueError(reason),
-    ) as validate:
+        side_effect=json.JSONDecodeError("corrupt baseline", "{", 0),
+    ):
         result = asyncio.run(job.run(ScenarioPhase.DEPLOY))
 
     assert result.n_failed == 1
-    assert not result.all_passed
-    validate.assert_called_once_with("lambda-a", "111", ["us-east-1"])
-    patch_container.run_phase.assert_not_awaited()
     failure = result.trial_results[0].exception_info
     assert failure is not None
-    assert failure.exception_type == "SetupValidationError"
-    assert reason in failure.exception_message
+    assert failure.exception_type == "JSONDecodeError"
 
 
 def test_deploy_succeeds_if_init_snapshot_valid(tmp_path, patch_container):

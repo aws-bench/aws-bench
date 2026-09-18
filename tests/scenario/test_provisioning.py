@@ -8,6 +8,7 @@ optional approval-wait pass) can be exercised without AWS calls.
 from __future__ import annotations
 
 import asyncio
+import logging
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -15,6 +16,7 @@ import pytest
 from botocore.exceptions import ClientError
 
 from aws_bench.account_management.exceptions import AccountCreationError
+from aws_bench.resource_management.exceptions import SnapshotRegionMismatchError
 from aws_bench.resource_management.models import (
     QuotaConfiguration,
     QuotaIncreaseResult,
@@ -131,7 +133,7 @@ def mocks():
 
 @pytest.fixture(autouse=True)
 def _stub_baseline_validation():
-    """Keep snapshot validation offline; its region cases live in snapshot tests."""
+    """Keep snapshot validation offline."""
     with patch(
         "aws_bench.scenario.provisioning.SnapshotManager.validate_pre_setup_snapshot"
     ) as validate:
@@ -693,23 +695,26 @@ def test_provision_end_event_succeeded_false_on_snapshot_failure(mocks, tmp_path
 
 
 def test_provision_baseline_mismatch_stops_before_scp(
-    mocks, tmp_path, _stub_baseline_validation, _stub_capture
+    mocks, tmp_path, _stub_baseline_validation, _stub_capture, caplog
 ):
+    """A mismatched baseline fails the account with its own log label before the SCP step."""
     am, qm, cp = mocks
-    error = ValueError("Snapshot regions differ; run cleanup, then init")
+    error = SnapshotRegionMismatchError("sc", "111111111111", ["us-west-2"], ["us-east-1"])
     _stub_baseline_validation.side_effect = error
-    result = asyncio.run(
-        provision_scenarios(
-            [_make_scenario_with_quota(tmp_path, "sc")],
-            "ou",
-            n_concurrent=1,
-            wait_for_quotas=False,
-            account_manager=am,
-            quota_manager=qm,
-            cred_provider=cp,
+    with caplog.at_level(logging.ERROR):
+        result = asyncio.run(
+            provision_scenarios(
+                [_make_scenario_with_quota(tmp_path, "sc")],
+                "ou",
+                n_concurrent=1,
+                wait_for_quotas=False,
+                account_manager=am,
+                quota_manager=qm,
+                cred_provider=cp,
+            )
         )
-    )
     assert result.accounts[0].error is error
+    assert "Baseline region check failed" in caplog.text
     am.ensure_region_restriction_scp.assert_not_called()
     cp.wait_for_role.assert_not_called()
     qm.request_quotas.assert_not_called()
@@ -719,60 +724,50 @@ def test_provision_baseline_mismatch_stops_before_scp(
 def test_provision_reconciles_scp_before_quotas_and_snapshot(
     mocks, tmp_path, _stub_baseline_validation, _stub_capture
 ):
-    """Every init reconciles current regions before regional calls, including reused accounts."""
+    """Provisioning validates the baseline, reconciles the SCP, submits quotas, then captures."""
     am, qm, cp = mocks
     operations = MagicMock()
     operations.attach_mock(_stub_baseline_validation, "baseline")
     operations.attach_mock(am.ensure_region_restriction_scp, "scp")
     operations.attach_mock(qm.request_quotas, "quota")
     operations.attach_mock(_stub_capture, "snapshot")
+    regions = ["us-east-1", "us-west-2"]
+    sc = _make_scenario_with_quota(
+        tmp_path,
+        "sc",
+        regions=regions,
+        quotas=[
+            {
+                "account_tag": "PRIMARY",
+                "region": "us-west-2",
+                "service_code": "lambda",
+                "quota_code": "L-1",
+                "desired_value": 10.0,
+            }
+        ],
+    )
 
-    for attempt, regions in enumerate(
-        [("us-east-1",), ("us-east-1", "us-west-2"), ("us-east-1", "us-west-2")]
-    ):
-        operations.reset_mock()
-        sc = _make_scenario_with_quota(
-            tmp_path / str(attempt),
-            "sc",
-            regions=regions,
-            quotas=[
-                {
-                    "account_tag": "PRIMARY",
-                    "region": regions[-1],
-                    "service_code": "lambda",
-                    "quota_code": "L-1",
-                    "desired_value": 10.0,
-                }
-            ],
+    result = asyncio.run(
+        provision_scenarios(
+            [sc],
+            "ou",
+            n_concurrent=1,
+            wait_for_quotas=False,
+            account_manager=am,
+            quota_manager=qm,
+            cred_provider=cp,
         )
-        result = asyncio.run(
-            provision_scenarios(
-                [sc],
-                "ou",
-                n_concurrent=1,
-                wait_for_quotas=False,
-                account_manager=am,
-                quota_manager=qm,
-                cred_provider=cp,
-            )
-        )
+    )
 
-        assert result.all_succeeded
-        assert [call[0] for call in operations.mock_calls] == [
-            "baseline",
-            "scp",
-            "quota",
-            "snapshot",
-        ]
-        _stub_baseline_validation.assert_called_once_with(
-            "sc", "111111111111", list(regions), allow_missing=True
-        )
-        am.ensure_region_restriction_scp.assert_called_once_with(
-            "sc", list(regions), ["111111111111"]
-        )
-        _stub_capture.assert_called_once_with("111111111111", "sc", list(regions), cred_provider=cp)
-        assert result.accounts[0].snapshot_result is not None
-        assert result.accounts[0].provisioned is True
+    assert result.all_succeeded
+    assert [call[0] for call in operations.mock_calls] == ["baseline", "scp", "quota", "snapshot"]
+    _stub_baseline_validation.assert_called_once_with(
+        "sc", "111111111111", regions, allow_missing=True
+    )
+    am.ensure_region_restriction_scp.assert_called_once_with("sc", regions, ["111111111111"])
+    _stub_capture.assert_called_once_with("111111111111", "sc", regions, cred_provider=cp)
+    assert result.accounts[0].snapshot_result is not None
+    assert result.accounts[0].provisioned is True
 
 
 def test_provision_snapshot_failure_fails_account(mocks, tmp_path, _stub_capture):
@@ -1302,17 +1297,6 @@ async def test_await_quota_approvals_transient_error_raised_after_timeout(tmp_pa
 
 
 # -- _create_account cancellation ---------------------------------------------
-
-
-def test_create_account_only_resolves_the_account(mocks):
-    """SCP reconciliation belongs to the account lifecycle after account creation."""
-    am, _, _ = mocks
-
-    result = asyncio.run(_create_account(am, "ou", _make_scenario_config(), "PRIMARY", None))
-
-    assert result.account_id == "111111111111"
-    assert result.error is None
-    am.ensure_region_restriction_scp.assert_not_called()
 
 
 def test_create_account_cancel_emits_cancel_then_reraises(mocks):

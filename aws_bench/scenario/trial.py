@@ -24,6 +24,10 @@ from aws_bench.account_management.constants import ORG_ACCESS_ROLE
 from aws_bench.account_management.manager import AccountManager
 from aws_bench.exceptions import AccountContaminatedError, OperationCancelled
 from aws_bench.logging.logger import file_logging, get_logger
+from aws_bench.resource_management.exceptions import (
+    SnapshotNotFoundError,
+    SnapshotRegionMismatchError,
+)
 from aws_bench.resource_management.export_collector import collect_account_exports
 from aws_bench.resource_management.manager import ResourceManager
 from aws_bench.resource_management.reset.models import ResetResult
@@ -347,11 +351,18 @@ class ScenarioTrial:
         if not self._container.is_started:
             await self._build_and_start()
 
-        # Require init's baseline before deploy.sh can create resources.
         if phase == ScenarioPhase.DEPLOY:
             if check_contamination:
                 await self._raise_if_contaminated()
             await self._validate_init_snapshot()
+            # Runs after the baseline check so a mismatched manifest fails before it can
+            # change the policy.
+            await asyncio.to_thread(
+                self._account_manager.ensure_region_restriction_scp,
+                self._scenario.name,
+                self._scenario.manifest.scenario.regions,
+                list(self._config.account_mapping.values()),
+            )
             await self._clean_stale_changesets()
             await self._delete_terminal_stacks()
 
@@ -580,7 +591,7 @@ class ScenarioTrial:
             )
 
     async def _validate_init_snapshot(self) -> None:
-        """Require an init baseline covering the scenario's regions before deployment."""
+        """Require each account's init baseline to record exactly the scenario's regions."""
         mgr = SnapshotManager()
         try:
             for account_id in self._config.account_mapping.values():
@@ -590,7 +601,7 @@ class ScenarioTrial:
                     account_id,
                     self._scenario.manifest.scenario.regions,
                 )
-        except ValueError as exc:
+        except (SnapshotNotFoundError, SnapshotRegionMismatchError) as exc:
             raise SetupValidationError(str(exc)) from exc
 
     async def _clean_stale_changesets(self) -> None:

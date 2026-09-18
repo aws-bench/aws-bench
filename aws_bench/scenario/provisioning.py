@@ -663,10 +663,14 @@ async def _provision_account_lifecycle(
     async def emit(event: ProvisionEvent, **kw) -> None:
         await _emit(on_event, event, scenario_name=name, account_tag=account_tag, **kw)
 
+    def fail(step: str, exc: Exception) -> ProvisionedAccount:
+        logger.error("%s failed for %s/%s in %s: %s", step, name, account_tag, account_id, exc)
+        result.error = exc
+        return result
+
     try:
+        # Both run before the quota and snapshot steps, which act inside the declared regions.
         try:
-            # Check baseline regions and reconcile a reused account's old SCP
-            # before quota requests or snapshot capture enter the declared regions.
             await asyncio.to_thread(
                 SnapshotManager().validate_pre_setup_snapshot,
                 name,
@@ -674,6 +678,9 @@ async def _provision_account_lifecycle(
                 scenario.scenario.regions,
                 allow_missing=True,
             )
+        except Exception as exc:  # noqa: BLE001
+            return fail("Baseline region check", exc)
+        try:
             await asyncio.to_thread(
                 account_manager.ensure_region_restriction_scp,
                 name,
@@ -681,9 +688,7 @@ async def _provision_account_lifecycle(
                 [account_id],
             )
         except Exception as exc:  # noqa: BLE001
-            logger.error("Region SCP reconciliation failed for %s/%s: %s", name, account_tag, exc)
-            result.error = exc
-            return result
+            return fail("Region SCP reconciliation", exc)
 
         await emit(ProvisionEvent.ROLE_START, account_id=account_id)
         if preexisting:
@@ -695,39 +700,18 @@ async def _provision_account_lifecycle(
                 )
                 await asyncio.to_thread(session.client("sts").get_caller_identity)
             except Exception as exc:  # noqa: BLE001
-                logger.error(
-                    "Runner role %s is unavailable in %s: %s",
-                    account_manager.runner_role,
-                    account_id,
-                    exc,
-                )
-                result.error = exc
-                return result
+                return fail(f"Runner role {account_manager.runner_role} probe", exc)
         else:
             try:
                 await asyncio.to_thread(cred_provider.wait_for_role, account_id, ORG_ACCESS_ROLE)
             except Exception as exc:  # noqa: BLE001
-                logger.error(
-                    "Role %s never became assumable in %s: %s",
-                    ORG_ACCESS_ROLE,
-                    account_id,
-                    exc,
-                )
-                result.error = exc
-                return result
+                return fail(f"Role {ORG_ACCESS_ROLE} wait", exc)
 
         try:
             role_operation = _validate_cfn_ops_role if preexisting else _ensure_cfn_ops_role
             await asyncio.to_thread(role_operation, cred_provider, account_id)
         except Exception as exc:  # noqa: BLE001
-            logger.error(
-                "CFN ops role %s failed in %s: %s",
-                "validation" if preexisting else "creation",
-                account_id,
-                exc,
-            )
-            result.error = exc
-            return result
+            return fail(f"CFN ops role {'validation' if preexisting else 'creation'}", exc)
 
         await emit(ProvisionEvent.QUOTAS_START, account_id=account_id)
         for region, batch in _group_quotas_for_tag(scenario, account_tag).items():
