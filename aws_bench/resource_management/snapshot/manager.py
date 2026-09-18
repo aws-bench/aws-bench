@@ -210,6 +210,36 @@ class SnapshotManager:
 
         return snapshot
 
+    def validate_pre_setup_snapshot(
+        self,
+        scenario_name: str,
+        account_id: str,
+        regions: list[str],
+        *,
+        allow_missing: bool = False,
+    ) -> None:
+        """Require a PRE_SETUP baseline with the configured region set.
+
+        Init allows a missing baseline because it will capture one after provisioning.
+        """
+        try:
+            baseline = self.load_snapshot(scenario_name, account_id, SnapshotStage.PRE_SETUP)
+        except SnapshotNotFoundError as exc:
+            if allow_missing:
+                return
+            raise ValueError(
+                f"Init snapshot (PRE_SETUP) missing for account {account_id}. "
+                "Run 'aws-bench env init' first to capture the baseline snapshot."
+            ) from exc
+        if set(baseline.regions) != set(regions):
+            raise ValueError(
+                f"Scenario '{scenario_name}' regions {sorted(regions)} "
+                f"do not match PRE_SETUP snapshot regions {sorted(baseline.regions)} "
+                f"for account {account_id}. "
+                "Run 'aws-bench env cleanup' with the previous scenario regions, "
+                "then rerun 'aws-bench env init' with the new regions."
+            )
+
     def snapshot_exists(
         self, env_name: str, account_id: str, stage: SnapshotStage = SnapshotStage.POST_SETUP
     ) -> bool:
