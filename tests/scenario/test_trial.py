@@ -126,6 +126,10 @@ def mock_resource_manager():
             "aws_bench.resource_management.snapshot.manager.SnapshotManager.snapshot_exists",
             return_value=True,
         ),
+        patch(
+            "aws_bench.resource_management.snapshot.manager.SnapshotManager.validate_pre_setup_snapshot",
+            return_value=None,
+        ),
     ):
         yield
 
@@ -199,7 +203,7 @@ def test_run_creates_trial_dir(tmp_path, fake_container, fake_creds):
 
 
 def test_reset_redeploy_starts_container_when_reset_had_no_script(
-    tmp_path, fake_container, fake_creds
+    tmp_path, fake_container, fake_creds, mock_account_manager
 ):
     """A reset that deletes a stack must start the container before redeploying.
 
@@ -228,6 +232,7 @@ def test_reset_redeploy_starts_container_when_reset_had_no_script(
     # check must not re-raise on the (success=True) needs_redeploy result.
     assert result.success
     assert result.exception_info is None
+    mock_account_manager.ensure_region_restriction_scp.assert_not_called()
 
 
 async def trial_for_reset(tmp_path, fake_container, fake_creds):
@@ -1446,69 +1451,22 @@ def test_run_writes_trial_log(tmp_path, fake_container, fake_creds):
     assert trial.paths.log_path.stat().st_size > 0
 
 
-# -- region-restriction SCP (applied before deploy.sh) -------------------
+# -- region-restriction SCP ownership (env init only) -------------------
 
 
-def test_deploy_applies_region_restriction_scp(
-    tmp_path, fake_container, fake_creds, mock_account_manager
+@pytest.mark.parametrize("phase", list(ScenarioPhase))
+def test_phase_scripts_do_not_reconcile_region_scp(
+    tmp_path, fake_container, fake_creds, mock_account_manager, phase
 ):
-    """Deploy locks the scenario's accounts to its declared regions.
-
-    Applied for exactly the accounts this trial uses, with the scenario's
-    declared regions.
-    """
-    trial = _build_trial(tmp_path, fake_container, fake_creds)
-
-    result = asyncio.run(trial.run(ScenarioPhase.DEPLOY))
-
-    assert result.success
-    mock_account_manager.ensure_region_restriction_scp.assert_called_once_with(
-        "sc", ["us-east-1"], ["111111111111"]
+    """Phase scripts use the policy established by init without changing it."""
+    mock_account_manager.ensure_region_restriction_scp.side_effect = RuntimeError(
+        "SCP reconciliation belongs to env init"
     )
-
-
-def test_region_restriction_scp_applied_before_deploy_script(
-    tmp_path, fake_container, fake_creds, mock_account_manager
-):
-    """The SCP is applied before deploy.sh runs, so a failing script still gets it.
-
-    The guardrail goes on first, so a non-zero script exit afterward neither
-    undoes nor skips the SCP — out-of-region actions were already denied.
-    """
-    fake_container.run_phase = AsyncMock(return_value=ExecResult(exit_code=7, stdout="boom\n"))
     trial = _build_trial(tmp_path, fake_container, fake_creds)
 
-    result = asyncio.run(trial.run(ScenarioPhase.DEPLOY))
+    asyncio.run(trial._run_phase_in_container(phase))
 
-    assert not result.success
-    mock_account_manager.ensure_region_restriction_scp.assert_called_once_with(
-        "sc", ["us-east-1"], ["111111111111"]
-    )
-
-
-def test_scp_failure_aborts_deploy_before_script(
-    tmp_path, fake_container, fake_creds, mock_account_manager
-):
-    """Fail-closed: if the guardrail can't be applied, deploy.sh never runs."""
-    mock_account_manager.ensure_region_restriction_scp.side_effect = RuntimeError("scp boom")
-    trial = _build_trial(tmp_path, fake_container, fake_creds)
-
-    result = asyncio.run(trial.run(ScenarioPhase.DEPLOY))
-
-    assert not result.success
-    fake_container.run_phase.assert_not_called()
-    assert result.exception_info is not None
-    assert "scp boom" in result.exception_info.exception_message
-
-
-def test_non_deploy_phase_skips_region_restriction_scp(
-    tmp_path, fake_container, fake_creds, mock_account_manager
-):
-    """Region restriction is a deploy-time action; recovery phases never apply it."""
-    trial = _build_trial(tmp_path, fake_container, fake_creds)
-
-    asyncio.run(trial.run(ScenarioPhase.VERIFY))
-
+    fake_container.run_phase.assert_awaited_once()
     mock_account_manager.ensure_region_restriction_scp.assert_not_called()
 
 

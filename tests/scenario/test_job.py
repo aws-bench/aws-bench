@@ -66,6 +66,10 @@ def mock_resource_manager():
             "aws_bench.resource_management.snapshot.manager.SnapshotManager.snapshot_exists",
             return_value=True,
         ),
+        patch(
+            "aws_bench.resource_management.snapshot.manager.SnapshotManager.validate_pre_setup_snapshot",
+            return_value=None,
+        ),
     ):
         yield
 
@@ -162,15 +166,7 @@ def patch_container():
 
 @pytest.fixture(autouse=True)
 def mock_account_manager():
-    """Stub AccountManager so DEPLOY's region-restriction SCP never hits AWS.
-
-    ScenarioTrial constructs its own AccountManager() to apply the
-    region-restriction SCP before deploy.sh runs; without this stub the step
-    issues real Organizations AttachPolicy calls and fails on the fake account
-    ids these tests use. Default the contamination gate to clean so DEPLOY is
-    not spuriously blocked (get_contaminated_accounts otherwise returns a truthy
-    MagicMock); async tag helpers are AsyncMocks so reset/cleanup awaits resolve.
-    """
+    """Stub account contamination reads and asynchronous tag updates."""
     with patch("aws_bench.scenario.trial.AccountManager") as mock_cls:
         instance = mock_cls.return_value
         instance.get_contaminated_accounts.return_value = []
@@ -1062,8 +1058,16 @@ def test_create_passes_when_all_quotas_already_met(tmp_path):
 # -- init snapshot validation -------------------------------------------------
 
 
-def test_deploy_fails_if_init_snapshot_missing(tmp_path, patch_container):
-    """Setup (DEPLOY) should fail if PRE_SETUP snapshot doesn't exist."""
+@pytest.mark.parametrize(
+    "reason",
+    [
+        "Init snapshot missing. Run 'aws-bench env init' first.",
+        "Snapshot regions differ. Run cleanup, then 'aws-bench env init'.",
+    ],
+    ids=["missing", "regions"],
+)
+def test_deploy_fails_if_init_snapshot_invalid(tmp_path, patch_container, reason):
+    """Setup refuses missing or mismatched baselines before the deploy script."""
     sdir = tmp_path / "scenarios"
     sdir.mkdir()
     _make_scenario(sdir, "lambda-a")
@@ -1073,20 +1077,24 @@ def test_deploy_fails_if_init_snapshot_missing(tmp_path, patch_container):
 
     job = asyncio.run(ScenarioJob.create(config, _fake_creds(), account_manager=am))
 
-    # Override the snapshot_exists mock to return False
     with patch(
-        "aws_bench.resource_management.snapshot.manager.SnapshotManager.snapshot_exists",
-        return_value=False,
-    ):
+        "aws_bench.resource_management.snapshot.manager.SnapshotManager.validate_pre_setup_snapshot",
+        side_effect=ValueError(reason),
+    ) as validate:
         result = asyncio.run(job.run(ScenarioPhase.DEPLOY))
 
-    # Should fail due to missing init snapshot
     assert result.n_failed == 1
     assert not result.all_passed
+    validate.assert_called_once_with("lambda-a", "111", ["us-east-1"])
+    patch_container.run_phase.assert_not_awaited()
+    failure = result.trial_results[0].exception_info
+    assert failure is not None
+    assert failure.exception_type == "SetupValidationError"
+    assert reason in failure.exception_message
 
 
-def test_deploy_succeeds_if_init_snapshot_exists(tmp_path, patch_container):
-    """Setup (DEPLOY) should proceed if PRE_SETUP snapshot exists."""
+def test_deploy_succeeds_if_init_snapshot_valid(tmp_path, patch_container):
+    """Setup proceeds if the shared PRE_SETUP validation succeeds."""
     sdir = tmp_path / "scenarios"
     sdir.mkdir()
     _make_scenario(sdir, "lambda-a")
@@ -1097,7 +1105,6 @@ def test_deploy_succeeds_if_init_snapshot_exists(tmp_path, patch_container):
     job = asyncio.run(ScenarioJob.create(config, _fake_creds(), account_manager=am))
     result = asyncio.run(job.run(ScenarioPhase.DEPLOY))
 
-    # Should succeed (autouse fixture mocks snapshot_exists=True)
     assert result.n_succeeded == 1
     assert result.all_passed
 
