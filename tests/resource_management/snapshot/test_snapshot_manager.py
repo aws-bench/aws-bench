@@ -226,9 +226,14 @@ def test_validate_pre_setup_snapshot_accepts_equal_sets(sample_snapshot, stored_
     load.assert_called_once_with("sc", sample_snapshot.account_id, SnapshotStage.PRE_SETUP)
 
 
-def test_validate_pre_setup_snapshot_rejects_changed_regions(sample_snapshot):
+@pytest.mark.parametrize(
+    "stored_regions",
+    [["us-east-1"], ["us-west-2", "us-east-1", "eu-west-1"], ["eu-west-1", "us-east-1"]],
+    ids=["added", "removed", "swapped"],
+)
+def test_validate_pre_setup_snapshot_rejects_changed_regions(sample_snapshot, stored_regions):
     manager = SnapshotManager()
-    sample_snapshot.regions = ["eu-west-1", "us-east-1"]
+    sample_snapshot.regions = stored_regions
     with patch.object(manager, "load_snapshot", return_value=sample_snapshot):
         with pytest.raises(SnapshotRegionMismatchError) as exc_info:
             manager.validate_pre_setup_snapshot(
@@ -237,7 +242,7 @@ def test_validate_pre_setup_snapshot_rejects_changed_regions(sample_snapshot):
 
     message = str(exc_info.value)
     assert "['us-east-1', 'us-west-2']" in message
-    assert "['eu-west-1', 'us-east-1']" in message
+    assert str(sorted(stored_regions)) in message
     assert "Restore the previous regions in scenario.toml" in message
 
 
