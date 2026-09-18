@@ -11,7 +11,11 @@ import tenacity
 from botocore.exceptions import ClientError
 from moto import mock_aws
 
-from aws_bench.resource_management.exceptions import DriftDetectionError, SnapshotNotFoundError
+from aws_bench.resource_management.exceptions import (
+    DriftDetectionError,
+    SnapshotNotFoundError,
+    SnapshotRegionMismatchError,
+)
 from aws_bench.resource_management.snapshot.manager import SnapshotManager
 from aws_bench.resource_management.snapshot.models import (
     DriftBaseline,
@@ -208,6 +212,49 @@ def test_load_snapshot_corrupted_json(temp_snapshot_dir, sample_snapshot):
     # Loading should raise JSONDecodeError, not SnapshotNotFoundError
     with pytest.raises(json.JSONDecodeError):
         manager.load_snapshot("test-env", "123456789012")
+
+
+@pytest.mark.parametrize("stored_regions", [["us-east-1", "us-west-2"], ["us-west-2", "us-east-1"]])
+def test_validate_pre_setup_snapshot_accepts_equal_sets(sample_snapshot, stored_regions):
+    manager = SnapshotManager()
+    sample_snapshot.regions = stored_regions
+    with patch.object(manager, "load_snapshot", return_value=sample_snapshot) as load:
+        manager.validate_pre_setup_snapshot(
+            "sc", sample_snapshot.account_id, ["us-east-1", "us-west-2"]
+        )
+
+    load.assert_called_once_with("sc", sample_snapshot.account_id, SnapshotStage.PRE_SETUP)
+
+
+@pytest.mark.parametrize(
+    "stored_regions",
+    [["us-east-1"], ["us-west-2", "us-east-1", "eu-west-1"], ["eu-west-1", "us-east-1"]],
+    ids=["added", "removed", "swapped"],
+)
+def test_validate_pre_setup_snapshot_rejects_changed_regions(sample_snapshot, stored_regions):
+    manager = SnapshotManager()
+    sample_snapshot.regions = stored_regions
+    with patch.object(manager, "load_snapshot", return_value=sample_snapshot):
+        with pytest.raises(SnapshotRegionMismatchError) as exc_info:
+            manager.validate_pre_setup_snapshot(
+                "sc", sample_snapshot.account_id, ["us-west-2", "us-east-1"]
+            )
+
+    message = str(exc_info.value)
+    assert "['us-east-1', 'us-west-2']" in message
+    assert str(sorted(stored_regions)) in message
+    assert "Restore the previous regions in scenario.toml" in message
+
+
+def test_validate_pre_setup_snapshot_missing_baseline(sample_snapshot):
+    manager = SnapshotManager()
+    missing = SnapshotNotFoundError("sc", sample_snapshot.account_id, SnapshotStage.PRE_SETUP)
+    with patch.object(manager, "load_snapshot", side_effect=missing):
+        manager.validate_pre_setup_snapshot(
+            "sc", sample_snapshot.account_id, ["us-east-1"], allow_missing=True
+        )
+        with pytest.raises(SnapshotNotFoundError):
+            manager.validate_pre_setup_snapshot("sc", sample_snapshot.account_id, ["us-east-1"])
 
 
 @mock_aws

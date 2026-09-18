@@ -24,6 +24,10 @@ from aws_bench.account_management.constants import ORG_ACCESS_ROLE
 from aws_bench.account_management.manager import AccountManager
 from aws_bench.exceptions import AccountContaminatedError, OperationCancelled
 from aws_bench.logging.logger import file_logging, get_logger
+from aws_bench.resource_management.exceptions import (
+    SnapshotNotFoundError,
+    SnapshotRegionMismatchError,
+)
 from aws_bench.resource_management.export_collector import collect_account_exports
 from aws_bench.resource_management.manager import ResourceManager
 from aws_bench.resource_management.reset.models import ResetResult
@@ -347,15 +351,18 @@ class ScenarioTrial:
         if not self._container.is_started:
             await self._build_and_start()
 
-        # Lock the account to its declared regions BEFORE deploy.sh can create
-        # anything: an out-of-region action is denied at the source rather than
-        # discovered (and orphaned) by the region-scoped snapshot/verify/cleanup
-        # afterward. Fail-closed — if the guardrail can't be applied, deploy never runs.
         if phase == ScenarioPhase.DEPLOY:
             if check_contamination:
                 await self._raise_if_contaminated()
-            await self._validate_init_snapshot_exists()
-            await self._apply_region_restriction_scp()
+            await self._validate_init_snapshot()
+            # Runs after the baseline check so a mismatched manifest fails before it can
+            # change the policy.
+            await asyncio.to_thread(
+                self._account_manager.ensure_region_restriction_scp,
+                self._scenario.name,
+                self._scenario.manifest.scenario.regions,
+                list(self._config.account_mapping.values()),
+            )
             await self._clean_stale_changesets()
             await self._delete_terminal_stacks()
 
@@ -583,50 +590,19 @@ class ScenarioTrial:
                 ],
             )
 
-    async def _validate_init_snapshot_exists(self) -> None:
-        """Validate that the PRE_SETUP (init) snapshot exists for all accounts.
-
-        The init snapshot is the pristine account baseline captured by ``env init``.
-        Setup depends on it: without it, ``env cleanup`` cannot distinguish account
-        defaults from deployed infrastructure, leading to incorrect cleanup behavior.
-        """
+    async def _validate_init_snapshot(self) -> None:
+        """Require each account's init baseline to record exactly the scenario's regions."""
         mgr = SnapshotManager()
-        missing: list[str] = []
-        for account_id in self._config.account_mapping.values():
-            if not mgr.snapshot_exists(self._scenario.name, account_id, SnapshotStage.PRE_SETUP):
-                missing.append(account_id)
-
-        if missing:
-            raise SetupValidationError(
-                f"Init snapshot (PRE_SETUP) missing for account(s): {', '.join(missing)}. "
-                f"Run 'aws-bench env init' first to capture the baseline snapshot."
-            )
-
-    async def _apply_region_restriction_scp(self) -> None:
-        """Lock this scenario's accounts to its declared regions before deploy.
-
-        Applied before deploy.sh runs so an out-of-region action is denied at
-        the source rather than discovered (and orphaned) by the region-scoped
-        snapshot/verify/cleanup afterward. Scoped to the accounts this trial
-        uses, so a sibling scenario's failure never blocks a healthy scenario's
-        restriction. The underlying Organizations calls are blocking and
-        idempotent (reuse the policy by name, update content when regions
-        change, skip already-attached accounts), so they run in a worker thread.
-        """
-        regions = self._scenario.manifest.scenario.regions
-        account_ids = list(self._config.account_mapping.values())
-        if not account_ids or not regions:
-            logger.debug(
-                "No accounts or regions for %s; skipping region-restriction SCP",
-                self._scenario.name,
-            )
-            return
-        await asyncio.to_thread(
-            AccountManager().ensure_region_restriction_scp,
-            self._scenario.name,
-            regions,
-            account_ids,
-        )
+        try:
+            for account_id in self._config.account_mapping.values():
+                await asyncio.to_thread(
+                    mgr.validate_pre_setup_snapshot,
+                    self._scenario.name,
+                    account_id,
+                    self._scenario.manifest.scenario.regions,
+                )
+        except (SnapshotNotFoundError, SnapshotRegionMismatchError) as exc:
+            raise SetupValidationError(str(exc)) from exc
 
     async def _clean_stale_changesets(self) -> None:
         """Delete stale CDK changesets and REVIEW_IN_PROGRESS stacks before deploy.
