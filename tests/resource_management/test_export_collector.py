@@ -135,6 +135,46 @@ class TestCollectAccountExports:
         # Failure carries the assume-role marker.
         assert "<assume-role>" in str(exc_info.value)
 
+    def test_aggregates_snapshot_failure_and_continues_other_accounts(self, mocker):
+        from botocore.credentials import Credentials, DeferredRefreshableCredentials
+        from botocore.exceptions import ClientError
+
+        error = ClientError({"Error": {"Code": "AccessDenied", "Message": "denied"}}, "AssumeRole")
+        refresh = MagicMock(side_effect=error)
+        failed_session = MagicMock()
+        failed_session.get_credentials.return_value = DeferredRefreshableCredentials(
+            refresh, "test"
+        )
+        healthy_session = MagicMock()
+        healthy_session.get_credentials.return_value = Credentials("HEALTHY_KEY", "secret", "token")
+        provider = mocker.patch(
+            "aws_bench.resource_management.export_collector.CredentialProvider"
+        ).get.return_value
+        provider.get_session_for_account.side_effect = [failed_session, healthy_session]
+        collect = mocker.patch(
+            "aws_bench.resource_management.export_collector._collect_one", return_value={}
+        )
+
+        with pytest.raises(ExportCollectionError) as exc_info:
+            collect_account_exports(
+                targets={"111122223333": ["us-east-1"], "999988887777": ["us-east-1"]}
+            )
+
+        assert exc_info.value.failures == [("111122223333", "<assume-role>", str(error))]
+        assert [call.args[0] for call in provider.get_session_for_account.call_args_list] == [
+            "111122223333",
+            "999988887777",
+        ]
+        refresh.assert_called_once_with()
+        collect.assert_called_once_with(
+            {
+                "AWS_ACCESS_KEY_ID": "HEALTHY_KEY",
+                "AWS_SECRET_ACCESS_KEY": "secret",
+                "AWS_SESSION_TOKEN": "token",
+            },
+            "us-east-1",
+        )
+
     def test_raises_when_pair_fetch_fails(self, mocker):
         from botocore.exceptions import ClientError
 
