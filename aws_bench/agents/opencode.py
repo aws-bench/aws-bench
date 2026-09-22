@@ -15,11 +15,11 @@ by the base agent), but for ``provider == "amazon-bedrock"`` it forwards only th
    **management/Bedrock account** that issued the bearer token. Forwarding the
    chain therefore authenticates Bedrock against an account with no Bedrock access.
 
-This subclass forwards the bearer token and the Bedrock Region into
-``_extra_env``. ``BaseInstalledAgent._exec`` merges ``_extra_env`` into every
-command it runs (including the final ``opencode run``) *and* lets it override the
-Region Harbor forwards from the host -- so the token reaches opencode and the
-Region is pinned to the token's account.
+This subclass resolves the bearer token and the Bedrock Region and overlays
+them on the environment around harbor's ``run`` with
+``environment.scoped_exec_env``. A scoped overlay outranks the per-command env
+Harbor builds (including the Region it forwards from the host), so the token
+reaches ``opencode run`` and the Region is pinned to the token's account.
 
 The test-account SigV4 chain is deliberately left in place: the agent's own tools
 (bash, aws CLI, MCP AWS servers) need it to act on the resources under test. This
@@ -70,15 +70,15 @@ class OpenCode(_HarborOpenCode):
         """
         return bool((self._get_env("AWS_BEARER_TOKEN_BEDROCK") or "").strip())
 
-    def _inject_bedrock_env(self) -> None:
-        """Forward Bedrock auth env into ``_extra_env`` so every exec inherits it.
+    def _inject_bedrock_env(self) -> dict[str, str]:
+        """Resolve the Bedrock auth env and return it for ``run`` to overlay.
 
-        ``BaseInstalledAgent._exec`` merges ``_extra_env`` over the per-command
-        environment of every command (including the final ``opencode run``), so
-        populating it here is sufficient and also overrides the host
-        ``AWS_REGION`` Harbor forwards for ``amazon-bedrock``. Values already
-        supplied via ``extra_env`` / ``-ae`` take priority and are never
-        overwritten.
+        Harbor's ``Trial`` snapshots ``extra_env`` before ``run()`` and ``_exec``
+        no longer merges it, so values added here reach ``opencode run`` only
+        through the returned dict, which ``run`` applies with
+        ``environment.scoped_exec_env``; that overlay also outranks the host
+        ``AWS_REGION`` Harbor forwards for ``amazon-bedrock``. ``setdefault``
+        keeps values supplied via ``extra_env`` / ``-ae`` authoritative.
 
         Only the bearer token is added for Bedrock auth -- the SigV4 chain Harbor
         forwards is left untouched, because the agent's own tools need those
@@ -89,6 +89,7 @@ class OpenCode(_HarborOpenCode):
         self._extra_env.setdefault("AWS_BEARER_TOKEN_BEDROCK", token)
         # Bedrock requires a Region. Honor extra_env / host AWS_REGION, else default.
         self._extra_env.setdefault("AWS_REGION", self._get_env("AWS_REGION") or _DEFAULT_AWS_REGION)
+        return {k: self._extra_env[k] for k in ("AWS_BEARER_TOKEN_BEDROCK", "AWS_REGION")}
 
     async def run(
         self, instruction: str, environment: BaseEnvironment, context: AgentContext
@@ -100,6 +101,9 @@ class OpenCode(_HarborOpenCode):
         executes ``opencode run``).
         """
         if self._is_bedrock_mode():
-            self._inject_bedrock_env()
+            bedrock_env = self._inject_bedrock_env()
+            with environment.scoped_exec_env(bedrock_env):
+                await super().run(instruction, environment, context)
+            return
         # super().run is decorated with @with_prompt_template; do not re-decorate.
         await super().run(instruction, environment, context)

@@ -12,6 +12,11 @@ from aws_bench.agents.mini_swe_agent import MiniSweAgent
 from aws_bench.agents.opencode import OpenCode
 
 
+def _import_path(agent_cls: type[BaseAgent]) -> str:
+    """The ``module:Class`` string Harbor's factory imports on demand."""
+    return f"{agent_cls.__module__}:{agent_cls.__qualname__}"
+
+
 def _override_builtin(agent_cls: type[BaseAgent]) -> None:
     """Swap a built-in Harbor agent for an aws-bench subclass of the same name.
 
@@ -19,10 +24,7 @@ def _override_builtin(agent_cls: type[BaseAgent]) -> None:
     `-a <name>` then resolves to the subclass.
     """
     name = AgentName(agent_cls.name())
-    AgentFactory._AGENT_MAP[name] = agent_cls
-    AgentFactory._AGENTS = [
-        agent_cls if agent.name() == agent_cls.name() else agent for agent in AgentFactory._AGENTS
-    ]
+    AgentFactory._AGENT_MAP[name] = _import_path(agent_cls)
 
 
 # Route `-a codex` to the Bedrock-capable subclass, `-a claude-code` to the
@@ -43,8 +45,7 @@ if _KIRO_CLI_NAME not in AgentName._value2member_map_:
     AgentName._member_map_["KIRO_CLI"] = _member
     AgentName._value2member_map_[_KIRO_CLI_NAME] = _member
     AgentName._member_names_.append("KIRO_CLI")
-    AgentFactory._AGENTS.append(KiroCli)
-    AgentFactory._AGENT_MAP[AgentName(_KIRO_CLI_NAME)] = KiroCli
+    AgentFactory._AGENT_MAP[AgentName(_KIRO_CLI_NAME)] = _import_path(KiroCli)
 
 # Register aws-bench-baseline-agent so `-a aws-bench-baseline-agent` works.
 _BASELINE_AGENT_NAME = "aws-bench-baseline-agent"
@@ -55,5 +56,4 @@ if _BASELINE_AGENT_NAME not in AgentName._value2member_map_:
     AgentName._member_map_["AWS_BENCH_BASELINE_AGENT"] = _member
     AgentName._value2member_map_[_BASELINE_AGENT_NAME] = _member
     AgentName._member_names_.append("AWS_BENCH_BASELINE_AGENT")
-    AgentFactory._AGENTS.append(StrandsAgent)
-    AgentFactory._AGENT_MAP[AgentName(_BASELINE_AGENT_NAME)] = StrandsAgent
+    AgentFactory._AGENT_MAP[AgentName(_BASELINE_AGENT_NAME)] = _import_path(StrandsAgent)

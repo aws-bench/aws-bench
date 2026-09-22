@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
@@ -30,18 +31,41 @@ def agent(logs_dir: Path) -> OpenCode:
 
 
 def _fresh_environment() -> MagicMock:
+    """A fake environment that applies ``scoped_exec_env`` overlays like harbor's.
+
+    harbor 0.22.0 delivers agent env through ``environment.scoped_exec_env`` and
+    its ``_merge_env`` applies the overlay over each exec's own ``env``
+    (per-exec env < scoped env); the recorded env of a call is that merge.
+    """
     environment = MagicMock()
-    environment.exec = AsyncMock(return_value=MagicMock(return_code=0, stdout="", stderr=""))
     environment.default_user = None
+    overlays: list[dict] = []
+    calls: list[tuple[str, dict]] = []
+
+    async def _exec(**kwargs):
+        merged: dict = dict(kwargs.get("env") or {})
+        for overlay in overlays:
+            merged.update(overlay)
+        calls.append((kwargs.get("command", ""), merged))
+        return MagicMock(return_code=0, stdout="", stderr="")
+
+    @contextlib.contextmanager
+    def _scoped_exec_env(env: dict):
+        overlays.append(dict(env))
+        try:
+            yield
+        finally:
+            overlays.pop()
+
+    environment.exec = AsyncMock(side_effect=_exec)
+    environment.scoped_exec_env = _scoped_exec_env
+    environment._recorded_calls = calls
     return environment
 
 
 def _exec_calls(environment: MagicMock) -> list[tuple[str, dict]]:
-    """Return (command, env) for each environment.exec call."""
-    calls = []
-    for c in environment.exec.call_args_list:
-        calls.append((c.kwargs.get("command", ""), c.kwargs.get("env") or {}))
-    return calls
+    """Return (command, merged env) for each environment.exec call."""
+    return list(environment._recorded_calls)
 
 
 def _opencode_run_env(environment: MagicMock) -> dict:
@@ -78,15 +102,16 @@ def test_factory_resolves_opencode_to_subclass():
     """Importing aws_bench.agents maps `opencode` to this subclass."""
     import aws_bench.agents  # noqa: F401
 
-    assert AgentFactory._AGENT_MAP[AgentName("opencode")] is OpenCode
+    assert AgentFactory.get_agent_class(AgentName("opencode")) is OpenCode
 
 
 def test_subclass_replaces_builtin_in_agents_list():
-    """The subclass replaces Harbor's opencode in the factory list."""
+    """The subclass replaces Harbor's opencode entry in the factory map."""
     import aws_bench.agents  # noqa: F401
 
-    entries = [a for a in AgentFactory._AGENTS if a.name() == "opencode"]
-    assert entries == [OpenCode]
+    assert AgentFactory._AGENT_MAP[AgentName("opencode")] == (
+        f"{OpenCode.__module__}:{OpenCode.__qualname__}"
+    )
 
 
 # -- bedrock-mode detection --

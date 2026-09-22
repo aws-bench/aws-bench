@@ -2,7 +2,8 @@
 
 A ``JobConfig`` carrying a single scenario-aware ``AwsBenchDatasetConfig``, the
 operator's environment name, and the resolved test environment. Rejects an
-authored ``tasks`` / ``datasets`` key or any non-Docker environment.
+authored ``tasks`` / ``datasets`` key, any non-Docker environment, and
+``install_only``.
 """
 
 from typing import Any, override
@@ -73,4 +74,16 @@ class AwsBenchJobConfig(JobConfig):
                 f"aws-bench only supports the Docker environment; got "
                 f"environment.type={self.environment.type}."
             )
+        return self
+
+    @model_validator(mode="after")
+    def _reject_install_only(self) -> "AwsBenchJobConfig":
+        """Reject ``install_only``, which the aws-bench trial cannot honor.
+
+        Harbor's ``JobConfig`` disables the verifier for it while
+        ``AwsBenchJob._build_trial_config`` never forwards the flag, so the agent
+        would run in full unverified.
+        """
+        if self.install_only:
+            raise ValueError("install_only is not supported by aws-bench.")
         return self
