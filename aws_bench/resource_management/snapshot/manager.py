@@ -20,7 +20,11 @@ from aws_bench.account_management.preexisting import active_account_config
 from aws_bench.constants import STATE_DIR
 from aws_bench.logging.logger import get_logger, log_context
 from aws_bench.resource_management.ccapi.models import MAX_WORKERS_ACCOUNT, MAX_WORKERS_HEAVY
-from aws_bench.resource_management.exceptions import DriftDetectionError, SnapshotNotFoundError
+from aws_bench.resource_management.exceptions import (
+    DriftDetectionError,
+    SnapshotNotFoundError,
+    SnapshotRegionMismatchError,
+)
 from aws_bench.resource_management.fastscan.engine import _TRANSIENT_SERVER_CODES
 from aws_bench.resource_management.scanner import make_scanner, scan_method
 from aws_bench.resource_management.snapshot.drift import (
@@ -209,6 +213,24 @@ class SnapshotManager:
         )
 
         return snapshot
+
+    def validate_pre_setup_snapshot(
+        self,
+        scenario_name: str,
+        account_id: str,
+        regions: list[str],
+        *,
+        allow_missing: bool = False,
+    ) -> None:
+        """Require a PRE_SETUP baseline whose region set equals ``regions``."""
+        try:
+            baseline = self.load_snapshot(scenario_name, account_id, SnapshotStage.PRE_SETUP)
+        except SnapshotNotFoundError:
+            if allow_missing:
+                return
+            raise
+        if set(baseline.regions) != set(regions):
+            raise SnapshotRegionMismatchError(scenario_name, account_id, regions, baseline.regions)
 
     def snapshot_exists(
         self, env_name: str, account_id: str, stage: SnapshotStage = SnapshotStage.POST_SETUP
