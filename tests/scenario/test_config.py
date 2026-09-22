@@ -159,6 +159,27 @@ class TestScenarioManifest:
         with pytest.raises(ValidationError):
             ScenarioManifest.model_validate(data)
 
+    @pytest.mark.parametrize(
+        "tag",
+        [
+            "PRIMARY\n",
+            "HOME",
+            "PATH",
+            "MANAGEMENT_ROLE",
+            "AWS_PROFILE",
+            "AWS_DEFAULT_PROFILE",
+            "AWS_EC2_METADATA_DISABLED",
+            "AWS_BEARER_TOKEN_BEDROCK",
+            "AWS_REGION",
+            "AWS_DEFAULT_REGION",
+        ],
+    )
+    def test_account_tag_rejects_trailing_newline_and_control_names(self, tag):
+        data = _minimal_data()
+        data["scenario"]["account_tags"] = [tag]
+        with pytest.raises(ValidationError):
+            ScenarioManifest.model_validate(data)
+
     def test_account_tag_max_length_accepted(self):
         data = _minimal_data()
         data["scenario"]["account_tags"] = ["A" + "B" * 31]
