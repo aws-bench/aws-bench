@@ -938,7 +938,7 @@
   },
   {
     "name": "troubleshooting-multiservice",
-    "version": "0.7.3",
+    "version": "0.7.4",
     "description": "30 stacks across 7 regions exercising EC2/ECS/ECR/Glue/Lambda/CFN/RDS/Redshift/SageMaker. Includes setup scripts that build & push Docker images to ECR, mutate KMS key policies, trigger expected Glue/SFN states, and intentionally drive one CFN stack into UPDATE_FAILED for a troubleshooting task; 21 aws-introspection tasks against troubleshooting-multiservice.",
     "tasks": [
       {
@@ -1040,7 +1040,7 @@
       {
         "name": "glue-job-wrong-deployment-region",
         "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
-        "git_commit_id": "a45996f548e588d1a6c4c2faeeeaac1b177e83fe",
+        "git_commit_id": "820f80d86adcda2d833d155ad98b5ad1c8d3e4c8",
         "path": "tasks/troubleshooting-multiservice/glue-job-wrong-deployment-region"
       },
       {
@@ -1192,7 +1192,7 @@
   },
   {
     "name": "aws-bench-advanced",
-    "version": "0.7.4",
+    "version": "0.7.5",
     "description": "Hard-tier launch dataset (phase 1): 47 introspection tasks across reference-architectures, api-and-observability, and troubleshooting-multiservice.",
     "tasks": [
       {
@@ -1432,7 +1432,7 @@
       {
         "name": "glue-job-wrong-deployment-region",
         "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
-        "git_commit_id": "a45996f548e588d1a6c4c2faeeeaac1b177e83fe",
+        "git_commit_id": "820f80d86adcda2d833d155ad98b5ad1c8d3e4c8",
         "path": "tasks/troubleshooting-multiservice/glue-job-wrong-deployment-region"
       },
       {
@@ -2046,7 +2046,7 @@
   },
   {
     "name": "all",
-    "version": "0.7.5",
+    "version": "0.7.6",
     "description": "Unified dataset spanning 8 scenario(s) (api-and-observability, compute-and-data, databases-and-storage, ec2-multiregion, reference-architectures, serverless-apps, streaming-and-iot, troubleshooting-multiservice): 8 scenarios, 134 tasks.",
     "tasks": [
       {
@@ -2826,7 +2826,7 @@
       {
         "name": "glue-job-wrong-deployment-region",
         "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
-        "git_commit_id": "a45996f548e588d1a6c4c2faeeeaac1b177e83fe",
+        "git_commit_id": "820f80d86adcda2d833d155ad98b5ad1c8d3e4c8",
         "path": "tasks/troubleshooting-multiservice/glue-job-wrong-deployment-region"
       },
       {

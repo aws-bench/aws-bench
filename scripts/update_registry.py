@@ -188,7 +188,8 @@ def build_unified_entry(
 
     ``source_entries`` are the real per-scenario entries; each contributing
     scenario's ``scenarios`` and ``tasks`` are concatenated verbatim (their
-    per-path ``git_commit_id`` pins are preserved). Scenarios named in
+    per-path ``git_commit_id`` pins are preserved) and their
+    ``extra_instruction_paths`` are unioned by path. Scenarios named in
     ``exclude`` — and the unified entry itself — are left out. Scenario/task
     names are unique across scenarios, so co-listing them under one dataset
     satisfies the framework's per-dataset uniqueness checks.
@@ -196,6 +197,11 @@ def build_unified_entry(
     included = [e for e in source_entries if e["name"] not in exclude and e["name"] != name]
     scenarios = [s for e in included for s in e.get("scenarios", [])]
     tasks = [t for e in included for t in e.get("tasks", [])]
+    # Every scenario pins the same shared/steering files; dedupe by path,
+    # keeping first occurrence order.
+    instructions = list(
+        {i["path"]: i for e in included for i in e.get("extra_instruction_paths", [])}.values()
+    )
     included_names = sorted(e["name"] for e in included)
 
     all_names = {e["name"] for e in source_entries}
@@ -214,6 +220,7 @@ def build_unified_entry(
         "description": description,
         "tasks": tasks,
         "scenarios": scenarios,
+        "extra_instruction_paths": instructions,
         "metrics": metrics,
     }
 
