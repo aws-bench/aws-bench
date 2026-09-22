@@ -291,7 +291,15 @@ def refresh_clock(monkeypatch):
         delays.put_nowait(delay)
         await ticks.get()
 
-    monkeypatch.setattr(credentials_module, "asyncio", SimpleNamespace(sleep=sleep))
+    monkeypatch.setattr(
+        credentials_module,
+        "asyncio",
+        SimpleNamespace(
+            sleep=sleep,
+            get_running_loop=asyncio.get_running_loop,
+            timeout_at=asyncio.timeout_at,
+        ),
+    )
     return delays, ticks
 
 
@@ -461,7 +469,8 @@ def _script_exec_responder(rc: int) -> Responder:
     return respond
 
 
-def test_run_phase_uploads_runs_and_reads_back(sc):
+@pytest.mark.asyncio
+async def test_run_phase_uploads_runs_and_reads_back(sc):
     """Bind mount lets the host see stdout.txt directly — no docker cp out."""
     with FakeDocker() as fake:
         fake.when("rm", rc=1, stderr=b"No such container")
@@ -469,10 +478,11 @@ def test_run_phase_uploads_runs_and_reads_back(sc):
         fake.when_callable("exec", responder=_script_exec_responder(0))
         fake.when("cp", "-", rc=0)  # upload-tar still uses cp via stdin
 
-        asyncio.run(sc.start())
+        await sc.start()
         # Simulate the script having written stdout.txt during exec.
         _seed_phase_stdout(sc, "deploy", stdout=b"ok\n")
-        result = asyncio.run(sc.run_phase("deploy", env={"K": "V"}, timeout_sec=30))
+        result = await sc.run_phase("deploy", env={"K": "V"}, timeout_sec=30)
+        await sc.stop(delete=True)
 
     assert result.exit_code == 0
     assert result.stdout == "ok\n"
@@ -481,16 +491,18 @@ def test_run_phase_uploads_runs_and_reads_back(sc):
     assert all("-" in call for call in fake.calls_with_prefix("cp"))
 
 
-def test_run_phase_passes_env_to_script_invocation(sc):
+@pytest.mark.asyncio
+async def test_run_phase_passes_env_to_script_invocation(sc):
     with FakeDocker() as fake:
         fake.when("rm", rc=1, stderr=b"No such container")
         fake.when("run", rc=0)
         fake.when("exec", rc=0)
         fake.when("cp", "-", rc=0)
 
-        asyncio.run(sc.start())
+        await sc.start()
         _seed_phase_stdout(sc, "deploy", stdout=b"")
-        asyncio.run(sc.run_phase("deploy", env={"AWS_X": "1"}, timeout_sec=30))
+        await sc.run_phase("deploy", env={"AWS_X": "1"}, timeout_sec=30)
+        await sc.stop(delete=True)
 
     execs = fake.calls_with_prefix("exec")
     script_runs = [a for a in execs if any("stdout.txt" in seg for seg in a)]
@@ -499,7 +511,8 @@ def test_run_phase_passes_env_to_script_invocation(sc):
     assert "AWS_X=1" in script_runs[-1]
 
 
-def test_run_phase_returns_nonzero_exit_code(sc):
+@pytest.mark.asyncio
+async def test_run_phase_returns_nonzero_exit_code(sc):
     """A non-zero script exit surfaces as ExecResult.exit_code; run_phase does not raise."""
     with FakeDocker() as fake:
         fake.when("rm", rc=1, stderr=b"No such container")
@@ -507,15 +520,17 @@ def test_run_phase_returns_nonzero_exit_code(sc):
         fake.when_callable("exec", responder=_script_exec_responder(7))
         fake.when("cp", "-", rc=0)
 
-        asyncio.run(sc.start())
+        await sc.start()
         _seed_phase_stdout(sc, "deploy", stdout=b"boom\n")
-        result = asyncio.run(sc.run_phase("deploy", env={}, timeout_sec=30))
+        result = await sc.run_phase("deploy", env={}, timeout_sec=30)
+        await sc.stop(delete=True)
 
     assert result.exit_code == 7
     assert result.stdout == "boom\n"
 
 
-def test_run_phase_missing_stdout_returns_empty(sc):
+@pytest.mark.asyncio
+async def test_run_phase_missing_stdout_returns_empty(sc):
     """Absent stdout.txt yields empty stdout rather than crashing.
 
     The exit code comes from the script's docker-exec return code; here the
@@ -527,20 +542,23 @@ def test_run_phase_missing_stdout_returns_empty(sc):
         fake.when_callable("exec", responder=_script_exec_responder(0))
         fake.when("cp", "-", rc=0)
 
-        asyncio.run(sc.start())
-        result = asyncio.run(sc.run_phase("deploy", env={}, timeout_sec=30))
+        await sc.start()
+        result = await sc.run_phase("deploy", env={}, timeout_sec=30)
+        await sc.stop(delete=True)
 
     assert result.exit_code == 0
     assert result.stdout == ""
 
 
-def test_run_phase_missing_phase_dir_raises(sc):
+@pytest.mark.asyncio
+async def test_run_phase_missing_phase_dir_raises(sc):
     with FakeDocker() as fake:
         fake.when("rm", rc=1, stderr=b"No such container")
         fake.when("run", rc=0)
-        asyncio.run(sc.start())
+        await sc.start()
         with pytest.raises(FileNotFoundError, match="Phase directory"):
-            asyncio.run(sc.run_phase("verify", env={}, timeout_sec=10))
+            await sc.run_phase("verify", env={}, timeout_sec=10)
+        await sc.stop(delete=True)
 
 
 def test_run_phase_before_start_raises(sc):
@@ -548,7 +566,8 @@ def test_run_phase_before_start_raises(sc):
         asyncio.run(sc.run_phase("deploy", env={}, timeout_sec=10))
 
 
-def test_run_phase_helper_command_failure_raises(sc):
+@pytest.mark.asyncio
+async def test_run_phase_helper_command_failure_raises(sc):
     """A non-zero exit from mkdir/chmod must surface as a RuntimeError."""
     with FakeDocker() as fake:
         fake.when("rm", rc=1, stderr=b"No such container")
@@ -562,9 +581,10 @@ def test_run_phase_helper_command_failure_raises(sc):
             ),
         )
 
-        asyncio.run(sc.start())
+        await sc.start()
         with pytest.raises(RuntimeError, match="Container setup failed"):
-            asyncio.run(sc.run_phase("deploy", env={}, timeout_sec=10))
+            await sc.run_phase("deploy", env={}, timeout_sec=10)
+        await sc.stop(delete=True)
 
 
 # -- bind mount -----------------------------------------------------------
@@ -622,7 +642,8 @@ def test_start_creates_host_logs_dir_if_missing(sc):
 # -- symlink rejection ----------------------------------------------------
 
 
-def test_upload_dir_rejects_top_level_symlink(sc, tmp_path):
+@pytest.mark.asyncio
+async def test_upload_dir_rejects_top_level_symlink(sc, tmp_path):
     with FakeDocker() as fake:
         fake.when("rm", rc=1, stderr=b"No such container")
         fake.when("run", rc=0)
@@ -633,12 +654,14 @@ def test_upload_dir_rejects_top_level_symlink(sc, tmp_path):
         target.write_text("secret\n")
         (sd / "deploy" / "leak").symlink_to(target)
 
-        asyncio.run(sc.start())
+        await sc.start()
         with pytest.raises(ValueError, match="symlinks are not allowed"):
-            asyncio.run(sc.run_phase("deploy", env={}, timeout_sec=10))
+            await sc.run_phase("deploy", env={}, timeout_sec=10)
+        await sc.stop(delete=True)
 
 
-def test_upload_dir_rejects_nested_symlink(sc):
+@pytest.mark.asyncio
+async def test_upload_dir_rejects_nested_symlink(sc):
     with FakeDocker() as fake:
         fake.when("rm", rc=1, stderr=b"No such container")
         fake.when("run", rc=0)
@@ -649,9 +672,10 @@ def test_upload_dir_rejects_nested_symlink(sc):
         sub.mkdir()
         (sub / "self").symlink_to(sd / "deploy" / "deploy.sh")
 
-        asyncio.run(sc.start())
+        await sc.start()
         with pytest.raises(ValueError, match="symlinks are not allowed"):
-            asyncio.run(sc.run_phase("deploy", env={}, timeout_sec=10))
+            await sc.run_phase("deploy", env={}, timeout_sec=10)
+        await sc.stop(delete=True)
 
 
 # -- stop ----------------------------------------------------------------
@@ -855,7 +879,8 @@ def test_stop_cancels_refresher_and_removes_creds_dir(sc):
 
 
 @pytest.mark.skipif(not hasattr(os, "getuid"), reason="POSIX-only ownership handback")
-def test_run_phase_chowns_logs_to_host_user(sc):
+@pytest.mark.asyncio
+async def test_run_phase_chowns_logs_to_host_user(sc):
     """Phase output in /logs is chowned back to the host user on rootful Docker."""
     with FakeDocker() as fake:
         fake.when("rm", rc=1, stderr=b"No such container")
@@ -864,9 +889,10 @@ def test_run_phase_chowns_logs_to_host_user(sc):
         fake.when("exec", rc=0)
         fake.when("cp", "-", rc=0)
 
-        asyncio.run(sc.start())
+        await sc.start()
         _seed_phase_stdout(sc, "deploy", stdout=b"")
-        asyncio.run(sc.run_phase("deploy", env={}, timeout_sec=30))
+        await sc.run_phase("deploy", env={}, timeout_sec=30)
+        await sc.stop(delete=True)
 
     uid, gid = os.getuid(), os.getgid()
     chowns = [
@@ -878,7 +904,8 @@ def test_run_phase_chowns_logs_to_host_user(sc):
 
 
 @pytest.mark.skipif(not hasattr(os, "getuid"), reason="POSIX-only ownership handback")
-def test_chown_uses_uid_0_under_rootless_docker(sc):
+@pytest.mark.asyncio
+async def test_chown_uses_uid_0_under_rootless_docker(sc):
     """Rootless Docker maps container UID 0 to the host user, so chown targets 0:0."""
     with FakeDocker() as fake:
         fake.when("rm", rc=1, stderr=b"No such container")
@@ -887,9 +914,10 @@ def test_chown_uses_uid_0_under_rootless_docker(sc):
         fake.when("exec", rc=0)
         fake.when("cp", "-", rc=0)
 
-        asyncio.run(sc.start())
+        await sc.start()
         _seed_phase_stdout(sc, "deploy", stdout=b"")
-        asyncio.run(sc.run_phase("deploy", env={}, timeout_sec=30))
+        await sc.run_phase("deploy", env={}, timeout_sec=30)
+        await sc.stop(delete=True)
 
     chowns = [
         a for a in fake.calls_with_prefix("exec") if any("chown -R 0:0 /logs" in seg for seg in a)
@@ -1200,6 +1228,127 @@ async def test_exec_unsets_image_and_override_sources_in_the_actual_shell(sc):
         assert actual["HOME"] == "/home/runner"
         assert overrides == before and dict(os.environ) == host_env
         await sc.stop(delete=True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["raise", "stall"])
+async def test_expired_credentials_abort_phase_and_refuse_later_phases(sc, monkeypatch, failure):
+    monkeypatch.setattr(credentials_module, "CRED_REFRESH_MIN_SLEEP_SEC", 0.005)
+    phase_started = asyncio.Event()
+    phase_cancelled = asyncio.Event()
+    worker_release = threading.Event()
+    minted = 0
+
+    def mint(*args):
+        nonlocal minted
+        minted += 1
+        if minted == 1:
+            return _generation(
+                "OLD", expires_at=datetime.now(timezone.utc) + timedelta(seconds=0.2)
+            )
+        if failure == "raise":
+            raise RuntimeError("synthetic mint failure")
+        assert worker_release.wait(3), "synthetic mint was not released"
+        return _generation("LATE")
+
+    async def execute(args, stdin):
+        if "stdout.txt" in args[-1]:
+            phase_started.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                phase_cancelled.set()
+        return 0, b"", b""
+
+    monkeypatch.setattr(container_module, "mint_credentials", mint)
+    with FakeDocker() as fake:
+        fake.when_callable("exec", responder=execute)
+        await sc.start()
+        phase = asyncio.create_task(sc.run_phase("deploy", env={}, timeout_sec=10))
+        try:
+            await asyncio.wait_for(phase_started.wait(), timeout=1)
+            done, _ = await asyncio.wait({phase}, timeout=1)
+            assert phase in done, "the scenario consumer outlived its credentials"
+            with pytest.raises(CredentialError, match="credential"):
+                await phase
+            assert phase_cancelled.is_set()
+            with pytest.raises(CredentialError, match="credential"):
+                await sc.run_phase("deploy", env={}, timeout_sec=10)
+        finally:
+            phase.cancel()
+            await asyncio.gather(phase, return_exceptions=True)
+            await sc.stop(delete=True)
+            worker_release.set()
+        assert not sc.is_started
+        assert sc._creds_root is None
+
+
+@pytest.mark.asyncio
+async def test_completed_phase_rejects_pending_credential_cancellation(sc, monkeypatch):
+    """A completed phase must not outrun the refresher's expiry cancellation."""
+    import time
+
+    monkeypatch.setattr(credentials_module, "CRED_REFRESH_MIN_SLEEP_SEC", 0.005)
+    attempted = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    minted = False
+    states = []
+    original_wait = asyncio.wait
+
+    def mint(*args):
+        nonlocal minted
+        if not minted:
+            minted = True
+            return _generation(
+                "OLD", expires_at=datetime.now(timezone.utc) + timedelta(seconds=0.2)
+            )
+        loop.call_soon_threadsafe(attempted.set)
+        raise RuntimeError("synthetic mint failure")
+
+    async def execute(args, stdin):
+        if "stdout.txt" in args[-1]:
+            await attempted.wait()
+            # Finish after expiry before the event loop can run its timer callback.
+            time.sleep(0.25)
+        return 0, b"", b""
+
+    async def observe_wait(*args, **kwargs):
+        result = await original_wait(*args, **kwargs)
+        states.append((sc._refresh_task.done(), sc._refresh_task.cancelling()))
+        return result
+
+    monkeypatch.setattr(container_module, "mint_credentials", mint)
+    monkeypatch.setattr(asyncio, "wait", observe_wait)
+    with FakeDocker() as fake:
+        fake.when_callable("exec", responder=execute)
+        await sc.start()
+        try:
+            with pytest.raises(CredentialError, match="credential refresh stopped"):
+                await asyncio.wait_for(sc.run_phase("deploy", env={}, timeout_sec=10), timeout=2)
+            assert states == [(False, 1)]
+        finally:
+            await sc.stop(delete=True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("termination", ["raise", "cancel", "return"])
+async def test_terminated_refresher_refuses_phase(sc, monkeypatch, termination):
+    async def stopped(*args):
+        if termination == "raise":
+            raise CredentialError("synthetic credential failure")
+        if termination == "cancel":
+            raise asyncio.CancelledError
+
+    monkeypatch.setattr(container_module, "refresh_credentials_loop", stopped)
+    with FakeDocker():
+        await sc.start()
+        assert sc._refresh_task is not None
+        await asyncio.gather(sc._refresh_task, return_exceptions=True)
+        try:
+            with pytest.raises(CredentialError, match="credential"):
+                await sc.run_phase("deploy", env={}, timeout_sec=10)
+        finally:
+            await sc.stop(delete=True)
 
 
 @pytest.mark.asyncio

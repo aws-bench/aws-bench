@@ -41,7 +41,7 @@ from tempfile import SpooledTemporaryFile
 
 from aws_bench.account_management.constants import ORG_ACCESS_ROLE
 from aws_bench.constants import DEFAULT_REGION
-from aws_bench.exceptions import OperationCancelled
+from aws_bench.exceptions import CredentialError, OperationCancelled
 from aws_bench.logging.logger import get_logger
 from aws_bench.scenario.config import EnvironmentConfig
 from aws_bench.scenario.events import ScenarioPhase
@@ -684,6 +684,34 @@ done
         env: dict[str, str],
         timeout_sec: float,
     ) -> ExecResult:
+        """Run a phase only while its credential refresher remains active."""
+        self._require_started()
+        refresher = self._refresh_task
+        if refresher is None:
+            raise CredentialError("Scenario credential refresh is not running")
+        task: asyncio.Task[ExecResult] | None = None
+        try:
+            if not refresher.done() and not refresher.cancelling():
+                task = asyncio.create_task(self._run_phase(phase, env=env, timeout_sec=timeout_sec))
+                await asyncio.wait({task, refresher}, return_when=asyncio.FIRST_COMPLETED)
+            if refresher.done() or refresher.cancelling():
+                if refresher.done() and not refresher.cancelled():
+                    refresher.exception()
+                raise CredentialError("Scenario credential refresh stopped; ending the phase")
+            assert task is not None
+            return task.result()
+        finally:
+            if task is not None:
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+
+    async def _run_phase(
+        self,
+        phase: ScenarioPhase,
+        *,
+        env: dict[str, str],
+        timeout_sec: float,
+    ) -> ExecResult:
         """Run one phase script inside the running container.
 
         Steps:
@@ -697,7 +725,6 @@ done
              stdout read from the host side of the bind mount — no
              docker-cp round-trip.
         """
-        self._require_started()
         host_dir = self._paths.phase_dir(phase)
         if not host_dir.is_dir():
             raise FileNotFoundError(f"Phase directory not found: {host_dir}")
