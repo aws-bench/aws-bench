@@ -315,8 +315,8 @@ def test_unified_sources_only_directory_backed_scenarios(ur, datasets, tmp_path)
     assert len(task_names) == len(set(task_names))
     assert "beta" in all_ds["description"]  # noted as excluded
     # Shared steering files are carried over (deduplicated across scenarios).
-    assert all_ds["extra_instruction_paths"] == result["alpha"]["extra_instruction_paths"]
     assert all_ds["extra_instruction_paths"]
+    assert all_ds["extra_instruction_paths"] == result["alpha"]["extra_instruction_paths"]
 
 
 # --------------------------------------------------------------------------- #
