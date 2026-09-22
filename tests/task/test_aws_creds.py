@@ -40,6 +40,15 @@ def test_resolve_env_with_creds_creds_win_on_conflict():
     assert env["AWS_ACCESS_KEY_ID"] == "from-creds"
 
 
+def test_resolve_env_ignores_placeholders_in_discarded_credentials():
+    env = aws_creds.resolve_env_with_creds(
+        raw_env={"AWS_ACCESS_KEY_ID": "{{MissingExport}}"},
+        placeholders={},
+        creds={"AWS_ACCESS_KEY_ID": ""},
+    )
+    assert env == {"AWS_ACCESS_KEY_ID": ""}
+
+
 def test_assume_role_for_script_uses_named_role(mocker):
     cp = mocker.patch.object(aws_creds, "CredentialProvider", autospec=True)
     # assume_role_for_script goes through the CredentialProvider.get() singleton.

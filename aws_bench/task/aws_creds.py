@@ -46,7 +46,9 @@ def resolve_env_with_creds(
     they override any conflicting keys. Used for pre-invoke, post-invoke, and
     verifier env sections.
     """
-    env = {k: substitute_placeholders(v, placeholders) for k, v in raw_env.items()}
+    env = {
+        k: substitute_placeholders(v, placeholders) for k, v in raw_env.items() if k not in creds
+    }
     env.update(creds)
     return env
 
