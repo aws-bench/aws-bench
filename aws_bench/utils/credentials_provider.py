@@ -256,30 +256,56 @@ def credential_refresh_delay(expires_at: datetime) -> float:
     return max(remaining - _CRED_REFRESH_SKEW_SEC, float(CRED_REFRESH_MIN_SLEEP_SEC))
 
 
+def credential_deadline(expires_at: datetime) -> float:
+    """Convert a valid future expiration to the running loop's monotonic clock."""
+    expires_at = _validate_expiry(expires_at)
+    return (
+        asyncio.get_running_loop().time()
+        + (expires_at - datetime.now(timezone.utc)).total_seconds()
+    )
+
+
 async def refresh_credentials_loop(
     expires_at: datetime,
     refresh_once: Callable[[], Awaitable[datetime]],
     log: logging.Logger,
 ) -> None:
-    """Refresh until cancelled, using only the retry delay after a failure.
+    """Refresh until cancelled or the last published credentials expire.
 
     ``refresh_once`` mints off the event loop and returns the new expiration
     only after successful publication. The owner also validates the initial
     expiration after publication, before starting a consumer.
     """
+    loop = asyncio.get_running_loop()
+    deadline = credential_deadline(expires_at)
     delay = credential_refresh_delay(expires_at)
-    while True:
-        await asyncio.sleep(delay)
-        try:
-            delay = credential_refresh_delay(await refresh_once())
-        except Exception as exc:
-            # Exception text can contain credentials or credential-process output.
-            log.warning(
-                "Credential refresh failed (%s); retrying in %ds",
-                type(exc).__name__,
-                _CRED_REFRESH_RETRY_SEC,
-            )
-            delay = _CRED_REFRESH_RETRY_SEC
+    try:
+        async with asyncio.timeout_at(deadline) as guard:
+            while True:
+                await asyncio.sleep(delay)
+                if loop.time() >= deadline:
+                    raise TimeoutError
+                try:
+                    renewed = await refresh_once()
+                    delay = credential_refresh_delay(renewed)
+                except Exception as exc:
+                    # Exception text can contain credentials or credential-process output.
+                    log.warning(
+                        "Credential refresh failed (%s); retrying in %ds",
+                        type(exc).__name__,
+                        _CRED_REFRESH_RETRY_SEC,
+                    )
+                    delay = _CRED_REFRESH_RETRY_SEC
+                else:
+                    # A blocking publication can finish before the timeout callback runs.
+                    if loop.time() >= deadline:
+                        raise TimeoutError
+                    deadline = credential_deadline(renewed)
+                    guard.reschedule(deadline)
+    except TimeoutError:
+        raise CredentialError(
+            "Published AWS credentials expired before refresh completed"
+        ) from None
 
 
 def mint_credentials(

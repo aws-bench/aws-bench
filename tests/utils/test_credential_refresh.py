@@ -8,6 +8,7 @@ import logging
 import shlex
 import shutil
 import subprocess
+import time
 from datetime import datetime, timedelta, timezone
 from threading import Event
 from unittest.mock import AsyncMock, MagicMock
@@ -64,6 +65,105 @@ def test_refresh_delay_rejects_expired_and_too_short_lifetimes(remaining):
 def test_refresh_delay_rejects_missing_invalid_and_naive_expiry(expiry):
     with pytest.raises(CredentialError):
         credential_refresh_delay(expiry)
+
+
+@pytest.mark.asyncio
+async def test_credential_deadline_accepts_less_than_minimum_sleep():
+    loop = asyncio.get_running_loop()
+    before = loop.time()
+    expiry = datetime.now(timezone.utc) + timedelta(seconds=1)
+    deadline = credentials_provider.credential_deadline(expiry)
+    assert before + 0.9 < deadline <= loop.time() + 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "expiry",
+    [None, "2099-01-01T00:00:00Z", datetime(2099, 1, 1), datetime(2000, 1, 1, tzinfo=timezone.utc)],
+)
+async def test_credential_deadline_rejects_invalid_expiry(expiry):
+    with pytest.raises(CredentialError):
+        credentials_provider.credential_deadline(expiry)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["raise", "stall"])
+async def test_refresh_deadline_covers_retries_and_pending_mint(monkeypatch, failure):
+    monkeypatch.setattr(credentials_provider, "CRED_REFRESH_MIN_SLEEP_SEC", 0.005)
+    expiry = datetime.now(timezone.utc) + timedelta(seconds=0.15)
+    attempted = asyncio.Event()
+    cancelled = asyncio.Event()
+
+    async def refresh():
+        attempted.set()
+        if failure == "raise":
+            raise RuntimeError("synthetic transient failure")
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cancelled.set()
+        return expiry
+
+    task = asyncio.create_task(refresh_credentials_loop(expiry, refresh, MagicMock()))
+    try:
+        done, _ = await asyncio.wait({task}, timeout=1)
+        assert task in done, "refresh outlived the published credentials"
+        with pytest.raises(CredentialError, match="expir"):
+            await task
+        assert attempted.is_set()
+        assert cancelled.is_set() == (failure == "stall")
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_refresh_deadline_moves_only_after_success(monkeypatch):
+    monkeypatch.setattr(credentials_provider, "CRED_REFRESH_MIN_SLEEP_SEC", 0.005)
+    monkeypatch.setattr(credentials_provider, "_CRED_REFRESH_RETRY_SEC", 0.02)
+    initial = datetime.now(timezone.utc) + timedelta(seconds=0.2)
+    published = asyncio.Event()
+    renewed = initial + timedelta(seconds=0.3)
+
+    async def refresh():
+        if not published.is_set():
+            published.set()
+            return renewed
+        raise OSError("synthetic publication failure")
+
+    task = asyncio.create_task(refresh_credentials_loop(initial, refresh, MagicMock()))
+    try:
+        await asyncio.wait_for(published.wait(), timeout=1)
+        await asyncio.sleep(max(0, (initial - datetime.now(timezone.utc)).total_seconds()) + 0.02)
+        assert not task.done(), "successful publication did not extend the deadline"
+        done, _ = await asyncio.wait({task}, timeout=1)
+        assert task in done, "failed publication extended the deadline"
+        with pytest.raises(CredentialError, match="expir"):
+            await task
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_late_refresh_cannot_extend_elapsed_deadline(monkeypatch):
+    monkeypatch.setattr(credentials_provider, "CRED_REFRESH_MIN_SLEEP_SEC", 0.005)
+    expiry = datetime.now(timezone.utc) + timedelta(seconds=0.05)
+
+    async def refresh():
+        # Block the loop past expiry so the timeout callback has not run yet.
+        time.sleep(0.08)
+        return datetime.now(timezone.utc) + timedelta(hours=1)
+
+    task = asyncio.create_task(refresh_credentials_loop(expiry, refresh, MagicMock()))
+    try:
+        done, _ = await asyncio.wait({task}, timeout=1)
+        assert task in done, "a late result revived an elapsed credential deadline"
+        with pytest.raises(CredentialError, match="expir"):
+            await task
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
 
 
 @pytest.mark.asyncio
@@ -188,7 +288,9 @@ async def test_refresh_loop_cancellation_during_publication_propagates(monkeypat
         return datetime.now(timezone.utc) + timedelta(hours=1)
 
     log = MagicMock()
-    task = asyncio.create_task(refresh_credentials_loop(datetime.now(timezone.utc), publish, log))
+    task = asyncio.create_task(
+        refresh_credentials_loop(datetime.now(timezone.utc) + timedelta(hours=1), publish, log)
+    )
     await asyncio.wait_for(started.wait(), timeout=5)
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
@@ -259,7 +361,9 @@ async def test_cancelled_mint_cannot_publish_after_cleanup(synthetic_cloud, tmp_
         return expiry
 
     task = asyncio.create_task(
-        refresh_credentials_loop(datetime.now(timezone.utc), publish, MagicMock())
+        refresh_credentials_loop(
+            datetime.now(timezone.utc) + timedelta(hours=1), publish, MagicMock()
+        )
     )
     try:
         assert await asyncio.to_thread(started.wait, 5)
