@@ -20,8 +20,11 @@ from aws_bench.account_management.preexisting import active_account_config
 from aws_bench.constants import STATE_DIR
 from aws_bench.logging.logger import get_logger, log_context
 from aws_bench.resource_management.ccapi.models import MAX_WORKERS_ACCOUNT, MAX_WORKERS_HEAVY
-from aws_bench.resource_management.constants import RESOURCE_MANAGEMENT_SESSION
-from aws_bench.resource_management.exceptions import DriftDetectionError, SnapshotNotFoundError
+from aws_bench.resource_management.exceptions import (
+    DriftDetectionError,
+    SnapshotNotFoundError,
+    SnapshotRegionMismatchError,
+)
 from aws_bench.resource_management.fastscan.engine import _TRANSIENT_SERVER_CODES
 from aws_bench.resource_management.scanner import make_scanner, scan_method
 from aws_bench.resource_management.snapshot.drift import (
@@ -210,6 +213,24 @@ class SnapshotManager:
         )
 
         return snapshot
+
+    def validate_pre_setup_snapshot(
+        self,
+        scenario_name: str,
+        account_id: str,
+        regions: list[str],
+        *,
+        allow_missing: bool = False,
+    ) -> None:
+        """Require a PRE_SETUP baseline whose region set equals ``regions``."""
+        try:
+            baseline = self.load_snapshot(scenario_name, account_id, SnapshotStage.PRE_SETUP)
+        except SnapshotNotFoundError:
+            if allow_missing:
+                return
+            raise
+        if set(baseline.regions) != set(regions):
+            raise SnapshotRegionMismatchError(scenario_name, account_id, regions, baseline.regions)
 
     def snapshot_exists(
         self, env_name: str, account_id: str, stage: SnapshotStage = SnapshotStage.POST_SETUP
@@ -592,6 +613,23 @@ class SnapshotManager:
             snapshot = self.capture_snapshot_multiregion(
                 scan_session, account_id, ctx.scenario_id, ctx.scenario_hash, ctx.regions
             )
+            # Defense-in-depth: never persist a baseline that still contains a resource
+            # a caller flagged as an unresolved orphan (would hide it forever).
+            if ctx.forbidden_identifiers:
+                present = sorted(
+                    ident
+                    for ids in snapshot.resource_ids.values()
+                    for item in ids
+                    if (ident := item.get("Identifier", "")) in ctx.forbidden_identifiers
+                )
+                if present:
+                    msg = (
+                        f"Refused to save {ctx.stage} baseline for "
+                        f"{ctx.scenario_id}/{account_id}: still contains "
+                        f"{len(present)} flagged orphan(s): {', '.join(present[:5])}"
+                    )
+                    logger.error(msg)
+                    return SnapshotResult(account_id=account_id, success=False, error_message=msg)
             if ctx.output_dir is not None:
                 path = self._write_snapshot_file(ctx.output_dir, ctx.scenario_id, snapshot)
                 logger.debug(
@@ -656,7 +694,7 @@ class SnapshotManager:
                 session = cred_provider.get_session_for_account(
                     account_id,
                     ORG_ACCESS_ROLE,
-                    build_session_name(RESOURCE_MANAGEMENT_SESSION, f"snapshot-{ctx.stage}"),
+                    build_session_name("session"),
                 )
                 return self.snapshot_account(session, account_id, ctx)
 

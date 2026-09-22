@@ -8,6 +8,7 @@ from concurrent.futures import as_completed
 from typing import Any
 
 import boto3
+from botocore.exceptions import BotoCoreError, ClientError, WaiterError
 
 from aws_bench.logging.logger import get_logger
 from aws_bench.resource_management.ccapi.manager import CloudControlManager, Resource
@@ -29,14 +30,53 @@ from aws_bench.resource_management.cleanup.models import (
     HandlerResult,
     HandlerStatus,
     StackResource,
+    is_infra_identifier,
     to_ccapi_resources,
 )
-from aws_bench.utils.concurrent import interruptible_executor
+from aws_bench.utils.concurrent import build_client, interruptible_executor
 
 logger = get_logger(__name__)
 
 # Sample size for log messages
 LOG_SAMPLE_SIZE = 3
+
+# Native CloudFormation DeleteStack fallback (see _delete_failed_cfn_stacks).
+_CFN_STACK_TYPE = "AWS::CloudFormation::Stack"
+# Bounded wait for the fallback delete: ~3 minutes (18 attempts * 10s).
+_STACK_DELETE_WAITER_DELAY = 10
+_STACK_DELETE_WAITER_MAX_ATTEMPTS = 18
+# Resource types whose custom deletion must finish before any general prepare
+# handler runs. An EKS-managed Auto Scaling group is prepared by suspending its
+# ReplaceUnhealthy process; if that happens while the owning nodegroup is still
+# being deleted, the nodegroup cannot recycle its instances and its deletion
+# enters DELETE_FAILED. Deleting the nodegroup to terminal completion first
+# removes that dependency before the ASG is ever touched.
+DELETE_BEFORE_PREPARE_TYPES = frozenset({"AWS::EKS::Nodegroup"})
+
+# Failure reason recorded for a resource that was never attempted because a
+# delete-before-prepare barrier resource failed to delete. The barrier fails
+# closed for the whole cleanup wave, so the remainder never reaches
+# prepare/custom/CCAPI.
+_BARRIER_BLOCKED_MESSAGE = (
+    "Not attempted: prerequisite delete-before-prepare barrier deletion failed"
+)
+
+
+def partition_delete_before_prepare(
+    resources: list[StackResource],
+) -> tuple[list[StackResource], list[StackResource]]:
+    """Split resources into ``(barrier, rest)`` by :data:`DELETE_BEFORE_PREPARE_TYPES`.
+
+    ``barrier`` holds the direct stack resources that must be custom-deleted to
+    completion before general preparation; ``rest`` is everything else and flows
+    through the unchanged pipeline.
+    """
+    barrier: list[StackResource] = []
+    rest: list[StackResource] = []
+    for resource in resources:
+        target = barrier if resource.resource_type in DELETE_BEFORE_PREPARE_TYPES else rest
+        target.append(resource)
+    return barrier, rest
 
 
 def truncate_for_log(text: str, limit: int) -> str:
@@ -99,6 +139,22 @@ class ResourceCleaner:
         if not any([prepare, handle_stuck, custom_delete, ccapi_fallback]):
             raise ValueError("At least one cleanup operation must be enabled")
 
+        if prepare and custom_delete:
+            barrier_resources, resources = partition_delete_before_prepare(resources)
+            barrier_failures = await self._delete_before_prepare(barrier_resources)
+            if barrier_failures:
+                # Fail closed for the whole stack: the barrier failed, so
+                # prepare/custom/CCAPI never run on the remainder. Preserve each
+                # real barrier failure and mark every remaining resource
+                # unattempted, so a downstream sweep cannot mistake a
+                # never-touched survivor for a successfully deleted one.
+                for resource in to_ccapi_resources(resources):
+                    barrier_failures.setdefault(
+                        resource, DeletionFailureEvent(_BARRIER_BLOCKED_MESSAGE)
+                    )
+                self._log_failures(barrier_failures)
+                return barrier_failures
+
         if prepare:
             ccapi_resources = to_ccapi_resources(resources)
             if ccapi_resources:
@@ -146,7 +202,47 @@ class ResourceCleaner:
         if ccapi_succeeded > 0:
             logger.debug("CCAPI-deleted %d resource(s)", ccapi_succeeded)
         failures.update(custom_failures)
+        if failures:
+            failures = await asyncio.to_thread(self._delete_failed_cfn_stacks, failures)
         self._log_failures(failures)
+        return failures
+
+    async def _delete_before_prepare(
+        self, resources: list[StackResource]
+    ) -> dict[Resource, DeletionFailureEvent]:
+        """Custom-delete barrier resources to completion before general preparation.
+
+        Runs the registered custom handler (with its bounded execution and PR #66
+        terminal waiter) for each barrier resource and fails closed:
+
+        * A handler failure (or raised exception) is returned as-is.
+        * A resource with no registered custom handler comes back in
+          ``_custom_delete().skipped``; that means nothing would delete it, so it
+          is converted into an explicit per-resource failure rather than silently
+          falling through to prepare/CCAPI. This is distinct from a handler
+          returning ``HandlerStatus.SKIPPED`` (already classified as succeeded by
+          ``_custom_delete`` — safe when the resource is simply absent).
+
+        Returns the failures mapping; empty means every barrier resource was
+        handled terminally and the caller may proceed with the remaining pipeline.
+        """
+        ccapi_resources = to_ccapi_resources(resources)
+        if not ccapi_resources:
+            return {}
+
+        result = await asyncio.to_thread(self._custom_delete, ccapi_resources)
+        if result.succeeded:
+            logger.debug(
+                "Custom-deleted %d resource(s): %s",
+                len(result.succeeded),
+                format_sample_list(result.succeeded, lambda r: r.type),
+            )
+
+        failures: dict[Resource, DeletionFailureEvent] = dict(result.failed)
+        for resource in result.skipped:
+            failures[resource] = DeletionFailureEvent(
+                f"No custom deletion handler registered for {resource.type}"
+            )
         return failures
 
     def _prepare_all(
@@ -282,6 +378,56 @@ class ResourceCleaner:
                         priority,
                         e,
                     )
+
+    def _delete_failed_cfn_stacks(
+        self, failures: dict[Resource, DeletionFailureEvent]
+    ) -> dict[Resource, DeletionFailureEvent]:
+        """Retry CCAPI-failed CloudFormation stacks via native ``DeleteStack``.
+
+        CCAPI cannot delete some agent-created, out-of-baseline stacks — the
+        nested Managed Flink Studio (``environment-*-flink-studio``), EMR, EKS and
+        IPAM stacks that otherwise survive and fail reset closed. A native
+        ``cloudformation:DeleteStack`` lets CloudFormation tear the stack down in
+        its own dependency order, catching the residual the per-resource handlers
+        leave behind.
+
+        Only stacks CCAPI already failed on are retried, and CDK bootstrap/toolkit
+        infrastructure stacks (``CDKToolkit``, ``cdk-hnb659fds-*``) are never
+        touched. Callers pass only out-of-baseline resources (reset diffs against
+        the baseline snapshot), so a baseline stack never reaches this path.
+        Returns ``failures`` with any successfully deleted stack removed.
+        """
+        stacks = [
+            resource
+            for resource in failures
+            if resource.type == _CFN_STACK_TYPE and not is_infra_identifier(resource.identifier)
+        ]
+        if not stacks:
+            return failures
+
+        client = build_client(self._session, "cloudformation")
+        waiter = client.get_waiter("stack_delete_complete")
+        for resource in stacks:
+            stack_name = resource.identifier
+            try:
+                client.delete_stack(StackName=stack_name)
+                waiter.wait(
+                    StackName=stack_name,
+                    WaiterConfig={
+                        "Delay": _STACK_DELETE_WAITER_DELAY,
+                        "MaxAttempts": _STACK_DELETE_WAITER_MAX_ATTEMPTS,
+                    },
+                )
+            except (ClientError, WaiterError, BotoCoreError) as e:
+                logger.warning(
+                    "Native DeleteStack fallback failed for stack '%s': %s",
+                    truncate_for_log(stack_name, LOG_TRUNCATE_SHORT),
+                    truncate_for_log(str(e), LOG_TRUNCATE_LONG),
+                )
+                continue
+            logger.debug("Native DeleteStack fallback deleted stack '%s'", stack_name)
+            del failures[resource]
+        return failures
 
     @staticmethod
     def _log_failures(failures: dict[Resource, DeletionFailureEvent]) -> None:

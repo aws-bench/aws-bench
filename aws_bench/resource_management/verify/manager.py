@@ -10,7 +10,7 @@ from typing import Any
 import boto3
 
 from aws_bench.logging.logger import get_logger, log_context
-from aws_bench.resource_management.ccapi.models import MAX_WORKERS_HEAVY
+from aws_bench.resource_management.ccapi.models import MAX_WORKERS_HEAVY, ScanResult
 from aws_bench.resource_management.deferred import exclude_deferred
 from aws_bench.resource_management.exceptions import SnapshotNotFoundError
 from aws_bench.resource_management.scanner import make_scanner
@@ -33,6 +33,70 @@ from aws_bench.utils.concurrent import interruptible_executor, raise_if_shutdown
 from aws_bench.utils.credentials_provider import create_regional_session
 
 logger = get_logger(__name__)
+
+
+# Error signals that a baseline-tracked resource type cannot exist in the scanned
+# region at all — the service or type is unavailable there — as opposed to an
+# enumeration gap that could hide a leaked resource. A type that cannot exist in the
+# region cannot hold an orphan, so a persistent scan failure carrying one of these
+# signals is tolerated by ``_check_new_resources`` instead of failing verify closed.
+#
+# These are stable region/service-availability errors observed live across the CCAPI
+# listers (e.g. GameLift → UnsupportedRegionException, EC2::CarrierGateway →
+# UnsupportedOperation, IoTSiteWise → InvalidRequestException, Lightsail →
+# InvalidInputException, Notifications/Bedrock prompt-routers → ValidationException,
+# CUR → endpoint connect timeout). They are deliberately NOT the transient
+# throttling/5xx codes the scanner already retries: a residual transient failure
+# leaves a type genuinely un-enumerated and must still fail closed. AccessDenied is
+# likewise excluded — with the broad scan role it means a real permission gap we
+# cannot see past, not region unavailability.
+_REGION_UNAVAILABLE_SIGNALS: frozenset[str] = frozenset(
+    {
+        "UnsupportedRegionException",
+        "UnsupportedOperation",
+        "UnknownOperationException",
+        "OptInRequired",
+        "InvalidRequestException",
+        "InvalidInputException",
+        "ValidationException",
+        "UninitializedAccountException",
+        # botocore endpoint-resolution/connection failures (no ``Error.Code``, so the
+        # scanner records a truncated message): the service has no endpoint here.
+        "Could not connect to the endpoint URL",
+        "Connect timeout on endpoint URL",
+    }
+)
+
+
+def _is_region_unavailable(error: str) -> bool:
+    """True if ``error`` marks a resource type as unavailable in the scanned region.
+
+    Substring match: the scanner records either a ``ClientError`` code or a truncated
+    botocore message (e.g. an endpoint connection error), so match on signal fragments
+    rather than requiring an exact code.
+
+    Args:
+        error: The error string recorded in ``scan_result.failed`` for a type.
+
+    Returns:
+        True if the failure indicates the type/service is unavailable in the region.
+    """
+    return any(signal in error for signal in _REGION_UNAVAILABLE_SIGNALS)
+
+
+@dataclasses.dataclass
+class _RegionScanContext:
+    """Phase-1 scan state for one region in the multi-region verify.
+
+    Carries the per-region manager, its region-filtered snapshot, and the Phase-1
+    baseline scan (or the exception if that scan failed — which fails only this
+    region, not the account).
+    """
+
+    mgr: VerifyManager
+    snapshot: Snapshot
+    scan: ScanResult | None
+    scan_error: Exception | None
 
 
 class VerifyManager:
@@ -145,6 +209,9 @@ class VerifyManager:
         baseline_resource_ids: dict[str, list[dict]],
         baseline_failed: dict[str, str],
         baseline_empty: set[str],
+        *,
+        precomputed_scan: ScanResult | None = None,
+        enumerable_elsewhere: set[str] | None = None,
     ) -> VerifyResult | None:
         """Scan for new resources created after setup.
 
@@ -152,6 +219,18 @@ class VerifyManager:
             baseline_resource_ids: Resources from baseline snapshot
             baseline_failed: Resource types that failed in baseline scan
             baseline_empty: Resource types that were scanned but returned 0 resources
+            precomputed_scan: A scan of ``baseline_types`` already run for this region
+                (the multi-region path scans each region once, then reuses the result
+                here). When None, this method runs the scan itself.
+            enumerable_elsewhere: Baseline types that a region in the same account
+                enumerated cleanly (detected or empty) this run. A type that enumerated
+                in some region is region-available there, so a failure to enumerate it
+                *here* is region-unavailability, not an orphan-hiding gap — it is
+                tolerated regardless of error code. (The multi-region path passes the
+                account-wide union, which includes this region; harmless, since a type
+                that failed here is not in this region's own enumerated set.) Cross-region
+                corroboration; None on the single-region / reset paths, where the
+                error-code allow-list applies.
 
         Returns:
             VerifyResult with failure if new resources found, None if clean
@@ -163,11 +242,60 @@ class VerifyManager:
         # - scanner inconsistencies between scans
         # But still catches new resources in types that existed during setup
         baseline_types = set(baseline_resource_ids.keys()) | baseline_empty
-        logger.debug(
-            f"Scanning for new resources via fast-scan "
-            f"({len(baseline_types)} resource types from baseline)"
+        if precomputed_scan is not None:
+            scan_result = precomputed_scan
+        else:
+            logger.debug(
+                f"Scanning for new resources via fast-scan "
+                f"({len(baseline_types)} resource types from baseline)"
+            )
+            scan_result = self._scan_mgr.scan_resources(resource_types=list(baseline_types))
+
+        # Fail closed on a persistent scan failure of a baseline-tracked type. The
+        # scanner already retries transient errors internally (8 attempts w/ backoff),
+        # so a type still in scan_result.failed is a non-transient failure.
+        # find_new_resources deliberately SKIPS failed types to avoid false diffs — but
+        # for a type that mattered at setup, silently skipping it would let a leaked
+        # resource in that type hide forever. Scoped to baseline_types only.
+        #
+        # Exception: a type that cannot exist in this region at all (the service/type is
+        # unavailable here) cannot hold an orphan, so it is tolerated rather than failing
+        # verify closed. A type is proven region-unavailable-here two ways:
+        #   1. Cross-region: it enumerated cleanly in ANOTHER region this run
+        #      (enumerable_elsewhere) — the strongest signal, independent of error code.
+        #   2. Error code: its failure matches a region/service-availability signal
+        #      (_REGION_UNAVAILABLE_SIGNALS) — the single-region backstop.
+        # A type un-enumerable in EVERY region (absent from enumerable_elsewhere) with a
+        # non-region-unavailable code still fails closed — preserving the fail-closed
+        # guarantee for a genuinely un-enumerable type that could hide a leak.
+        #
+        # Toleration is scoped to types that were EMPTY at baseline: a type that HAD
+        # resources at setup must always fail closed when un-enumerable — we cannot confirm
+        # those tracked resources are gone, whatever the error code. Only a type with
+        # nothing to account for (in baseline_empty, not baseline_resource_ids) is tolerated.
+        elsewhere = enumerable_elsewhere or set()
+        failed_baseline = {t: err for t, err in scan_result.failed.items() if t in baseline_types}
+        tolerated = sorted(
+            t
+            for t, err in failed_baseline.items()
+            if t not in baseline_resource_ids and (t in elsewhere or _is_region_unavailable(err))
         )
-        scan_result = self._scan_mgr.scan_resources(resource_types=list(baseline_types))
+        tolerated_set = set(tolerated)
+        unenumerable = sorted(t for t in failed_baseline if t not in tolerated_set)
+        if tolerated:
+            logger.info(
+                f"Tolerating {len(tolerated)} baseline resource type(s) unavailable in this "
+                f"region (cannot hold an orphan): {tolerated}"
+            )
+        if unenumerable:
+            logger.warning(f"Could not enumerate baseline resource type(s): {unenumerable}")
+            return VerifyResult(
+                success=False,
+                reason=f"Could not enumerate {len(unenumerable)} baseline resource type(s)",
+                details={"unenumerable_types": unenumerable},
+                suggestion="Run 'aws-bench env cleanup' and 'aws-bench env setup' to reset",
+            )
+
         new_resources = find_new_resources(
             scan_result.detected, baseline_resource_ids, scan_result.failed, baseline_failed
         )
@@ -210,6 +338,49 @@ class VerifyManager:
                 new_resources=new_resources,
             )
         return None
+
+    def find_orphan_resources(
+        self, snapshot: Snapshot, *, enumerable_elsewhere: set[str] | None = None
+    ) -> VerifyResult | None:
+        """Re-run only the new-resource + scan-health census (no stack/drift checks).
+
+        Reset's fail-closed backstop after deleting stacks for re-setup: a survivor
+        it could not delete or enumerate must fail the reset, not be absorbed into a
+        fresh baseline.
+
+        Args:
+            snapshot: The (region-filtered) baseline snapshot.
+            enumerable_elsewhere: Baseline types another region enumerated cleanly this
+                run, for cross-region corroboration in ``_check_new_resources`` — a type
+                proven region-available elsewhere cannot hold an orphan here, so failing
+                to enumerate it here is region-unavailability, not an orphan-hiding gap.
+                None falls back to the error-code allow-list only.
+        """
+        return self._check_new_resources(
+            snapshot.resource_ids,
+            snapshot.failed_resource_types,
+            snapshot.empty_resource_types,
+            enumerable_elsewhere=enumerable_elsewhere,
+        )
+
+    def scan_baseline_types(self, snapshot: Snapshot) -> ScanResult:
+        """Fast-scan this region for the snapshot's baseline resource types.
+
+        Phase 1 of the multi-region verify: the orchestrator runs this once per region,
+        then reuses the result (via ``precomputed_scan``) and the union of every region's
+        enumerated types (via ``enumerable_elsewhere``) when it calls
+        ``verify_account_state`` for that region — so the scan is not repeated. Baseline
+        types are the account-wide merged set (had resources or were empty at setup),
+        matching ``_check_new_resources``.
+
+        Args:
+            snapshot: The (region-filtered) baseline snapshot.
+
+        Returns:
+            The region's ScanResult for the baseline types.
+        """
+        baseline_types = set(snapshot.resource_ids.keys()) | snapshot.empty_resource_types
+        return self._scan_mgr.scan_resources(resource_types=list(baseline_types))
 
     def _check_stack_status(self, stack_metadata: dict) -> VerifyResult | None:
         """Check CloudFormation stack status.
@@ -299,6 +470,8 @@ class VerifyManager:
         snapshot: Snapshot | None = None,
         scenario_dir: Path | None = None,
         skip_early: bool = True,
+        precomputed_scan: ScanResult | None = None,
+        enumerable_elsewhere: set[str] | None = None,
     ) -> VerifyResult:
         """Verify account matches post-setup baseline snapshot.
 
@@ -316,6 +489,12 @@ class VerifyManager:
                 pass. Otherwise a short-circuit on one category (e.g. a
                 new-resource false positive) hides a DELETE_FAILED stack from
                 reset entirely.
+            precomputed_scan: A baseline scan already run for this region, passed by
+                the multi-region orchestrator so the region is not re-scanned. None on
+                the single-region / reset paths (this method scans itself).
+            enumerable_elsewhere: Baseline types another region enumerated cleanly this
+                run, for cross-region corroboration in ``_check_new_resources``. None on
+                the single-region / reset paths.
 
         Returns:
             VerifyResult with success/failure details
@@ -359,6 +538,8 @@ class VerifyManager:
                 snapshot.resource_ids,
                 snapshot.failed_resource_types,
                 snapshot.empty_resource_types,
+                precomputed_scan=precomputed_scan,
+                enumerable_elsewhere=enumerable_elsewhere,
             ),
             lambda: self._check_stack_status(snapshot.stack_metadata),
             lambda: self._check_template_hash(snapshot.stack_metadata),
@@ -488,22 +669,69 @@ class VerifyManager:
 
             # Each region scans against the snapshot filtered to its own stacks,
             # so other regions' stacks aren't reported as "missing".
+            #
+            # Two-phase so verify can corroborate across regions. The baseline's
+            # resource/empty/failed type sets are account-wide (merged over regions),
+            # so a region checks types that may only be enumerable in another region —
+            # a type absent from THIS region (service not offered here) would otherwise
+            # false-fail verify. Phase 1 scans every region once and records which
+            # baseline types each enumerated; Phase 2 verifies each region reusing its
+            # Phase-1 scan, forgiving a failed type that enumerated in another region
+            # (proven region-available there, so it cannot hold an orphan here). A type
+            # un-enumerable in EVERY region still fails closed.
+            def _scan_region(region: str) -> _RegionScanContext:
+                with log_context(region):
+                    raise_if_shutdown()
+                    region_session = create_regional_session(self._session, region)
+                    region_mgr = VerifyManager(
+                        region_session, region_name=region, account_id=account_id
+                    )
+                    region_snapshot = self._filter_snapshot_to_region(snapshot, region)
+                    try:
+                        scan = region_mgr.scan_baseline_types(region_snapshot)
+                        return _RegionScanContext(region_mgr, region_snapshot, scan, None)
+                    except Exception as exc:  # noqa: BLE001 — a scan error fails only this region
+                        return _RegionScanContext(region_mgr, region_snapshot, None, exc)
+
+            # Phase 1: scan every region (parallel).
+            contexts: dict[str, _RegionScanContext] = {}
+            with interruptible_executor(max_workers=MAX_WORKERS_HEAVY) as executor:
+                scan_futures = {
+                    executor.submit(_scan_region, region): region for region in regions_to_verify
+                }
+                for future in as_completed(scan_futures):
+                    contexts[scan_futures[future]] = future.result()
+
+            # A type enumerable (detected or empty) in ANY region is region-available
+            # there — so a failure to enumerate it in another region is region
+            # unavailability, not an orphan-hiding gap.
+            enumerable_anywhere: set[str] = set()
+            for ctx in contexts.values():
+                if ctx.scan is not None:
+                    enumerable_anywhere |= set(ctx.scan.detected.keys()) | ctx.scan.empty
+
+            # Phase 2: verify each region, reusing its Phase-1 scan + the cross-region set.
             def _verify_region(region: str) -> RegionVerifyResult:
                 with log_context(region):
                     raise_if_shutdown()
-                    # A region's scan error fails only that region, not the account
-                    # (a cancel is a BaseException, so it still propagates).
-                    try:
-                        region_session = create_regional_session(self._session, region)
-                        region_mgr = VerifyManager(
-                            region_session, region_name=region, account_id=account_id
+                    ctx = contexts[region]
+                    if ctx.scan_error is not None:
+                        logger.error(
+                            "Region %s scan failed: %s", region, ctx.scan_error, exc_info=True
                         )
-                        region_snapshot = self._filter_snapshot_to_region(snapshot, region)
-                        result = region_mgr.verify_account_state(
+                        return RegionVerifyResult(
+                            region=region,
+                            success=False,
+                            error_message=f"Verification failed: {ctx.scan_error}",
+                        )
+                    try:
+                        result = ctx.mgr.verify_account_state(
                             env_name,
                             account_id,
-                            snapshot=region_snapshot,
+                            snapshot=ctx.snapshot,
                             scenario_dir=scenario_dir,
+                            precomputed_scan=ctx.scan,
+                            enumerable_elsewhere=enumerable_anywhere,
                         )
                         return RegionVerifyResult(
                             region=region,

@@ -153,6 +153,7 @@ def _mock_cleanup_seams(monkeypatch, *, tmp_path, results_per_trial):
     """
     monkeypatch.setattr("aws_bench.cli.env.preflight_docker_cli", lambda: None)
     monkeypatch.setattr("aws_bench.cli.env.preflight_docker_daemon", lambda: None)
+    monkeypatch.setattr("aws_bench.cli.env.preflight_docker_plugins", lambda plugins: None)
     monkeypatch.setattr("aws_bench.cli.env.preflight_aws_credentials", lambda cred, **kwargs: None)
     monkeypatch.setattr(
         "aws_bench.cli.env.CredentialProvider.get",
@@ -250,6 +251,7 @@ def _mock_setup_seams(monkeypatch, *, all_passed: bool, raise_acct: bool = False
     # Preflight: all pass
     monkeypatch.setattr("aws_bench.cli.env.preflight_docker_cli", lambda: None)
     monkeypatch.setattr("aws_bench.cli.env.preflight_docker_daemon", lambda: None)
+    monkeypatch.setattr("aws_bench.cli.env.preflight_docker_plugins", lambda plugins: None)
     monkeypatch.setattr(
         "aws_bench.cli.env.preflight_aws_credentials",
         lambda cred, **kwargs: None,
@@ -343,6 +345,7 @@ def test_setup_blocks_on_insufficient_quota(runner, monkeypatch, tmp_path):
     """Setup catches InsufficientQuotaError and prints the env init hint."""
     monkeypatch.setattr("aws_bench.cli.env.preflight_docker_cli", lambda: None)
     monkeypatch.setattr("aws_bench.cli.env.preflight_docker_daemon", lambda: None)
+    monkeypatch.setattr("aws_bench.cli.env.preflight_docker_plugins", lambda plugins: None)
     monkeypatch.setattr(
         "aws_bench.cli.env.preflight_aws_credentials",
         lambda cred, **kwargs: None,
@@ -390,6 +393,7 @@ def _stub_preflight_and_creds(monkeypatch):
     """Pass preflight + creds; intended for tests that exercise validator paths."""
     monkeypatch.setattr("aws_bench.cli.env.preflight_docker_cli", lambda: None)
     monkeypatch.setattr("aws_bench.cli.env.preflight_docker_daemon", lambda: None)
+    monkeypatch.setattr("aws_bench.cli.env.preflight_docker_plugins", lambda plugins: None)
     monkeypatch.setattr(
         "aws_bench.cli.env.preflight_aws_credentials",
         lambda cred, **kwargs: None,
@@ -496,6 +500,7 @@ def test_cleanup_scenarios_not_found(runner, monkeypatch, tmp_path):
     """Cleanup exits with error when scenario discovery fails."""
     monkeypatch.setattr("aws_bench.cli.env.preflight_docker_cli", lambda: None)
     monkeypatch.setattr("aws_bench.cli.env.preflight_docker_daemon", lambda: None)
+    monkeypatch.setattr("aws_bench.cli.env.preflight_docker_plugins", lambda plugins: None)
     monkeypatch.setattr("aws_bench.cli.env.preflight_aws_credentials", lambda cred, **kwargs: None)
     monkeypatch.setattr(
         "aws_bench.cli.env.CredentialProvider.get",
@@ -597,6 +602,7 @@ def _mock_verify_seams(monkeypatch, *, all_passed: bool, tmp_path):
     # Mock preflight
     monkeypatch.setattr("aws_bench.cli.env.preflight_docker_cli", lambda: None)
     monkeypatch.setattr("aws_bench.cli.env.preflight_docker_daemon", lambda: None)
+    monkeypatch.setattr("aws_bench.cli.env.preflight_docker_plugins", lambda plugins: None)
     monkeypatch.setattr("aws_bench.cli.env.preflight_aws_credentials", lambda cred, **kwargs: None)
     monkeypatch.setattr(
         "aws_bench.cli.env.CredentialProvider.get",
@@ -687,6 +693,7 @@ def test_verify_no_accounts(runner, monkeypatch, tmp_path):
     """Verify exits cleanly when no scenario accounts exist."""
     monkeypatch.setattr("aws_bench.cli.env.preflight_docker_cli", lambda: None)
     monkeypatch.setattr("aws_bench.cli.env.preflight_docker_daemon", lambda: None)
+    monkeypatch.setattr("aws_bench.cli.env.preflight_docker_plugins", lambda plugins: None)
     monkeypatch.setattr("aws_bench.cli.env.preflight_aws_credentials", lambda cred, **kwargs: None)
     monkeypatch.setattr(
         "aws_bench.cli.env.CredentialProvider.get",
@@ -720,6 +727,7 @@ def _mock_reset_seams(monkeypatch, *, all_passed: bool, tmp_path, needs_redeploy
     """Mock ScenarioJob.create + run for reset tests."""
     monkeypatch.setattr("aws_bench.cli.env.preflight_docker_cli", lambda: None)
     monkeypatch.setattr("aws_bench.cli.env.preflight_docker_daemon", lambda: None)
+    monkeypatch.setattr("aws_bench.cli.env.preflight_docker_plugins", lambda plugins: None)
     monkeypatch.setattr("aws_bench.cli.env.preflight_aws_credentials", lambda cred, **kwargs: None)
     monkeypatch.setattr(
         "aws_bench.cli.env.CredentialProvider.get",
@@ -815,6 +823,7 @@ def test_reset_redeploys_via_setup_when_source_given(runner, monkeypatch, tmp_pa
     """
     monkeypatch.setattr("aws_bench.cli.env.preflight_docker_cli", lambda: None)
     monkeypatch.setattr("aws_bench.cli.env.preflight_docker_daemon", lambda: None)
+    monkeypatch.setattr("aws_bench.cli.env.preflight_docker_plugins", lambda plugins: None)
     monkeypatch.setattr("aws_bench.cli.env.preflight_aws_credentials", lambda cred, **kwargs: None)
     monkeypatch.setattr(
         "aws_bench.cli.env.CredentialProvider.get",

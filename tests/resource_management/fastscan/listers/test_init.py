@@ -19,6 +19,25 @@ def test_all_listers_excludes_superseded_and_disabled():
         assert key not in keys, f"disabled lister {key} must not run"
 
 
+def test_ecs_list_services_simple_lister_is_superseded():
+    """The broken no-arg simple ecs:list_services row must be superseded by the custom lister.
+
+    The simple row defaults to the "default" cluster and raises ClusterNotFoundException when
+    it is absent, falsely marking AWS::ECS::Service un-enumerable. The custom lister iterates
+    every cluster, so only it runs for AWS::ECS::Service.
+    """
+    assert ("ecs", "list_services") in SUPERSEDED_BY_CUSTOM_LISTER
+    # It is a real simple lister (so the supersede is not a dead entry) ...
+    assert ("ecs", "list_services") in {(x.service, x.op) for x in SIMPLE_LISTERS}
+    # ... and it does not run in the assembled set.
+    assert ("ecs", "list_services") not in {(x.service, x.op) for x in all_listers()}
+    # The custom lister remains the sole writer for AWS::ECS::Service.
+    ecs_service_writers = [
+        (c.service, c.op) for c in custom_listers() if c.cfn_type == "AWS::ECS::Service"
+    ]
+    assert ecs_service_writers == [("ecs", "ListServices")]
+
+
 def test_disabled_listers_are_real_simple_listers():
     # DISABLED_LISTERS targets simple (data-table) listers only: it suppresses a row by key
     # instead of deleting it. A custom lister is hand-written code — disable-by-key doesn't apply

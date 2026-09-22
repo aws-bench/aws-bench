@@ -166,6 +166,40 @@ def test_filter_aws_managed_resources_removes_service_managed_secrets():
     }
 
 
+def test_filter_aws_managed_resources_removes_dynamodb_import_jobs():
+    """DynamoDB Import-from-S3 job records are filtered; real tables/exports/backups kept.
+
+    Import jobs (``ImportArn``) are permanent, undeletable import history (no DeleteImport
+    API, no CCAPI handler), so the orphan/drift check flags them forever. The ``ListImports``
+    lister has no ``cfn_type``, so its ARNs land in the synthetic ``AWS::dynamodb::*`` bucket
+    next to backups/exports/global tables. Only the ``/import/`` ARN segment is matched, so a
+    real table ARN (no ``/import/``) and the sibling ``/export/`` / ``/backup/`` records — none
+    of which are import jobs — are NOT filtered.
+    """
+    acct = "arn:aws:dynamodb:us-east-1:123456789012:table"
+    resources = {
+        "AWS::dynamodb::*": [
+            {"Identifier": f"{acct}/order_items.csv/import/01789480117964-fb5eb55b"},
+            {"Identifier": f"{acct}/products.csv/import/01789480117000-aa11bb22"},
+            # Sibling DynamoDB metadata in the same synthetic bucket — must be KEPT.
+            {"Identifier": f"{acct}/orders/export/01700000000000-deadbeef"},
+            {"Identifier": f"{acct}/orders/backup/01700000000000-cafed00d"},
+        ],
+        # A real agent-created table (proper CCAPI type, no ``/import/``) — must be KEPT.
+        "AWS::DynamoDB::Table": [
+            {"Identifier": f"{acct}/order_items"},
+        ],
+    }
+
+    filtered = filter_aws_managed_resources(resources)
+
+    assert {r["Identifier"] for r in filtered["AWS::dynamodb::*"]} == {
+        f"{acct}/orders/export/01700000000000-deadbeef",
+        f"{acct}/orders/backup/01700000000000-cafed00d",
+    }
+    assert {r["Identifier"] for r in filtered["AWS::DynamoDB::Table"]} == {f"{acct}/order_items"}
+
+
 def test_filter_aws_managed_resources_removes_custom_types():
     """Test filtering removes custom CloudFormation types."""
     resources = {
@@ -451,3 +485,69 @@ class TestPhase2AwsOwnedFilters:
         assert predicate("arn:aws:events:us-east-1:123456789012:event-bus/default", {})
         # A task-created custom bus carries its own name and is NOT filtered.
         assert not predicate("arn:aws:events:us-east-1:123456789012:event-bus/my-bus", {})
+
+    def test_default_mediaconvert_queue_filtered_custom_kept(self):
+        predicate = self._predicate("AWS::MediaConvert::Queue")
+        # The account's default MediaConvert queue is service-created (lazily) and undeletable —
+        # filtered (the lister emits the ARN …:queues/Default).
+        assert predicate("arn:aws:mediaconvert:us-east-1:123456789012:queues/Default", {})
+        # A task-created on-demand queue carries its own name and is NOT filtered.
+        assert not predicate("arn:aws:mediaconvert:us-east-1:123456789012:queues/my-queue", {})
+
+    def test_default_elasticache_subnet_group_filtered_custom_kept(self):
+        predicate = self._predicate("AWS::ElastiCache::SubnetGroup")
+        # The account/Region singleton ``default`` cache subnet group is AWS-reserved, lazily
+        # materialized on first ElastiCache use, and undeletable ("default is reserved and cannot
+        # be modified") — filtered.
+        assert predicate("default", {})
+        # An agent/task-created group carries a custom name and is NOT filtered.
+        assert not predicate("storage-app-valkey-subnet-group", {})
+        # Regression guard: the match MUST be exact equality, not startswith("default") — a
+        # legitimately named group that merely starts with "default" is real, deletable drift.
+        assert not predicate("default-valkey-subnets", {})
+
+
+def test_filter_aws_managed_resources_removes_autoscaling_managed_rule():
+    """EC2 Auto Scaling's ``AutoScalingManagedRule`` is filtered; task rules are kept.
+
+    The rule is a lazily-created, account-persistent, AWS-managed EventBridge rule
+    absent from the pre-deploy snapshot, so reset flagged it as new/orphan. It must
+    be excluded (by exact name) while any task/agent-created rule is preserved.
+    """
+    resources = {
+        "AWS::Events::Rule": [
+            {"Identifier": "arn:aws:events:us-east-1:123456789012:rule/AutoScalingManagedRule"},
+            {"Identifier": "AutoScalingManagedRule"},
+            {"Identifier": "arn:aws:events:us-east-1:123456789012:rule/my-task-rule"},
+            {"Identifier": "my-bare-rule"},
+        ]
+    }
+
+    filtered = filter_aws_managed_resources(resources)
+
+    kept = {r["Identifier"] for r in filtered["AWS::Events::Rule"]}
+    assert kept == {
+        "arn:aws:events:us-east-1:123456789012:rule/my-task-rule",
+        "my-bare-rule",
+    }
+
+
+def test_filter_keeps_custom_bus_rule_named_like_managed_rule_suffix():
+    """A custom rule whose name merely ends in the managed name is still filtered by exact match.
+
+    ``…:rule/<bus>/AutoScalingManagedRule`` (custom-bus ARN) resolves to the exact
+    managed name on its trailing segment, so it is excluded; a differently-named
+    rule is not.
+    """
+    prefix = "arn:aws:events:us-east-1:123456789012:rule/mybus"
+    resources = {
+        "AWS::Events::Rule": [
+            {"Identifier": f"{prefix}/AutoScalingManagedRule"},
+            {"Identifier": f"{prefix}/NotManaged"},
+        ]
+    }
+
+    filtered = filter_aws_managed_resources(resources)
+
+    kept = {r["Identifier"] for r in filtered["AWS::Events::Rule"]}
+    assert kept == {f"{prefix}/NotManaged"}

@@ -3,9 +3,9 @@
 Provisions accounts and submits quota increases for a set of scenarios:
 
   Provisioning — bounded by ``n_concurrent``. For each
-    ``(scenario, account_tag)`` pair, ensure an account exists, wait for
-    the org-access role, and submit each scenario's ``[[quotas]]`` without
-    waiting for approval.
+    ``(scenario, account_tag)`` pair, ensure an account exists, reconcile
+    its region SCP, wait for the org-access role, and submit each scenario's
+    ``[[quotas]]`` without waiting for approval.
 
   Account-limit reaction — if account creation fails because the AWS
     Organizations "maximum number of accounts" limit is hit, file a Service
@@ -57,6 +57,7 @@ from aws_bench.resource_management.quota_manager import (
     QuotaManager,
 )
 from aws_bench.resource_management.scanner import _FASTSCAN_LAMBDA, scan_method
+from aws_bench.resource_management.snapshot.manager import SnapshotManager
 from aws_bench.resource_management.snapshot.models import SnapshotResult
 from aws_bench.scenario.config import QuotaIncrease, ScenarioManifest
 from aws_bench.scenario.exceptions import (
@@ -66,7 +67,7 @@ from aws_bench.scenario.exceptions import (
 )
 from aws_bench.scenario.job import ScenarioJob
 from aws_bench.scenario.scenario import Scenario
-from aws_bench.utils.credentials_provider import CredentialProvider
+from aws_bench.utils.credentials_provider import CredentialProvider, build_session_name
 
 logger = get_logger(__name__)
 
@@ -234,6 +235,8 @@ async def provision_scenarios(
     Each account's pristine PRE_SETUP baseline is captured as the final step
     of provisioning that account (the baseline ``env cleanup`` later
     subtracts). A capture failure fails that account's ``provisioned`` status.
+    An existing baseline must cover the same regions; otherwise cleanup is
+    required before reinitializing.
 
     ``on_event`` (optional) receives one typed event per lifecycle
     transition per account. Exceptions raised by the callback are logged
@@ -456,7 +459,8 @@ async def _provision_all(
     """Provision every (scenario, account_tag) pair in two phases.
 
     Phase 1 — Account creation, bounded by ``min(n_concurrent, _ACCOUNT_CREATION_MAX_CONCURRENT)``.
-    Phase 2 — Role wait + quota submission + baseline capture, bounded by ``n_concurrent``.
+    Phase 2 — Region SCP + role wait + quota submission + baseline capture,
+    bounded by ``n_concurrent``.
     """
     # Phase 1: Create accounts with hard cap of 3 concurrent.
     logger.info(
@@ -494,13 +498,12 @@ async def _provision_all(
             scenario = pair_map[(result.scenario_name, result.account_tag)]
             with log_context(result.scenario_name), log_context(result.account_tag):
                 return await _provision_account_lifecycle(
+                    account_manager,
                     quota_manager,
                     cred_provider,
                     scenario,
                     result,
                     on_event,
-                    preexisting=account_manager.is_preexisting is True,
-                    runner_role=account_manager.runner_role,
                 )
 
     # Split into successes (proceed to Phase 2) and failures (pass through).
@@ -596,7 +599,7 @@ def _ensure_cfn_ops_role(cred_provider: CredentialProvider, account_id: str) -> 
     bootstrap cfn-exec role. AdministratorAccess — same scope as cfn-exec.
     """
     session = cred_provider.get_session_for_account(
-        account_id, ORG_ACCESS_ROLE, "aws-bench-cfn-ops-role-setup"
+        account_id, ORG_ACCESS_ROLE, build_session_name("session")
     )
     iam = session.client("iam")
 
@@ -632,22 +635,20 @@ def _ensure_cfn_ops_role(cred_provider: CredentialProvider, account_id: str) -> 
 def _validate_cfn_ops_role(cred_provider: CredentialProvider, account_id: str) -> None:
     """Validate the externally managed CloudFormation execution role exists."""
     session = cred_provider.get_session_for_account(
-        account_id, ORG_ACCESS_ROLE, "aws-bench-cfn-ops-role-validate"
+        account_id, ORG_ACCESS_ROLE, build_session_name("session")
     )
     session.client("iam").get_role(RoleName=effective_cfn_role())
 
 
 async def _provision_account_lifecycle(
+    account_manager: AccountManager,
     quota_manager: QuotaManager,
     cred_provider: CredentialProvider,
     scenario: ScenarioManifest,
     result: ProvisionedAccount,
     on_event: HookCallback | None,
-    *,
-    preexisting: bool = False,
-    runner_role: str | None = None,
 ) -> ProvisionedAccount:
-    """Phase 2: Role wait + quota submission + baseline capture for a provisioned account.
+    """Phase 2: Region SCP + role wait + quotas + baseline capture for a provisioned account.
 
     Expects ``result.account_id`` to be set (Phase 1 succeeded).
     Emits ROLE_START, QUOTAS_START, SNAPSHOT_START, and END events.
@@ -656,57 +657,61 @@ async def _provision_account_lifecycle(
     name = scenario.scenario.name
     account_tag = result.account_tag
     cancelled = False
-    # Phase 1 guarantees this (see docstring); assert to narrow str | None -> str.
-    assert result.account_id is not None
     account_id = result.account_id
+    preexisting = account_manager.is_preexisting is True
 
     async def emit(event: ProvisionEvent, **kw) -> None:
         await _emit(on_event, event, scenario_name=name, account_tag=account_tag, **kw)
 
+    def fail(step: str, exc: Exception) -> ProvisionedAccount:
+        logger.error("%s failed for %s/%s in %s: %s", step, name, account_tag, account_id, exc)
+        result.error = exc
+        return result
+
     try:
+        # Both run before the quota and snapshot steps, which act inside the declared regions.
+        try:
+            await asyncio.to_thread(
+                SnapshotManager().validate_pre_setup_snapshot,
+                name,
+                account_id,
+                scenario.scenario.regions,
+                allow_missing=True,
+            )
+        except Exception as exc:  # noqa: BLE001
+            return fail("Baseline region check", exc)
+        try:
+            await asyncio.to_thread(
+                account_manager.ensure_region_restriction_scp,
+                name,
+                scenario.scenario.regions,
+                [account_id],
+            )
+        except Exception as exc:  # noqa: BLE001
+            return fail("Region SCP reconciliation", exc)
+
         await emit(ProvisionEvent.ROLE_START, account_id=account_id)
         if preexisting:
             try:
                 session = cred_provider.get_session_for_account(
                     account_id,
                     ORG_ACCESS_ROLE,
-                    "aws-bench-runner-role-validate",
+                    build_session_name("session"),
                 )
                 await asyncio.to_thread(session.client("sts").get_caller_identity)
             except Exception as exc:  # noqa: BLE001
-                logger.error(
-                    "Runner role %s is unavailable in %s: %s",
-                    runner_role,
-                    account_id,
-                    exc,
-                )
-                result.error = exc
-                return result
+                return fail(f"Runner role {account_manager.runner_role} probe", exc)
         else:
             try:
                 await asyncio.to_thread(cred_provider.wait_for_role, account_id, ORG_ACCESS_ROLE)
             except Exception as exc:  # noqa: BLE001
-                logger.error(
-                    "Role %s never became assumable in %s: %s",
-                    ORG_ACCESS_ROLE,
-                    account_id,
-                    exc,
-                )
-                result.error = exc
-                return result
+                return fail(f"Role {ORG_ACCESS_ROLE} wait", exc)
 
         try:
             role_operation = _validate_cfn_ops_role if preexisting else _ensure_cfn_ops_role
             await asyncio.to_thread(role_operation, cred_provider, account_id)
         except Exception as exc:  # noqa: BLE001
-            logger.error(
-                "CFN ops role %s failed in %s: %s",
-                "validation" if preexisting else "creation",
-                account_id,
-                exc,
-            )
-            result.error = exc
-            return result
+            return fail(f"CFN ops role {'validation' if preexisting else 'creation'}", exc)
 
         await emit(ProvisionEvent.QUOTAS_START, account_id=account_id)
         for region, batch in _group_quotas_for_tag(scenario, account_tag).items():

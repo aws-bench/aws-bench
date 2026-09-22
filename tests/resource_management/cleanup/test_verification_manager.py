@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -176,13 +177,12 @@ def test_verify_unknown_on_non_ccapi_error(mock_ccm):
     assert result[0].existence_status == ExistenceStatus.UNKNOWN
 
 
-def test_verify_throttled_returns_unknown_not_skipped(mock_ccm):
-    """A throttled existence check must map to UNKNOWN, not SKIPPED.
+def test_verify_throttled_returns_unknown_not_skipped(mock_ccm, caplog):
+    """A throttled existence check maps to UNKNOWN, and says it was a throttle.
 
     SKIPPED is the 'genuinely unsupported' bucket; a throttled resource is merely
-    unverified. Bucketing it as SKIPPED silently drops it from the orphan count
-    (stack_deleter force-cleans only EXISTS), so a throttle can make a dirty
-    account read as clean. Regression guard for RC10.
+    unverified. Bucketing it as SKIPPED drops it from the orphan count, so a throttle can
+    make a dirty account read as clean.
     """
     from aws_bench.resource_management.ccapi.exceptions import ResourceExistenceThrottledError
 
@@ -193,8 +193,12 @@ def test_verify_throttled_returns_unknown_not_skipped(mock_ccm):
         resource_type="AWS::Lambda::Function",
         status="CREATE_COMPLETE",
     )
-    result = asyncio.run(ResourceVerifier(MagicMock()).verify_resources([resource]))
+    with caplog.at_level(
+        logging.DEBUG, logger="aws_bench.resource_management.cleanup.verification.manager"
+    ):
+        result = asyncio.run(ResourceVerifier(MagicMock()).verify_resources([resource]))
     assert result[0].existence_status == ExistenceStatus.UNKNOWN
+    assert "throttled" in caplog.text.lower()
 
 
 def test_verify_unsupported_ccapi_still_skipped(mock_ccm):
@@ -202,9 +206,11 @@ def test_verify_unsupported_ccapi_still_skipped(mock_ccm):
 
     Guards against the throttle carve-out accidentally regressing the SKIPPED path.
     """
-    from aws_bench.resource_management.ccapi.exceptions import ResourceExistenceCheckError
+    from aws_bench.resource_management.ccapi.exceptions import ResourceExistenceUnsupportedError
 
-    mock_ccm.resource_exists.side_effect = ResourceExistenceCheckError("CCAPI does not support X")
+    mock_ccm.resource_exists.side_effect = ResourceExistenceUnsupportedError(
+        "CCAPI does not support X"
+    )
     resource = StackResource(
         logical_id="L1",
         physical_id="x",
@@ -213,6 +219,28 @@ def test_verify_unsupported_ccapi_still_skipped(mock_ccm):
     )
     result = asyncio.run(ResourceVerifier(MagicMock()).verify_resources([resource]))
     assert result[0].existence_status == ExistenceStatus.SKIPPED
+
+
+def test_verify_check_failure_returns_unknown_not_skipped(mock_ccm):
+    """A failed existence check maps to UNKNOWN, not SKIPPED.
+
+    SKIPPED asserts the type itself cannot be acted on, so the force-abandoned sweep
+    drops it. A check that failed (e.g. AccessDenied on a governed resource) leaves
+    existence unverified, not disproved, so the resource must stay a delete candidate.
+    """
+    from aws_bench.resource_management.ccapi.exceptions import ResourceExistenceCheckError
+
+    mock_ccm.resource_exists.side_effect = ResourceExistenceCheckError(
+        "Failed to check existence of AWS::Glue::Database 'db': AccessDeniedException"
+    )
+    resource = StackResource(
+        logical_id="GlueDatabase",
+        physical_id="analytics_db_111111111111_us-east-1",
+        resource_type="AWS::Glue::Database",
+        status="DELETE_FAILED",
+    )
+    result = asyncio.run(ResourceVerifier(MagicMock()).verify_resources([resource]))
+    assert result[0].existence_status == ExistenceStatus.UNKNOWN
 
 
 def test_verify_preserves_input_order(mock_ccm):

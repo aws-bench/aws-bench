@@ -23,6 +23,25 @@ def test_reset_result_creation():
     assert result.details == {"stacks_fixed": 2, "resources_deleted": 5}
 
 
+def test_reset_result_unresolved_orphans_defaults_none():
+    """unresolved_orphans defaults to None on a clean success result."""
+    result = ResetResult(success=True, reason="Account successfully reset to baseline state")
+
+    assert result.unresolved_orphans is None
+
+
+def test_reset_result_carries_unresolved_orphans():
+    """A failure result can carry the orphans reset could not resolve."""
+    orphans = {"AWS::EC2::InternetGateway": [{"Identifier": "igw-leaked"}]}
+    result = ResetResult(
+        success=False,
+        reason="Stacks deleted for re-setup, but reset left the region unresolved",
+        unresolved_orphans=orphans,
+    )
+
+    assert result.unresolved_orphans == orphans
+
+
 # ===========================================================================
 # ResetFailure — failure exception
 # ===========================================================================

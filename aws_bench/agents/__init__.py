@@ -9,6 +9,7 @@ from aws_bench.agents.claude_code import ClaudeCode
 from aws_bench.agents.codex import Codex
 from aws_bench.agents.kiro_cli import KiroCli
 from aws_bench.agents.mini_swe_agent import MiniSweAgent
+from aws_bench.agents.opencode import OpenCode
 
 
 def _override_builtin(agent_cls: type[BaseAgent]) -> None:
@@ -25,9 +26,11 @@ def _override_builtin(agent_cls: type[BaseAgent]) -> None:
 
 
 # Route `-a codex` to the Bedrock-capable subclass, `-a claude-code` to the
-# plugin-capable subclass, and `-a mini-swe-agent` to the Bedrock-capable subclass.
+# plugin-capable subclass, `-a opencode` to the Bedrock-capable subclass, and
+# `-a mini-swe-agent` to the Bedrock-capable subclass.
 _override_builtin(Codex)
 _override_builtin(ClaudeCode)
+_override_builtin(OpenCode)
 _override_builtin(MiniSweAgent)
 
 # Register kiro-cli so `-a kiro-cli` works without --agent-import-path, by

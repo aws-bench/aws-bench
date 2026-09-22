@@ -22,6 +22,10 @@ AWS_MANAGED_FILTERS: dict[str, Callable[[str, dict], bool]] = {
     "AWS::EC2::PrefixList": lambda _, r: _is_aws_owned(r),
     # AWS-reserved ``default.*`` parameter groups (redis/memcached/valkey) are undeletable.
     "AWS::ElastiCache::ParameterGroup": lambda id, _: id.startswith("default."),
+    # AWS-reserved ``default`` cache subnet group: an account/Region singleton, lazily created on
+    # first ElastiCache use, and undeletable ("default is reserved and cannot be modified",
+    # verified live). Agent/task-created groups carry a custom name and are NOT filtered.
+    "AWS::ElastiCache::SubnetGroup": lambda id, _: id == "default",
     # AWS-reserved default RDS/Neptune parameter & option groups are per-engine, account-created,
     # and undeletable ("Default DBParameterGroup cannot be deleted" / "Default option groups cannot
     # be deleted", verified live). The lister emits the group NAME: param groups are
@@ -57,6 +61,15 @@ AWS_MANAGED_FILTERS: dict[str, Callable[[str, dict], bool]] = {
     # AWS-reserved default IoT domain configurations. Custom domains
     # (which cannot use the ``iot:`` prefix) still surface as real orphans.
     "AWS::IoT::DomainConfiguration": lambda id, _: id.startswith("iot:"),
+    # EC2 Auto Scaling's account-level managed EventBridge rule
+    # (``AutoScalingManagedRule``) is created lazily by the service the first time
+    # an Auto Scaling group is used (e.g. an EKS managed node group's ASG). It is
+    # account-persistent, is not part of any CloudFormation stack, and is absent
+    # from the pre-deploy snapshot, so every reset would otherwise flag it as a
+    # new/orphan resource. It is AWS-managed drift, not agent drift. The lister
+    # emits the rule ARN (``…:rule/AutoScalingManagedRule``); a task/agent-created
+    # rule carries a custom name and is NOT filtered.
+    "AWS::Events::Rule": lambda id, _: _is_autoscaling_managed_rule(id),
     # AWS-preconfigured default dashboard (documented in AWS S3 docs)
     "AWS::S3::StorageLens": lambda id, _: id == "default-account-dashboard",
     # AWS-managed RAM permissions live in the ::aws: partition (no account id);
@@ -93,6 +106,21 @@ AWS_MANAGED_FILTERS: dict[str, Callable[[str, dict], bool]] = {
     "AWS::SMSVOICE::OptOutList": lambda id, _: id.endswith("opt-out-list/Default"),
     # AWS-created default EventBridge event bus (undeletable).
     "AWS::Events::EventBus": lambda id, _: id.endswith("event-bus/default"),
+    # AWS-created default MediaConvert queue. Created lazily by the service on first
+    # MediaConvert use (so it is absent from the pre-deploy init snapshot) and cannot be
+    # deleted, so the init-snapshot diff would otherwise flag it as a leaked orphan. The
+    # lister emits the ARN (…:queues/Default). On-demand queues a task creates carry a
+    # custom name and are NOT filtered.
+    "AWS::MediaConvert::Queue": lambda id, _: id.endswith("queues/Default"),
+    # DynamoDB Import-from-S3 job records are permanent, undeletable import history: there is
+    # no DeleteImport API and CCAPI has no handler, so a completed import can never be cleaned
+    # up and the orphan/drift check flags it forever. The ``ListImports`` lister has no
+    # ``cfn_type``, so its ``ImportArn``s land in the synthetic ``AWS::dynamodb::*`` bucket
+    # alongside backups (``…/backup/…``), exports (``…/export/…``) and global tables (plain
+    # name). Match only the ``/import/`` ARN segment — table names forbid ``/``, so it appears
+    # solely in an import ARN — so real tables (proper ``AWS::DynamoDB::Table`` type) and the
+    # sibling backup/export/global-table records are NOT filtered.
+    "AWS::dynamodb::*": lambda id, _: "/import/" in id,
     # Service-managed secrets (e.g. a Redshift namespace's admin credentials) are
     # created and rotated BY the owning AWS service, which names them with a "!"
     # marker: ``redshift!…``, ``rds!…``, ``aws!…`` (ARN ``…:secret:redshift!…``).
@@ -123,6 +151,22 @@ def _is_service_managed_secret(identifier: str) -> bool:
     """
     name = identifier.split(":secret:")[-1] if ":secret:" in identifier else identifier
     return name.startswith(_SERVICE_MANAGED_SECRET_PREFIXES)
+
+
+_AUTOSCALING_MANAGED_RULE_NAME = "AutoScalingManagedRule"
+
+
+def _is_autoscaling_managed_rule(identifier: str) -> bool:
+    """Whether an ``AWS::Events::Rule`` identifier names EC2 Auto Scaling's managed rule.
+
+    The identifier may be the rule ARN — default bus
+    ``arn:aws:events:<region>:<acct>:rule/AutoScalingManagedRule`` or custom bus
+    ``…:rule/<bus>/AutoScalingManagedRule`` — or a bare rule name. Only the exact
+    AWS-managed name is matched (on the trailing name segment), so a task/agent
+    rule with a different name is never excluded.
+    """
+    name = identifier.rsplit("/", 1)[-1] if "/" in identifier else identifier
+    return name == _AUTOSCALING_MANAGED_RULE_NAME
 
 
 def _is_aws_owned(resource: dict) -> bool:

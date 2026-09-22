@@ -37,24 +37,30 @@ def _apply_client_defaults(session: boto3.Session) -> boto3.Session:
 
 
 # Building blocks for STS RoleSessionNames. Every name is composed as
-# ``aws-bench[-<segment>...]`` so CloudTrail entries are uniformly attributable
-# to the tool. ``AWS_BENCH_PREFIX`` is the single source of truth for that prefix.
-AWS_BENCH_PREFIX = "aws-bench"
+# ``app[-<segment>...]`` so CloudTrail entries are uniformly attributable and the
+# name stays neutral — it must not reveal to an evaluated agent that it is running
+# inside aws-bench. ``SESSION_NAME_PREFIX`` is the single source of truth.
+SESSION_NAME_PREFIX = "app"
 # STS caps RoleSessionName at 64 chars.
 MAX_SESSION_NAME_LEN = 64
 
 
 def build_session_name(*segments: str) -> str:
-    """Compose an ``aws-bench``-prefixed STS RoleSessionName from ``segments``.
+    """Compose a ``SESSION_NAME_PREFIX``-prefixed STS RoleSessionName from ``segments``.
 
-    Joins ``AWS_BENCH_PREFIX`` and ``segments`` with ``-`` and truncates to STS's
+    Joins ``SESSION_NAME_PREFIX`` and ``segments`` with ``-`` and truncates to STS's
     64-char limit. This is the single constructor for session names, so the
-    CloudTrail-attribution prefix lives in exactly one place.
+    prefix lives in exactly one place.
 
     Example:
-        ``build_session_name("rm", "cleanup")`` -> ``"aws-bench-rm-cleanup"``
+        ``build_session_name("session")`` -> ``"app-session"``
+
+    Segments must stay neutral: they must not reveal to an evaluated agent (via
+    ``sts:GetCallerIdentity`` or CloudTrail) that it is running inside aws-bench.
+    Callers use the ``"session"`` token plus opaque identifiers (e.g. an account-id
+    tail) only — never a task, benchmark, or operation description.
     """
-    return "-".join([AWS_BENCH_PREFIX, *segments])[:MAX_SESSION_NAME_LEN]
+    return "-".join([SESSION_NAME_PREFIX, *segments])[:MAX_SESSION_NAME_LEN]
 
 
 def enforce_session_name(session_name: str) -> str:
@@ -62,16 +68,15 @@ def enforce_session_name(session_name: str) -> str:
 
     Backstop at the generic STS choke points all assume-role paths funnel
     through: even a hand-written name (not built via :func:`build_session_name`)
-    must carry the ``aws-bench-`` prefix, so the convention is enforced at runtime.
+    must carry the ``app-`` prefix, so the convention is enforced at runtime.
 
-    Returns the name truncated to STS's 64-char limit; callers historically
-    relied on this truncation (e.g. the ``aws-bench-<role>-<task>-<job>`` builder
-    drops its job-id tail rather than the audit-meaningful prefix).
+    Returns the name truncated to STS's 64-char limit (e.g. the
+    ``app-session-<job>`` builder drops its job-id tail rather than the prefix).
 
     Raises:
-        ValueError: If the name does not start with ``aws-bench-``.
+        ValueError: If the name does not start with ``app-``.
     """
-    required_prefix = AWS_BENCH_PREFIX + "-"
+    required_prefix = SESSION_NAME_PREFIX + "-"
     if not session_name.startswith(required_prefix):
         raise ValueError(
             f"RoleSessionName must start with {required_prefix!r} for CloudTrail "
@@ -410,7 +415,7 @@ class CredentialProvider:
                 runner_creds = self.assume_role(
                     account_id,
                     config.runner_role,
-                    build_session_name("runner", account_id[-6:]),
+                    build_session_name("session", account_id[-6:]),
                     duration_seconds=duration_seconds,
                 )
                 parent_session = env_credentials_dict_to_session(runner_creds)
@@ -433,7 +438,7 @@ class CredentialProvider:
         hop1_session_name = (
             session_name
             if (not role_name or role_name == ORG_ACCESS_ROLE)
-            else build_session_name("org", account_id[-6:])
+            else build_session_name("session", account_id[-6:])
         )
         try:
             org_creds = self.assume_role(
@@ -502,7 +507,7 @@ class CredentialProvider:
             try:
                 self._sts.assume_role(
                     RoleArn=role_arn,
-                    RoleSessionName=build_session_name("role-probe"),
+                    RoleSessionName=build_session_name("session"),
                     DurationSeconds=900,
                 )
                 logger.debug("Role %s is now assumable.", role_arn)
@@ -555,7 +560,7 @@ class CredentialProvider:
                 parent_session = _create_refreshable_session(
                     self._session,
                     runner_arn,
-                    build_session_name("runner", account_id[-6:]),
+                    build_session_name("session", account_id[-6:]),
                     region,
                 )
             role_name = target_role

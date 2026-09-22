@@ -325,7 +325,7 @@ description = "Short description of what the agent must do"
 
 [scenario]
 scenario_id = "my-scenario"
-agent_role_name = "QALocalInvocationApplicationRole"
+agent_role_name = "ApplicationReadOnlyRole"
 
 [metadata]
 id = "a1b2c3d4-e5f6-7890-abcd-ef1234567890"

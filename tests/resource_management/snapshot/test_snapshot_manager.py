@@ -11,7 +11,11 @@ import tenacity
 from botocore.exceptions import ClientError
 from moto import mock_aws
 
-from aws_bench.resource_management.exceptions import DriftDetectionError, SnapshotNotFoundError
+from aws_bench.resource_management.exceptions import (
+    DriftDetectionError,
+    SnapshotNotFoundError,
+    SnapshotRegionMismatchError,
+)
 from aws_bench.resource_management.snapshot.manager import SnapshotManager
 from aws_bench.resource_management.snapshot.models import (
     DriftBaseline,
@@ -208,6 +212,49 @@ def test_load_snapshot_corrupted_json(temp_snapshot_dir, sample_snapshot):
     # Loading should raise JSONDecodeError, not SnapshotNotFoundError
     with pytest.raises(json.JSONDecodeError):
         manager.load_snapshot("test-env", "123456789012")
+
+
+@pytest.mark.parametrize("stored_regions", [["us-east-1", "us-west-2"], ["us-west-2", "us-east-1"]])
+def test_validate_pre_setup_snapshot_accepts_equal_sets(sample_snapshot, stored_regions):
+    manager = SnapshotManager()
+    sample_snapshot.regions = stored_regions
+    with patch.object(manager, "load_snapshot", return_value=sample_snapshot) as load:
+        manager.validate_pre_setup_snapshot(
+            "sc", sample_snapshot.account_id, ["us-east-1", "us-west-2"]
+        )
+
+    load.assert_called_once_with("sc", sample_snapshot.account_id, SnapshotStage.PRE_SETUP)
+
+
+@pytest.mark.parametrize(
+    "stored_regions",
+    [["us-east-1"], ["us-west-2", "us-east-1", "eu-west-1"], ["eu-west-1", "us-east-1"]],
+    ids=["added", "removed", "swapped"],
+)
+def test_validate_pre_setup_snapshot_rejects_changed_regions(sample_snapshot, stored_regions):
+    manager = SnapshotManager()
+    sample_snapshot.regions = stored_regions
+    with patch.object(manager, "load_snapshot", return_value=sample_snapshot):
+        with pytest.raises(SnapshotRegionMismatchError) as exc_info:
+            manager.validate_pre_setup_snapshot(
+                "sc", sample_snapshot.account_id, ["us-west-2", "us-east-1"]
+            )
+
+    message = str(exc_info.value)
+    assert "['us-east-1', 'us-west-2']" in message
+    assert str(sorted(stored_regions)) in message
+    assert "Restore the previous regions in scenario.toml" in message
+
+
+def test_validate_pre_setup_snapshot_missing_baseline(sample_snapshot):
+    manager = SnapshotManager()
+    missing = SnapshotNotFoundError("sc", sample_snapshot.account_id, SnapshotStage.PRE_SETUP)
+    with patch.object(manager, "load_snapshot", side_effect=missing):
+        manager.validate_pre_setup_snapshot(
+            "sc", sample_snapshot.account_id, ["us-east-1"], allow_missing=True
+        )
+        with pytest.raises(SnapshotNotFoundError):
+            manager.validate_pre_setup_snapshot("sc", sample_snapshot.account_id, ["us-east-1"])
 
 
 @mock_aws
@@ -833,6 +880,63 @@ def test_snapshot_account_writes_local_file_and_skips_s3(temp_snapshot_dir, mock
     data = json.loads(expected_path.read_text())
     assert data["account_id"] == "123456789012"
     assert data["environment_id"] == "env-test"
+
+
+# ===========================================================================
+# snapshot_account — forbidden-identifier guard (defense-in-depth)
+# ===========================================================================
+
+
+@mock_aws
+def test_snapshot_account_refuses_baseline_with_forbidden_identifier(temp_snapshot_dir, mocker):
+    """A captured baseline containing a flagged orphan is refused, never saved."""
+    manager = create_test_manager()
+
+    captured = _region_snapshot("us-east-1", stack="stack-e1", resource_id="vpc-orphan")
+    mocker.patch.object(manager, "capture_snapshot_multiregion", return_value=captured)
+    save_spy = mocker.patch.object(manager, "save_snapshot")
+
+    ctx = SnapshotContext(
+        scenario_id="my-scenario",
+        scenario_hash="hash1",
+        regions=["us-east-1"],
+        stage=SnapshotStage.POST_SETUP,
+        account_ids=["123456789012"],
+        forbidden_identifiers={"vpc-orphan"},
+    )
+
+    session = boto3.Session(region_name="us-east-1")
+    result = manager.snapshot_account(session, "123456789012", ctx)
+
+    assert result.success is False
+    assert result.error_message is not None
+    assert "vpc-orphan" in result.error_message
+    save_spy.assert_not_called()
+
+
+@mock_aws
+def test_snapshot_account_saves_when_forbidden_identifiers_absent(temp_snapshot_dir, mocker):
+    """A non-intersecting (or empty) forbidden set does not block the normal save."""
+    manager = create_test_manager()
+
+    captured = _region_snapshot("us-east-1", stack="stack-e1", resource_id="role-e1")
+    mocker.patch.object(manager, "capture_snapshot_multiregion", return_value=captured)
+    save_spy = mocker.patch.object(manager, "save_snapshot")
+
+    ctx = SnapshotContext(
+        scenario_id="my-scenario",
+        scenario_hash="hash1",
+        regions=["us-east-1"],
+        stage=SnapshotStage.POST_SETUP,
+        account_ids=["123456789012"],
+        forbidden_identifiers={"vpc-not-present"},
+    )
+
+    session = boto3.Session(region_name="us-east-1")
+    result = manager.snapshot_account(session, "123456789012", ctx)
+
+    assert result.success is True
+    save_spy.assert_called_once()
 
 
 # ===========================================================================

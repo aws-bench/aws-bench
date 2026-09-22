@@ -9,6 +9,7 @@ from aws_bench.resource_management.ccapi.exceptions import (
     CloudControlError,
     CloudControlResourceDeletionException,
     ResourceExistenceCheckError,
+    ResourceExistenceHandlerFailureError,
     ResourceExistenceUnsupportedError,
     is_not_found_error,
 )
@@ -53,6 +54,19 @@ def test_unsupported_error_is_a_resource_existence_check_error():
     exc = ResourceExistenceUnsupportedError("CCAPI does not support X")
     assert isinstance(exc, ResourceExistenceCheckError)
     assert issubclass(ResourceExistenceUnsupportedError, ResourceExistenceCheckError)
+
+
+def test_handler_failure_error_is_check_error_but_not_unsupported():
+    """A broken-handler failure is a check error, not the unsupported subclass.
+
+    The distinction is load-bearing: the deleter SKIPS an unsupported type but must ATTEMPT a
+    handler-failure type (its handler is broken, not the type unsupported), or a real orphan of
+    that type would leak.
+    """
+    exc = ResourceExistenceHandlerFailureError("HandlerInternalFailureException")
+    assert isinstance(exc, ResourceExistenceCheckError)
+    assert not isinstance(exc, ResourceExistenceUnsupportedError)
+    assert issubclass(ResourceExistenceHandlerFailureError, ResourceExistenceCheckError)
 
 
 # -- is_not_found_error --

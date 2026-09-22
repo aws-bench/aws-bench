@@ -11,7 +11,11 @@ import botocore.exceptions
 
 from aws_bench.logging.logger import get_logger
 from aws_bench.resource_management.cleanup.manager import CleanupManager
-from aws_bench.resource_management.reset.models import ChangesetResult, RestoreOutcome
+from aws_bench.resource_management.reset.models import (
+    ChangesetResult,
+    ResetupDeletion,
+    RestoreOutcome,
+)
 from aws_bench.resource_management.snapshot.drift import DRIFT_CLIENT_CONFIG, DRIFT_DETECTION_FAILED
 from aws_bench.resource_management.utils.cloudformation import (
     get_stack_resource_drifts,
@@ -49,7 +53,7 @@ class StackRestorer:
         self,
         stack_name: str,
         baseline_drift: list[dict[str, Any]],
-    ) -> RestoreOutcome:
+    ) -> ResetupDeletion:
         """Restore stack to baseline drift state.
 
         Strategy:
@@ -63,15 +67,15 @@ class StackRestorer:
             baseline_drift: Expected drift state from snapshot
 
         Returns:
-            RestoreOutcome: RESTORED if reverted in place,
-            DELETED_NEEDS_REDEPLOY if the stack was deleted for re-setup,
-            FAILED if neither could be done.
+            ResetupDeletion: RESTORED with no abandoned resources if reverted in
+            place; otherwise the outcome of the delete-for-re-setup fallback
+            (DELETED_NEEDS_REDEPLOY / FAILED plus any force-abandoned resources).
         """
         logger.debug(f"Attempting to fix drift for stack {stack_name}")
 
         # Attempt 1: Drift revert
         if await self._attempt_drift_revert(stack_name, baseline_drift):
-            return RestoreOutcome.RESTORED
+            return ResetupDeletion(RestoreOutcome.RESTORED)
 
         # Attempt 2: Delete so setup can recreate it
         return await self._delete_for_resetup(stack_name)
@@ -206,7 +210,7 @@ class StackRestorer:
         logger.warning(f"{stack_name}: Changeset not created ({reason}), will delete for re-setup")
         return ChangesetResult.FAILED
 
-    async def _delete_for_resetup(self, stack_name: str) -> RestoreOutcome:
+    async def _delete_for_resetup(self, stack_name: str) -> ResetupDeletion:
         """Delete a stack that couldn't be reverted so setup can recreate it.
 
         The stack is recreated by re-running ``aws-bench env setup`` (the
@@ -218,8 +222,10 @@ class StackRestorer:
             stack_name: Name of stack to delete
 
         Returns:
-            RestoreOutcome.DELETED_NEEDS_REDEPLOY if deletion succeeded,
-            RestoreOutcome.FAILED otherwise.
+            ResetupDeletion carrying DELETED_NEEDS_REDEPLOY on success (with any
+            resources FORCE_DELETE_STACK abandoned, from ``cleanup_stack``'s
+            ``orphaned_resources``) or FAILED otherwise. Already-absent counts as
+            a successful delete with nothing abandoned.
         """
         try:
             logger.debug(f"{stack_name}: Drift revert not possible; deleting for re-setup")
@@ -229,12 +235,16 @@ class StackRestorer:
 
             if not deletion_result.all_stacks_succeeded:
                 logger.error(f"{stack_name}: Deletion failed")
-                return RestoreOutcome.FAILED
+                return ResetupDeletion(RestoreOutcome.FAILED)
 
             logger.debug(
                 f"{stack_name}: Deletion succeeded; will be recreated by 'aws-bench env setup'"
             )
-            return RestoreOutcome.DELETED_NEEDS_REDEPLOY
+            abandoned = {
+                rtype: [{"Identifier": i} for i in ids]
+                for rtype, ids in deletion_result.orphaned_resources.items()
+            }
+            return ResetupDeletion(RestoreOutcome.DELETED_NEEDS_REDEPLOY, abandoned=abandoned)
 
         except ValueError as e:
             # cleanup_stack raises ValueError("... not found in any region") when
@@ -245,13 +255,13 @@ class StackRestorer:
                 logger.debug(
                     f"{stack_name}: Already absent; will be recreated by 'aws-bench env setup'"
                 )
-                return RestoreOutcome.DELETED_NEEDS_REDEPLOY
+                return ResetupDeletion(RestoreOutcome.DELETED_NEEDS_REDEPLOY)
             logger.error(f"{stack_name}: Deletion for re-setup failed: {e}")
-            return RestoreOutcome.FAILED
+            return ResetupDeletion(RestoreOutcome.FAILED)
 
         except Exception as e:
             logger.error(f"{stack_name}: Deletion for re-setup failed: {e}")
-            return RestoreOutcome.FAILED
+            return ResetupDeletion(RestoreOutcome.FAILED)
 
     async def _verify_drift_matches_baseline(
         self, stack_name: str, baseline_drift: list[dict[str, Any]], retries: int = 3

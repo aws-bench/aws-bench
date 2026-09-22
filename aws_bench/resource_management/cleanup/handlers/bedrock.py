@@ -4,7 +4,10 @@ Deleting a task-created ``AWS::Bedrock::KnowledgeBase`` on reset has three
 wrinkles, each handled in a dedicated helper below:
   * it owns data sources that block deletion — prepare deletes them first;
   * its delete assumes the KB's own IAM execution role, which an agent may not
-    have scoped for teardown — prepare grants that (``_ensure_role_can_teardown``);
+    have scoped for teardown — prepare grants a transient teardown policy on that
+    role (``_ensure_role_can_teardown``), and the delete step removes it once the
+    KB is gone (``_revoke_teardown_grant``) so it never lingers on a role reset
+    preserves;
   * the delete is asynchronous — the delete step waits for terminal deletion,
     re-issuing on ``DELETE_UNSUCCESSFUL`` (``_wait_for_terminal_deletion``).
 """
@@ -40,8 +43,8 @@ _IAM_NOT_FOUND_CODES = ("NoSuchEntity", "NoSuchEntityException")
 # Actions a knowledge base's execution role must be allowed to call so Bedrock
 # can tear down the KB's backing store during deletion. Covers every KB
 # backing-store family (Redshift structured, OpenSearch/Aurora/S3 vector) since
-# the handler is type-agnostic. The role is deleted immediately after the KB, so
-# this grant is transient.
+# the handler is type-agnostic. The grant is transient: the delete step removes it
+# once the KB is gone, so it never outlives the KB even on a role reset preserves.
 _KB_TEARDOWN_ACTIONS = [
     "sqlworkbench:*",
     "redshift:*",
@@ -55,14 +58,6 @@ _KB_TEARDOWN_ACTIONS = [
     "bedrock:*",
 ]
 _KB_TEARDOWN_POLICY_NAME = "AwsBenchKBTeardown"
-# The teardown grant is only attached to a role that follows the AWS-generated KB
-# execution-role naming convention (what the console/API auto-create and what an
-# agent creates for a KB). This guards against ever mutating a *baseline* or
-# shared role a KB might point at (e.g. a CDK-authored ``BedrockDistillationRole``
-# reset would not delete) — attaching a broad policy to such a role would outlive
-# the reset and contaminate later tasks. Service-linked/protected roles are also
-# excluded.
-_KB_EXEC_ROLE_PREFIX = "AmazonBedrockExecutionRoleForK"
 
 # Bounded terminal-deletion polling so a stuck KB cannot hang reset forever:
 # 30 attempts x 10s = up to 300s, ample for KB (and its vector store) teardown.
@@ -143,38 +138,42 @@ def _wait_for_terminal_deletion(client: BaseClient, kb_id: str) -> None:
     )
 
 
-def _ensure_role_can_teardown(session: boto3.Session, client: BaseClient, kb_id: str) -> None:
-    """Grant the KB's execution role the actions Bedrock needs to tear it down.
+def _kb_teardown_role(client: BaseClient, kb_id: str) -> str | None:
+    """Return the KB's execution-role name the teardown policy applies to, or None.
 
-    ``delete_knowledge_base`` assumes the KB's own execution role to delete its
-    backing store; an agent-created role scoped to build/query the KB can lack
-    the teardown actions, wedging the delete in ``DELETE_UNSUCCESSFUL``. Attach a
-    teardown-scoped inline policy to that role so the async delete can complete.
-
-    Only roles matching the AWS KB execution-role convention are touched (and
-    never service-linked/protected roles), so a baseline or shared role a KB
-    happens to point at is never mutated — such a role would survive reset and
-    carry the grant into later tasks. Best-effort: any failure here (KB/role
-    already gone, IAM denied) is swallowed so prepare still proceeds — the delete
-    step surfaces a genuinely stuck KB.
+    Reads the KB's ``roleArn``. Returns ``None`` when there is nothing to
+    grant/revoke: the KB is gone/unreadable, has no role, or the role is a
+    service-linked or protected role we must never mutate (a KB cannot legitimately
+    use one as its execution role, and IAM would reject the inline policy anyway).
     """
     try:
         kb = client.get_knowledge_base(knowledgeBaseId=kb_id)["knowledgeBase"]
     except (ClientError, BotoCoreError, KeyError):
-        return  # KB already gone or unreadable — nothing to prepare.
+        return None  # KB already gone or unreadable.
     role_arn = kb.get("roleArn", "")
     role_name = role_arn.rsplit("/", 1)[-1] if role_arn else ""
     if not role_name:
-        return
-    # Guard: only grant to an AWS-created KB execution role (deleted with the KB),
-    # never a service-linked/protected or baseline/shared role.
-    if (
-        not role_name.startswith(_KB_EXEC_ROLE_PREFIX)
-        or role_name.startswith(SERVICE_ROLE_PREFIX)
-        or role_name in PROTECTED_IAM_ROLE_NAMES
-    ):
-        logger.debug("Skipping teardown grant for non-KB-exec role %s", role_name)
-        return
+        return None
+    if role_name.startswith(SERVICE_ROLE_PREFIX) or role_name in PROTECTED_IAM_ROLE_NAMES:
+        logger.debug("Skipping teardown grant for protected/service role %s", role_name)
+        return None
+    return role_name
+
+
+def _ensure_role_can_teardown(session: boto3.Session, role_name: str) -> None:
+    """Grant ``role_name`` the actions Bedrock needs to tear down the KB's store.
+
+    ``delete_knowledge_base`` assumes the KB's own execution role to delete its
+    backing store; an agent-created role scoped to build/query the KB can lack
+    the teardown actions, wedging the delete in ``DELETE_UNSUCCESSFUL``. Attach a
+    teardown-scoped inline policy so the async delete can complete.
+
+    The grant is safe to apply to any role because the delete step removes it once
+    the KB is gone (``_revoke_teardown_grant``) — so it never lingers on a role
+    reset preserves. Best-effort: any failure here (role already gone, IAM denied)
+    is swallowed so prepare still proceeds — the delete step surfaces a genuinely
+    stuck KB.
+    """
     iam = build_client(session, "iam")
     try:
         iam.put_role_policy(
@@ -197,12 +196,31 @@ def _ensure_role_can_teardown(session: boto3.Session, client: BaseClient, kb_id:
         logger.warning("Could not grant teardown policy to role %s: %s", role_name, e)
 
 
+def _revoke_teardown_grant(session: boto3.Session, role_name: str) -> None:
+    """Remove the transient teardown policy from ``role_name`` after KB deletion.
+
+    Keeps the broad grant from outliving the KB. Best-effort and idempotent: the
+    role is usually deleted right after the KB (an agent-created new resource), so
+    a missing role/policy is expected and swallowed; only unexpected errors log.
+    """
+    iam = build_client(session, "iam")
+    try:
+        iam.delete_role_policy(RoleName=role_name, PolicyName=_KB_TEARDOWN_POLICY_NAME)
+    except ClientError as e:
+        if e.response.get("Error", {}).get("Code", "") not in _IAM_NOT_FOUND_CODES:
+            logger.warning("Could not revoke teardown policy from role %s: %s", role_name, e)
+    except BotoCoreError as e:
+        logger.warning("Could not revoke teardown policy from role %s: %s", role_name, e)
+
+
 @resource_handler("AWS::Bedrock::KnowledgeBase", role="prepare")
 def _prepare(resource: Resource, session: boto3.Session) -> HandlerResult:
     """Delete the KB's data sources and grant its role teardown permissions."""
     client = build_client(session, "bedrock-agent")
     kb_id = resource.identifier
-    _ensure_role_can_teardown(session, client, kb_id)
+    role_name = _kb_teardown_role(client, kb_id)
+    if role_name:
+        _ensure_role_can_teardown(session, role_name)
     try:
         for page in client.get_paginator("list_data_sources").paginate(knowledgeBaseId=kb_id):
             for ds in page.get("dataSourceSummaries", []):
@@ -237,15 +255,27 @@ def _prepare(resource: Resource, session: boto3.Session) -> HandlerResult:
 
 @resource_handler("AWS::Bedrock::KnowledgeBase", role="delete")
 def _delete(resource: Resource, session: boto3.Session) -> HandlerResult:
-    """Delete the knowledge base via the bedrock-agent API, then wait for terminal deletion."""
-    return service_delete(
-        resource,
-        session,
-        client_name="bedrock-agent",
-        op_name="delete_knowledge_base",
-        id_param="knowledgeBaseId",
-        not_found_codes=_NOT_FOUND_CODES,
-        already_gone_message="Knowledge base already gone",
-        log_label="Bedrock knowledge base",
-        post_delete=lambda client: _wait_for_terminal_deletion(client, resource.identifier),
-    )
+    """Delete the knowledge base via the bedrock-agent API, then wait for terminal deletion.
+
+    Captures the KB's execution role up front (it is readable until the KB is gone)
+    so the transient teardown policy granted in prepare can be removed once the KB
+    is deleted — the ``finally`` runs whether the delete succeeded or got stuck, so
+    the broad grant never lingers on a role reset preserves.
+    """
+    client = build_client(session, "bedrock-agent")
+    role_name = _kb_teardown_role(client, resource.identifier)
+    try:
+        return service_delete(
+            resource,
+            session,
+            client_name="bedrock-agent",
+            op_name="delete_knowledge_base",
+            id_param="knowledgeBaseId",
+            not_found_codes=_NOT_FOUND_CODES,
+            already_gone_message="Knowledge base already gone",
+            log_label="Bedrock knowledge base",
+            post_delete=lambda c: _wait_for_terminal_deletion(c, resource.identifier),
+        )
+    finally:
+        if role_name:
+            _revoke_teardown_grant(session, role_name)

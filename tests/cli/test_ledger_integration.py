@@ -190,6 +190,7 @@ def _stub_run_seams(monkeypatch, *, job_id: str, is_resuming: bool):
     monkeypatch.setattr("aws_bench.cli.jobs.print_job_results_tables", lambda *a, **k: None)
     monkeypatch.setattr("aws_bench.cli.jobs.preflight_docker_cli", lambda *a, **k: None)
     monkeypatch.setattr("aws_bench.cli.jobs.preflight_docker_daemon", lambda *a, **k: None)
+    monkeypatch.setattr("aws_bench.cli.jobs.preflight_docker_plugins", lambda *a, **k: None)
     monkeypatch.setattr("aws_bench.cli.jobs.preflight_aws_credentials", lambda *a, **k: None)
     return job
 
@@ -252,6 +253,7 @@ def test_run_records_resolved_config_when_create_fails(monkeypatch, tmp_path):
     )
     monkeypatch.setattr("aws_bench.cli.jobs.preflight_docker_cli", lambda *a, **k: None)
     monkeypatch.setattr("aws_bench.cli.jobs.preflight_docker_daemon", lambda *a, **k: None)
+    monkeypatch.setattr("aws_bench.cli.jobs.preflight_docker_plugins", lambda *a, **k: None)
     monkeypatch.setattr("aws_bench.cli.jobs.preflight_aws_credentials", lambda *a, **k: None)
 
     from aws_bench.cli.main import app
@@ -298,6 +300,7 @@ def _stub_env_phase_seams(monkeypatch, *, tmp_path):
 
     monkeypatch.setattr("aws_bench.cli.env.preflight_docker_cli", lambda: None)
     monkeypatch.setattr("aws_bench.cli.env.preflight_docker_daemon", lambda: None)
+    monkeypatch.setattr("aws_bench.cli.env.preflight_docker_plugins", lambda plugins: None)
     monkeypatch.setattr("aws_bench.cli.env.preflight_aws_credentials", lambda cred, **kwargs: None)
     monkeypatch.setattr(
         "aws_bench.cli.env.CredentialProvider.get",

@@ -10,6 +10,7 @@ from botocore.exceptions import ClientError
 from aws_bench.resource_management.cleanup.handlers.cross_service import (
     EniReapResult,
     IpamPoolReapResult,
+    VpcPublicAddressWedgeResult,
     _delete_dms_instances_in_vpcs,
     _delete_eks_resource_group,
     _delete_redshift_resources,
@@ -20,6 +21,8 @@ from aws_bench.resource_management.cleanup.handlers.cross_service import (
     _prepare_security_group,
     cleanup_redshift,
     cleanup_stuck_custom_resource_deps,
+    clear_igw_public_address_wedge,
+    clear_vpc_public_address_wedge,
     delete_dms_instances,
     delete_eks_clusters,
     discover_vpc_dynamic_resources,
@@ -32,6 +35,8 @@ from aws_bench.resource_management.cleanup.handlers.ipam import (
 )
 from aws_bench.resource_management.cleanup.models import StackResource
 from aws_bench.resource_management.deferred import deferred_scope
+
+CROSS = "aws_bench.resource_management.cleanup.handlers.cross_service"
 
 
 def _paginator(pages: list[dict]) -> MagicMock:
@@ -1932,3 +1937,307 @@ def test_reap_ipam_child_pools_shares_one_deadline_across_children():
     # Both children got the SAME non-None deadline -> one shared budget, not two.
     assert deadlines[child_a] is not None
     assert deadlines[child_a] == deadlines[child_b]
+
+
+# -- NAT / EIP / IGW "mapped public address" wedge --
+
+
+def _wedge_ec2(
+    *,
+    nats: list[dict] | None = None,
+    nat_poll_state: str = "deleted",
+    addresses: list[dict] | None = None,
+    igws: list[dict] | None = None,
+) -> tuple[MagicMock, list[str]]:
+    """A mock ec2 client for the wedge teardown plus an ordered destructive-call recorder.
+
+    ``nats``/``igws`` are what the vpc-id-filtered paginators return; ``nat_poll_state``
+    is the State the NAT poll (``describe_nat_gateways``) reports; ``addresses`` is the
+    EIP list ``describe_addresses`` returns.
+    """
+    ec2 = MagicMock()
+    order: list[str] = []
+
+    nat_pag = _paginator([{"NatGateways": nats or []}])
+    igw_pag = _paginator([{"InternetGateways": igws or []}])
+
+    def get_paginator(op: str) -> MagicMock:
+        if op == "describe_nat_gateways":
+            return nat_pag
+        if op == "describe_internet_gateways":
+            return igw_pag
+        raise AssertionError(f"unexpected paginator {op}")
+
+    ec2.get_paginator.side_effect = get_paginator
+    ec2.describe_nat_gateways.return_value = {"NatGateways": [{"State": nat_poll_state}]}
+    ec2.describe_addresses.return_value = {"Addresses": addresses or []}
+
+    for name in (
+        "delete_nat_gateway",
+        "disassociate_address",
+        "release_address",
+        "detach_internet_gateway",
+        "delete_internet_gateway",
+    ):
+        getattr(ec2, name).side_effect = (lambda n: lambda **kw: order.append(n))(name)
+    return ec2, order
+
+
+def test_clear_wedge_deletes_nat_releases_eips_deletes_igw_in_order():
+    """NAT gateway → EIP (disassociate+release / release-only) → IGW detach+delete, in order."""
+    session = MagicMock()
+    ec2, order = _wedge_ec2(
+        nats=[{"NatGatewayId": "nat-1", "State": "available"}],
+        nat_poll_state="deleted",
+        addresses=[
+            {"AllocationId": "eipalloc-1", "AssociationId": "eipassoc-1"},
+            {"AllocationId": "eipalloc-2"},  # no association -> release only
+        ],
+        igws=[{"InternetGatewayId": "igw-1", "Attachments": [{"VpcId": "vpc-1"}]}],
+    )
+    session.client.return_value = ec2
+
+    result = clear_vpc_public_address_wedge(session, ["vpc-1"])
+
+    assert result.nat_deleted == ["nat-1"]
+    assert set(result.eips_released) == {"eipalloc-1", "eipalloc-2"}
+    assert result.igws_deleted == ["igw-1"]
+    assert result.remaining == []
+    assert result.cleared_any is True
+
+    # Only the associated EIP is disassociated; both are released.
+    ec2.disassociate_address.assert_called_once_with(AssociationId="eipassoc-1")
+    assert ec2.release_address.call_count == 2
+    ec2.detach_internet_gateway.assert_called_once_with(InternetGatewayId="igw-1", VpcId="vpc-1")
+    ec2.delete_internet_gateway.assert_called_once_with(InternetGatewayId="igw-1")
+
+    # Dependency order: NAT first, then EIP release, then IGW detach, then IGW delete.
+    assert order.index("delete_nat_gateway") < order.index("release_address")
+    assert order.index("disassociate_address") < order.index("release_address")
+    assert order.index("release_address") < order.index("detach_internet_gateway")
+    assert order.index("detach_internet_gateway") < order.index("delete_internet_gateway")
+
+
+def test_clear_wedge_empty_vpc_is_noop_without_destructive_calls():
+    """A VPC with no NAT/EIP/IGW returns an empty result and makes no destructive calls."""
+    session = MagicMock()
+    ec2, order = _wedge_ec2(nats=[], addresses=[], igws=[])
+    session.client.return_value = ec2
+
+    result = clear_vpc_public_address_wedge(session, ["vpc-1"])
+
+    assert result.cleared_any is False
+    assert result.remaining == []
+    assert order == []
+    ec2.delete_nat_gateway.assert_not_called()
+    ec2.disassociate_address.assert_not_called()
+    ec2.release_address.assert_not_called()
+    ec2.detach_internet_gateway.assert_not_called()
+    ec2.delete_internet_gateway.assert_not_called()
+
+
+def test_clear_wedge_empty_vpc_ids_returns_empty_without_client():
+    session = MagicMock()
+    result = clear_vpc_public_address_wedge(session, ["", None])  # type: ignore[list-item]
+    assert result.cleared_any is False and result.remaining == []
+    session.client.assert_not_called()
+
+
+def test_clear_wedge_nat_never_deleted_lands_in_remaining():
+    """A NAT gateway that never reaches 'deleted' before timeout is reported as remaining."""
+    session = MagicMock()
+    ec2, _order = _wedge_ec2(
+        nats=[{"NatGatewayId": "nat-slow", "State": "available"}],
+        nat_poll_state="deleting",  # never reaches "deleted"
+        addresses=[],
+        igws=[],
+    )
+    session.client.return_value = ec2
+    with patch(f"{CROSS}._NAT_GATEWAY_TIMEOUT", 0), patch(f"{CROSS}.time.sleep"):
+        result = clear_vpc_public_address_wedge(session, ["vpc-1"])
+    assert result.nat_deleted == []
+    assert result.remaining == ["nat-slow"]
+    assert result.cleared_any is False
+
+
+def test_clear_wedge_nat_already_gone_is_treated_as_deleted():
+    """delete_nat_gateway NatGatewayNotFound -> recorded as deleted, not failed."""
+    session = MagicMock()
+    ec2, _order = _wedge_ec2(
+        nats=[{"NatGatewayId": "nat-gone", "State": "available"}], addresses=[], igws=[]
+    )
+    ec2.delete_nat_gateway.side_effect = ClientError(
+        {"Error": {"Code": "NatGatewayNotFound"}}, "DeleteNatGateway"
+    )
+    session.client.return_value = ec2
+    result = clear_vpc_public_address_wedge(session, ["vpc-1"])
+    assert result.nat_deleted == ["nat-gone"]
+    assert result.remaining == []
+
+
+def test_clear_wedge_eip_release_failure_lands_in_remaining():
+    """An EIP that fails to release surfaces in remaining (never a silent success)."""
+    session = MagicMock()
+    ec2, _order = _wedge_ec2(nats=[], addresses=[{"AllocationId": "eipalloc-stuck"}], igws=[])
+    ec2.release_address.side_effect = ClientError(
+        {"Error": {"Code": "AuthFailure"}}, "ReleaseAddress"
+    )
+    session.client.return_value = ec2
+    result = clear_vpc_public_address_wedge(session, ["vpc-1"])
+    assert result.eips_released == []
+    assert result.remaining == ["eipalloc-stuck"]
+
+
+def test_clear_wedge_igw_detach_failure_lands_in_remaining():
+    """An IGW whose detach fails surfaces in remaining and is not deleted."""
+    session = MagicMock()
+    ec2, _order = _wedge_ec2(
+        nats=[],
+        addresses=[],
+        igws=[{"InternetGatewayId": "igw-stuck", "Attachments": [{"VpcId": "vpc-1"}]}],
+    )
+    ec2.detach_internet_gateway.side_effect = ClientError(
+        {"Error": {"Code": "DependencyViolation"}}, "DetachInternetGateway"
+    )
+    session.client.return_value = ec2
+    result = clear_vpc_public_address_wedge(session, ["vpc-1"])
+    assert result.igws_deleted == []
+    assert result.remaining == ["igw-stuck"]
+    ec2.delete_internet_gateway.assert_not_called()
+
+
+def test_clear_wedge_eip_disassociate_failure_lands_in_remaining():
+    """An EIP whose disassociate fails is not released and surfaces in remaining."""
+    session = MagicMock()
+    ec2, _order = _wedge_ec2(
+        nats=[],
+        addresses=[{"AllocationId": "eipalloc-stuck", "AssociationId": "eipassoc-stuck"}],
+        igws=[],
+    )
+    ec2.disassociate_address.side_effect = ClientError(
+        {"Error": {"Code": "AuthFailure"}}, "DisassociateAddress"
+    )
+    session.client.return_value = ec2
+    result = clear_vpc_public_address_wedge(session, ["vpc-1"])
+    assert result.eips_released == []
+    assert result.remaining == ["eipalloc-stuck"]
+    ec2.release_address.assert_not_called()
+
+
+def test_clear_wedge_igw_delete_failure_after_detach_lands_in_remaining():
+    """An IGW that detaches but fails to delete surfaces in remaining, not deleted."""
+    session = MagicMock()
+    ec2, _order = _wedge_ec2(
+        nats=[],
+        addresses=[],
+        igws=[{"InternetGatewayId": "igw-stuck", "Attachments": [{"VpcId": "vpc-1"}]}],
+    )
+    ec2.delete_internet_gateway.side_effect = ClientError(
+        {"Error": {"Code": "DependencyViolation"}}, "DeleteInternetGateway"
+    )
+    session.client.return_value = ec2
+    result = clear_vpc_public_address_wedge(session, ["vpc-1"])
+    assert result.igws_deleted == []
+    assert result.remaining == ["igw-stuck"]
+    ec2.detach_internet_gateway.assert_called_once_with(
+        InternetGatewayId="igw-stuck", VpcId="vpc-1"
+    )
+
+
+def test_clear_wedge_igw_already_detached_and_gone_codes_are_idempotent():
+    """Gateway.NotAttached on detach and NotFound on delete are treated as success."""
+    session = MagicMock()
+    ec2, _order = _wedge_ec2(
+        nats=[],
+        addresses=[],
+        igws=[{"InternetGatewayId": "igw-1", "Attachments": [{"VpcId": "vpc-1"}]}],
+    )
+    ec2.detach_internet_gateway.side_effect = ClientError(
+        {"Error": {"Code": "Gateway.NotAttached"}}, "DetachInternetGateway"
+    )
+    ec2.delete_internet_gateway.side_effect = ClientError(
+        {"Error": {"Code": "InvalidInternetGatewayID.NotFound"}}, "DeleteInternetGateway"
+    )
+    session.client.return_value = ec2
+    result = clear_vpc_public_address_wedge(session, ["vpc-1"])
+    assert result.igws_deleted == ["igw-1"]
+    assert result.remaining == []
+
+
+def test_clear_wedge_discovery_errors_are_swallowed():
+    """A describe failure on each phase is logged and swallowed, not raised."""
+    session = MagicMock()
+    ec2 = MagicMock()
+    ec2.get_paginator.side_effect = Exception("boom")
+    ec2.describe_addresses.side_effect = Exception("boom")
+    session.client.return_value = ec2
+    result = clear_vpc_public_address_wedge(session, ["vpc-1"])
+    assert result.cleared_any is False and result.remaining == []
+
+
+def test_clear_igw_wedge_resolves_vpc_from_attachments_and_delegates():
+    """The IGW entry point resolves the VPC via describe_internet_gateways then delegates."""
+    session = MagicMock()
+    ec2 = MagicMock()
+    ec2.describe_internet_gateways.return_value = {
+        "InternetGateways": [{"InternetGatewayId": "igw-1", "Attachments": [{"VpcId": "vpc-9"}]}]
+    }
+    # default_vpc_ids() iterates a describe_vpcs paginator; stub it empty (no default VPC).
+    ec2.get_paginator.return_value.paginate.return_value = iter([{"Vpcs": []}])
+    session.client.return_value = ec2
+    with patch(f"{CROSS}.clear_vpc_public_address_wedge") as mock_clear:
+        clear_igw_public_address_wedge(session, ["igw-1"])
+    ec2.describe_internet_gateways.assert_called_once_with(InternetGatewayIds=["igw-1"])
+    mock_clear.assert_called_once_with(session, ["vpc-9"], region=None)
+
+
+def test_clear_igw_wedge_detached_igw_is_noop():
+    """A detached IGW (no VPC attachment) resolves to no VPC and does nothing."""
+    session = MagicMock()
+    ec2 = MagicMock()
+    ec2.describe_internet_gateways.return_value = {
+        "InternetGateways": [{"InternetGatewayId": "igw-1", "Attachments": []}]
+    }
+    # default_vpc_ids() iterates a describe_vpcs paginator; stub it empty (no default VPC).
+    ec2.get_paginator.return_value.paginate.return_value = iter([{"Vpcs": []}])
+    session.client.return_value = ec2
+    with patch(f"{CROSS}.clear_vpc_public_address_wedge") as mock_clear:
+        result = clear_igw_public_address_wedge(session, ["igw-1"])
+    mock_clear.assert_not_called()
+    assert result.cleared_any is False
+
+
+def test_clear_igw_wedge_empty_ids_returns_empty_without_client():
+    session = MagicMock()
+    result = clear_igw_public_address_wedge(session, [""])
+    assert result.cleared_any is False
+    session.client.assert_not_called()
+
+
+def test_discover_vpc_dynamic_resources_clears_wedge_before_eni_reap():
+    """The VPC hook clears the NAT/EIP/IGW wedge before the ENI reap.
+
+    A NAT gateway holds its own ENI, so clearing it first means the ENI reap won't
+    trip over it.
+    """
+    session = MagicMock()
+    session.client.return_value = MagicMock()
+    call_order: list[str] = []
+    with (
+        patch(f"{CROSS}._delete_eks_clusters_in_vpcs"),
+        patch(f"{CROSS}._delete_dms_instances_in_vpcs"),
+        patch(f"{CROSS}._delete_vpc_endpoints_in_vpcs"),
+        patch(f"{CROSS}._discover_load_balancers_in_vpcs", return_value=[]),
+        patch(f"{CROSS}._discover_efs_mount_targets", return_value=[]),
+        patch(f"{CROSS}._discover_security_groups", return_value=[]),
+        patch(
+            f"{CROSS}.clear_vpc_public_address_wedge",
+            side_effect=lambda *a, **k: call_order.append("wedge") or VpcPublicAddressWedgeResult(),
+        ),
+        patch(
+            f"{CROSS}.reap_vpc_enis",
+            side_effect=lambda *a, **k: call_order.append("enis") or EniReapResult(),
+        ),
+    ):
+        discover_vpc_dynamic_resources(["vpc-123"], session)
+    assert call_order.index("wedge") < call_order.index("enis")

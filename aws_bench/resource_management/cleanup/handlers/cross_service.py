@@ -30,6 +30,7 @@ from aws_bench.resource_management.cleanup.handlers.ipam import (
 )
 from aws_bench.resource_management.cleanup.models import HandlerResult, HandlerStatus, StackResource
 from aws_bench.resource_management.deferred import mark_deferred
+from aws_bench.resource_management.fastscan.listers.custom_listers import default_vpc_ids
 from aws_bench.resource_management.utils.polling import wait_until
 from aws_bench.utils.concurrent import build_client, raise_if_shutdown
 
@@ -51,6 +52,20 @@ _REDSHIFT_POLL_INTERVAL = 15
 # deleted; deletion is async, so wait before the ENI/subnet teardown proceeds.
 _VPCE_DELETE_TIMEOUT = 300
 _VPCE_POLL_INTERVAL = 10
+
+# delete_nat_gateway is async (~1-2 min to reach "deleted"); a NAT gateway holds its
+# EIP association and its own ENI until gone, so it must be awaited before EIP release
+# and before the ENI reap.
+_NAT_GATEWAY_TIMEOUT = 300
+_NAT_GATEWAY_POLL_INTERVAL = 10
+_NAT_GATEWAY_DELETED_STATE = "deleted"
+_NAT_GATEWAY_NOT_FOUND_CODE = "NatGatewayNotFound"
+# EIP alloc/association ids AWS reports as already gone (idempotent release).
+_EIP_ALLOC_GONE_CODES = ("InvalidAllocationID.NotFound", "InvalidAddress.NotFound")
+_EIP_ASSOC_GONE_CODES = ("InvalidAssociationID.NotFound",)
+# IGW faults meaning the detach/delete already effectively happened.
+_IGW_NOT_FOUND_CODE = "InvalidInternetGatewayID.NotFound"
+_IGW_NOT_ATTACHED_CODE = "Gateway.NotAttached"
 
 
 # ── Async delete-and-poll skeleton ───────────────────────────────────
@@ -476,6 +491,319 @@ def _vpc_endpoint_gone(ec2: Any, vpce_id: str) -> bool:
     return not endpoints or all(e.get("State", "").lower() == "deleted" for e in endpoints)
 
 
+# ── NAT gateway / EIP / IGW "mapped public address" wedge ────────────
+#
+# CCAPI's ordered level map omits IGW/NAT/EIP/VPCGatewayAttachment, so it deletes
+# them first with no detach and no dependency ordering. DetachInternetGateway then
+# fails with DependencyViolation "has some mapped public address(es)" because a NAT
+# gateway / EIP is still mapped in the VPC — the IGW (and its VPC) survive forever.
+# This clears the wedge in dependency order: NAT gateways → EIPs → IGW detach+delete.
+
+
+@dataclass
+class VpcPublicAddressWedgeResult:
+    """Outcome of clearing the NAT/EIP/IGW "mapped public address" wedge in some VPCs."""
+
+    nat_deleted: list[str] = field(default_factory=list)
+    eips_released: list[str] = field(default_factory=list)
+    igws_deleted: list[str] = field(default_factory=list)
+    remaining: list[str] = field(default_factory=list)
+    """NAT gateways / EIPs / IGWs that did not clear (delete failed or timed out).
+
+    Non-empty means the wedge is NOT fully cleared; the caller must surface these so
+    the fail-closed reset logic fails rather than absorbing a surviving orphan."""
+
+    @property
+    def cleared_any(self) -> bool:
+        """True if at least one NAT gateway, EIP, or IGW was removed."""
+        return bool(self.nat_deleted or self.eips_released or self.igws_deleted)
+
+
+def clear_vpc_public_address_wedge(
+    session: boto3.Session, vpc_ids: list[str], *, region: str | None = None
+) -> VpcPublicAddressWedgeResult:
+    """Delete NAT gateways, release EIPs, then detach+delete IGWs in ``vpc_ids``.
+
+    Dependency order clears the "mapped public address(es)" DependencyViolation:
+    NAT first (async, awaited to ``deleted`` — it holds an ENI + EIP), then surviving
+    VPC EIPs, then each attached IGW. Idempotent. Anything that fails to clear lands
+    in ``remaining`` rather than being reported as success over a survivor.
+
+    Args:
+        session: Boto3 session scoped to the target account.
+        vpc_ids: VPCs whose NAT/EIP/IGW should be cleared.
+        region: EC2 region; falls back to the session's region.
+
+    Returns:
+        What was removed and what remained (non-empty ``remaining`` = not fully cleared).
+    """
+    vpc_ids = [v for v in vpc_ids if v]
+    result = VpcPublicAddressWedgeResult()
+    if not vpc_ids:
+        return result
+
+    ec2 = build_client(session, "ec2", region_name=region)
+
+    # Phase 1: NAT gateways (hold the EIP association and their own ENI) go first.
+    _clear_nat_gateways(ec2, vpc_ids, result)
+    # Phase 2: release any VPC-scoped EIP the NAT gateway didn't auto-release.
+    _release_vpc_eips(ec2, vpc_ids, result)
+    # Phase 3: detach + delete the now-unblocked IGWs.
+    _clear_internet_gateways(ec2, vpc_ids, result)
+
+    if result.cleared_any or result.remaining:
+        logger.info(
+            f"Public-address wedge for {vpc_ids}: {len(result.nat_deleted)} NAT deleted, "
+            f"{len(result.eips_released)} EIP released, {len(result.igws_deleted)} IGW deleted, "
+            f"{len(result.remaining)} still present"
+        )
+    return result
+
+
+def clear_igw_public_address_wedge(
+    session: boto3.Session, igw_ids: list[str], *, region: str | None = None
+) -> VpcPublicAddressWedgeResult:
+    """Resolve each IGW's attached VPC, then clear the NAT/EIP/IGW wedge for those VPCs.
+
+    Entry point for the ``AWS::EC2::InternetGateway`` pre-delete hook, where the IGW
+    itself (not the VPC) is the flagged resource. Maps ``igw_ids`` to their VPC via
+    ``describe_internet_gateways`` Attachments and delegates to
+    :func:`clear_vpc_public_address_wedge`, which detaches + deletes the IGW once NAT
+    gateways and EIPs are gone. A detached IGW has no VPC wedge (CCAPI can delete it
+    directly), so it resolves to no VPC and is a no-op here.
+    """
+    igw_ids = [i for i in igw_ids if i]
+    if not igw_ids:
+        return VpcPublicAddressWedgeResult()
+    ec2 = build_client(session, "ec2", region_name=region)
+    vpc_ids = _vpcs_for_igws(ec2, igw_ids)
+    # Never detach/delete the account's default-VPC IGW: it is AWS-created, not a leak.
+    try:
+        protected_vpc_ids = default_vpc_ids(ec2)
+    except (ClientError, BotoCoreError) as e:
+        logger.warning(f"DescribeVpcs (is-default) failed; not protecting default VPCs: {e}")
+        protected_vpc_ids = set()
+    vpc_ids = [v for v in vpc_ids if v not in protected_vpc_ids]
+    if not vpc_ids:
+        return VpcPublicAddressWedgeResult()
+    return clear_vpc_public_address_wedge(session, vpc_ids, region=region)
+
+
+def _vpcs_for_igws(ec2: Any, igw_ids: list[str]) -> list[str]:
+    """Return the VPC ids the given IGWs are attached to (deduped; [] on error)."""
+    try:
+        resp = ec2.describe_internet_gateways(InternetGatewayIds=igw_ids)
+    except Exception as e:
+        logger.warning(f"Could not resolve VPCs for IGWs {igw_ids}: {e}")
+        return []
+    vpc_ids: list[str] = []
+    for igw in resp.get("InternetGateways", []):
+        for attachment in igw.get("Attachments", []):
+            vpc_id = attachment.get("VpcId")
+            if vpc_id and vpc_id not in vpc_ids:
+                vpc_ids.append(vpc_id)
+    return vpc_ids
+
+
+def _clear_nat_gateways(ec2: Any, vpc_ids: list[str], result: VpcPublicAddressWedgeResult) -> None:
+    """Delete every non-deleted NAT gateway in ``vpc_ids`` and await terminal ``deleted``."""
+    nat_ids = _describe_nat_gateway_ids(ec2, vpc_ids)
+    if not nat_ids:
+        return
+
+    def _submit(nat_id: str) -> None:
+        try:
+            ec2.delete_nat_gateway(NatGatewayId=nat_id)
+        except ClientError as e:
+            if e.response.get("Error", {}).get("Code", "") == _NAT_GATEWAY_NOT_FOUND_CODE:
+                raise _AlreadyGone from e
+            raise
+
+    unresolved = _submit_and_await(
+        nat_ids,
+        submit=_submit,
+        is_gone=lambda nat_id: _nat_gateway_gone(ec2, nat_id),
+        timeout=_NAT_GATEWAY_TIMEOUT,
+        interval=_NAT_GATEWAY_POLL_INTERVAL,
+        label="NAT gateway",
+        already_gone_exc=_AlreadyGone,
+    )
+    result.nat_deleted.extend(sorted(nat_ids - unresolved))
+    result.remaining.extend(sorted(unresolved))
+
+
+def _describe_nat_gateway_ids(ec2: Any, vpc_ids: list[str]) -> set[str]:
+    """Return ids of NAT gateways in ``vpc_ids`` that are not already deleted/deleting."""
+    try:
+        nat_ids: set[str] = set()
+        for page in ec2.get_paginator("describe_nat_gateways").paginate(
+            Filter=[{"Name": "vpc-id", "Values": vpc_ids}]
+        ):
+            for nat in page.get("NatGateways", []):
+                if nat.get("State") not in ("deleted", "deleting") and nat.get("NatGatewayId"):
+                    nat_ids.add(nat["NatGatewayId"])
+        return nat_ids
+    except Exception as e:
+        logger.warning(f"NAT gateway discovery for {vpc_ids} failed: {e}")
+        return set()
+
+
+def _nat_gateway_gone(ec2: Any, nat_id: str) -> bool:
+    """Whether a NAT gateway is fully ``deleted`` (transient errors -> not yet gone)."""
+    try:
+        resp = ec2.describe_nat_gateways(NatGatewayIds=[nat_id])
+    except ClientError as e:
+        if e.response.get("Error", {}).get("Code", "") == _NAT_GATEWAY_NOT_FOUND_CODE:
+            return True
+        logger.debug(f"Polling NAT gateway '{nat_id}' failed: {e}")
+        return False
+    except Exception as e:
+        logger.debug(f"Polling NAT gateway '{nat_id}' failed: {e}")
+        return False
+    nats = resp.get("NatGateways", [])
+    return not nats or all(n.get("State") == _NAT_GATEWAY_DELETED_STATE for n in nats)
+
+
+def _release_vpc_eips(ec2: Any, vpc_ids: list[str], result: VpcPublicAddressWedgeResult) -> None:
+    """Disassociate (if associated) then release every EIP still mapped into ``vpc_ids``.
+
+    A NAT-gateway-owned EIP is auto-released when the NAT gateway is deleted, so only
+    the addresses that survive Phase 1 are handled here — an EIP still associated to a
+    network interface in a target VPC. Each address that fails to release lands in
+    ``remaining`` so a surviving public address is never reported as cleared.
+    """
+    for addr in _describe_vpc_eips(ec2, vpc_ids):
+        alloc_id = addr.get("AllocationId")
+        if not alloc_id:
+            continue
+        if not _disassociate_eip(ec2, addr):
+            result.remaining.append(alloc_id)
+            continue
+        if _release_eip(ec2, alloc_id):
+            result.eips_released.append(alloc_id)
+        else:
+            result.remaining.append(alloc_id)
+
+
+def _describe_vpc_eips(ec2: Any, vpc_ids: list[str]) -> list[dict]:
+    """Return EIPs mapped to a network interface in ``vpc_ids`` (or [] on error).
+
+    Scoped by the ``network-interface-vpc-id`` filter, which returns only the
+    associated addresses — exactly the "mapped public address(es)" pinning the VPC.
+    An unassociated EIP has no VPC and cannot be attributed to this teardown.
+    """
+    try:
+        return ec2.describe_addresses(
+            Filters=[{"Name": "network-interface-vpc-id", "Values": vpc_ids}]
+        ).get("Addresses", [])
+    except Exception as e:
+        logger.warning(f"EIP discovery for {vpc_ids} failed: {e}")
+        return []
+
+
+def _disassociate_eip(ec2: Any, addr: dict) -> bool:
+    """Disassociate an EIP if it has an association. True if now free (or was already)."""
+    association_id = addr.get("AssociationId")
+    if not association_id:
+        return True
+    try:
+        ec2.disassociate_address(AssociationId=association_id)
+        logger.info(f"Disassociated EIP '{addr.get('AllocationId')}' (assoc {association_id})")
+        return True
+    except ClientError as e:
+        if e.response.get("Error", {}).get("Code", "") in _EIP_ASSOC_GONE_CODES:
+            return True
+        logger.warning(f"Could not disassociate EIP '{addr.get('AllocationId')}': {e}")
+        return False
+    except Exception as e:
+        logger.warning(f"Could not disassociate EIP '{addr.get('AllocationId')}': {e}")
+        return False
+
+
+def _release_eip(ec2: Any, alloc_id: str) -> bool:
+    """Release an EIP by allocation id. True if released or already gone."""
+    try:
+        ec2.release_address(AllocationId=alloc_id)
+        logger.info(f"Released EIP '{alloc_id}'")
+        return True
+    except ClientError as e:
+        if e.response.get("Error", {}).get("Code", "") in _EIP_ALLOC_GONE_CODES:
+            return True
+        logger.warning(f"Could not release EIP '{alloc_id}': {e}")
+        return False
+    except Exception as e:
+        logger.warning(f"Could not release EIP '{alloc_id}': {e}")
+        return False
+
+
+def _clear_internet_gateways(
+    ec2: Any, vpc_ids: list[str], result: VpcPublicAddressWedgeResult
+) -> None:
+    """Detach then delete every IGW attached to ``vpc_ids`` (now unblocked by NAT/EIP)."""
+    for igw_id, attached_vpc in _describe_attached_igws(ec2, vpc_ids):
+        if not _detach_internet_gateway(ec2, igw_id, attached_vpc):
+            result.remaining.append(igw_id)
+            continue
+        if _delete_internet_gateway(ec2, igw_id):
+            result.igws_deleted.append(igw_id)
+        else:
+            result.remaining.append(igw_id)
+
+
+def _describe_attached_igws(ec2: Any, vpc_ids: list[str]) -> list[tuple[str, str]]:
+    """Return (igw_id, vpc_id) for every IGW attached to one of ``vpc_ids`` (or [] on error)."""
+    try:
+        vpc_set = set(vpc_ids)
+        pairs: list[tuple[str, str]] = []
+        for page in ec2.get_paginator("describe_internet_gateways").paginate(
+            Filters=[{"Name": "attachment.vpc-id", "Values": vpc_ids}]
+        ):
+            for igw in page.get("InternetGateways", []):
+                igw_id = igw.get("InternetGatewayId")
+                if not igw_id:
+                    continue
+                for attachment in igw.get("Attachments", []):
+                    if attachment.get("VpcId") in vpc_set:
+                        pairs.append((igw_id, attachment["VpcId"]))
+        return pairs
+    except Exception as e:
+        logger.warning(f"IGW discovery for {vpc_ids} failed: {e}")
+        return []
+
+
+def _detach_internet_gateway(ec2: Any, igw_id: str, vpc_id: str) -> bool:
+    """Detach an IGW from its VPC. True if detached or already detached/gone."""
+    try:
+        ec2.detach_internet_gateway(InternetGatewayId=igw_id, VpcId=vpc_id)
+        logger.info(f"Detached IGW '{igw_id}' from '{vpc_id}'")
+        return True
+    except ClientError as e:
+        code = e.response.get("Error", {}).get("Code", "")
+        if code in (_IGW_NOT_ATTACHED_CODE, _IGW_NOT_FOUND_CODE):
+            return True
+        logger.warning(f"Could not detach IGW '{igw_id}' from '{vpc_id}': {e}")
+        return False
+    except Exception as e:
+        logger.warning(f"Could not detach IGW '{igw_id}' from '{vpc_id}': {e}")
+        return False
+
+
+def _delete_internet_gateway(ec2: Any, igw_id: str) -> bool:
+    """Delete a detached IGW. True if deleted or already gone."""
+    try:
+        ec2.delete_internet_gateway(InternetGatewayId=igw_id)
+        logger.info(f"Deleted IGW '{igw_id}'")
+        return True
+    except ClientError as e:
+        if e.response.get("Error", {}).get("Code", "") == _IGW_NOT_FOUND_CODE:
+            return True
+        logger.warning(f"Could not delete IGW '{igw_id}': {e}")
+        return False
+    except Exception as e:
+        logger.warning(f"Could not delete IGW '{igw_id}': {e}")
+        return False
+
+
 # ── Redshift Serverless ──────────────────────────────────────────────
 
 
@@ -638,6 +966,12 @@ def discover_vpc_dynamic_resources(vpc_ids: list[str], session: boto3.Session) -
     # endpoint (not in the scenario template) pins the subnet (interface ENI) or
     # the VPC (gateway route-table association).
     _delete_vpc_endpoints_in_vpcs(session, vpc_ids)
+
+    # Clear the NAT/EIP/IGW "mapped public address" wedge before the ENI reap: a NAT
+    # gateway holds its own ENI (which would otherwise block the reap) plus its EIP,
+    # and CCAPI's level map omits IGW/NAT/EIP so DetachInternetGateway would fail with
+    # DependencyViolation. Ordered NAT → EIP → IGW clears it; orphans surface below.
+    clear_vpc_public_address_wedge(session, vpc_ids)
 
     # Discover load balancers in these VPCs. An ALB/NLB created out-of-band by an
     # in-cluster controller (e.g. the EKS Auto Mode / AWS Load Balancer Controller

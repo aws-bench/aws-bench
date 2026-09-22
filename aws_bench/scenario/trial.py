@@ -24,7 +24,10 @@ from aws_bench.account_management.constants import ORG_ACCESS_ROLE
 from aws_bench.account_management.manager import AccountManager
 from aws_bench.exceptions import AccountContaminatedError, OperationCancelled
 from aws_bench.logging.logger import file_logging, get_logger
-from aws_bench.resource_management.constants import RESOURCE_MANAGEMENT_SESSION
+from aws_bench.resource_management.exceptions import (
+    SnapshotNotFoundError,
+    SnapshotRegionMismatchError,
+)
 from aws_bench.resource_management.export_collector import collect_account_exports
 from aws_bench.resource_management.manager import ResourceManager
 from aws_bench.resource_management.reset.models import ResetResult
@@ -133,6 +136,7 @@ class ScenarioTrial:
             host_logs_dir=self._paths.trial_dir,
             cred_provider=cred_provider,
             account_mapping=config.account_mapping,
+            labels=config.labels,
         )
         self._merged_env = merged_env
         self._result = ScenarioTrialResult(
@@ -347,15 +351,18 @@ class ScenarioTrial:
         if not self._container.is_started:
             await self._build_and_start()
 
-        # Lock the account to its declared regions BEFORE deploy.sh can create
-        # anything: an out-of-region action is denied at the source rather than
-        # discovered (and orphaned) by the region-scoped snapshot/verify/cleanup
-        # afterward. Fail-closed — if the guardrail can't be applied, deploy never runs.
         if phase == ScenarioPhase.DEPLOY:
             if check_contamination:
                 await self._raise_if_contaminated()
-            await self._validate_init_snapshot_exists()
-            await self._apply_region_restriction_scp()
+            await self._validate_init_snapshot()
+            # Runs after the baseline check so a mismatched manifest fails before it can
+            # change the policy.
+            await asyncio.to_thread(
+                self._account_manager.ensure_region_restriction_scp,
+                self._scenario.name,
+                self._scenario.manifest.scenario.regions,
+                list(self._config.account_mapping.values()),
+            )
             await self._clean_stale_changesets()
             await self._delete_terminal_stacks()
 
@@ -551,10 +558,12 @@ class ScenarioTrial:
         elif phase == ScenarioPhase.CLEANUP:
             await self._run_cleanup(script_failed=script_failed)
 
-    async def _run_snapshot(self) -> None:
+    async def _run_snapshot(self, forbidden_identifiers: set[str] | None = None) -> None:
         """Capture the post-setup baseline snapshot for this scenario's accounts.
 
         Assumes a successful deploy; the caller gates on deploy outcome.
+        ``forbidden_identifiers`` are orphan ids the snapshot layer refuses to
+        absorb into a baseline (defense-in-depth for the recapture path).
         """
         ctx = SnapshotContext(
             scenario_id=self._scenario.name,
@@ -562,6 +571,7 @@ class ScenarioTrial:
             regions=self._scenario.manifest.scenario.regions,
             stage=SnapshotStage.POST_SETUP,
             account_ids=list(self._config.account_mapping.values()),
+            forbidden_identifiers=forbidden_identifiers or set(),
         )
 
         results_by_scenario = await ResourceManager.snapshot_scenarios([ctx])
@@ -580,50 +590,19 @@ class ScenarioTrial:
                 ],
             )
 
-    async def _validate_init_snapshot_exists(self) -> None:
-        """Validate that the PRE_SETUP (init) snapshot exists for all accounts.
-
-        The init snapshot is the pristine account baseline captured by ``env init``.
-        Setup depends on it: without it, ``env cleanup`` cannot distinguish account
-        defaults from deployed infrastructure, leading to incorrect cleanup behavior.
-        """
+    async def _validate_init_snapshot(self) -> None:
+        """Require each account's init baseline to record exactly the scenario's regions."""
         mgr = SnapshotManager()
-        missing: list[str] = []
-        for account_id in self._config.account_mapping.values():
-            if not mgr.snapshot_exists(self._scenario.name, account_id, SnapshotStage.PRE_SETUP):
-                missing.append(account_id)
-
-        if missing:
-            raise SetupValidationError(
-                f"Init snapshot (PRE_SETUP) missing for account(s): {', '.join(missing)}. "
-                f"Run 'aws-bench env init' first to capture the baseline snapshot."
-            )
-
-    async def _apply_region_restriction_scp(self) -> None:
-        """Lock this scenario's accounts to its declared regions before deploy.
-
-        Applied before deploy.sh runs so an out-of-region action is denied at
-        the source rather than discovered (and orphaned) by the region-scoped
-        snapshot/verify/cleanup afterward. Scoped to the accounts this trial
-        uses, so a sibling scenario's failure never blocks a healthy scenario's
-        restriction. The underlying Organizations calls are blocking and
-        idempotent (reuse the policy by name, update content when regions
-        change, skip already-attached accounts), so they run in a worker thread.
-        """
-        regions = self._scenario.manifest.scenario.regions
-        account_ids = list(self._config.account_mapping.values())
-        if not account_ids or not regions:
-            logger.debug(
-                "No accounts or regions for %s; skipping region-restriction SCP",
-                self._scenario.name,
-            )
-            return
-        await asyncio.to_thread(
-            AccountManager().ensure_region_restriction_scp,
-            self._scenario.name,
-            regions,
-            account_ids,
-        )
+        try:
+            for account_id in self._config.account_mapping.values():
+                await asyncio.to_thread(
+                    mgr.validate_pre_setup_snapshot,
+                    self._scenario.name,
+                    account_id,
+                    self._scenario.manifest.scenario.regions,
+                )
+        except (SnapshotNotFoundError, SnapshotRegionMismatchError) as exc:
+            raise SetupValidationError(str(exc)) from exc
 
     async def _clean_stale_changesets(self) -> None:
         """Delete stale CDK changesets and REVIEW_IN_PROGRESS stacks before deploy.
@@ -652,7 +631,7 @@ class ScenarioTrial:
                 session = self._cred_provider.get_session_for_account(
                     account_id,
                     ORG_ACCESS_ROLE,
-                    build_session_name(RESOURCE_MANAGEMENT_SESSION, "changeset-cleanup"),
+                    build_session_name("session"),
                 )
             except Exception as exc:  # noqa: BLE001
                 logger.warning("Failed to get session for account %s: %s", account_id, exc)
@@ -747,7 +726,7 @@ class ScenarioTrial:
                 session = self._cred_provider.get_session_for_account(
                     account_id,
                     ORG_ACCESS_ROLE,
-                    build_session_name(RESOURCE_MANAGEMENT_SESSION, "terminal-cleanup"),
+                    build_session_name("session"),
                 )
             except Exception as exc:  # noqa: BLE001
                 logger.warning("Failed to get session for account %s: %s", account_id, exc)
@@ -853,8 +832,18 @@ class ScenarioTrial:
             try:
                 await self._redeploy_with_retry()
 
-                # Recapture baseline snapshot after successful redeploy
-                await self._run_snapshot()
+                # Recapture the baseline only when every account is clean — otherwise a
+                # still-present orphan would be absorbed into the new baseline and hide
+                # forever. The trial fails below on the unclean account, so the run is
+                # discarded and the preserved baseline never goes stale.
+                if self._baseline_recapture_allowed(results):
+                    await self._run_snapshot(self._orphan_identifiers(results))
+                else:
+                    logger.error(
+                        f"Skipping baseline recapture for {self._scenario.name}: an account's "
+                        "reset left unresolved orphans or failed; the prior baseline is "
+                        "preserved to avoid absorbing a live orphan."
+                    )
 
                 # Mark redeploy as successful in results
                 for result in results:
@@ -883,6 +872,26 @@ class ScenarioTrial:
 
         if clear_error is not None:
             raise clear_error
+
+    @staticmethod
+    def _baseline_recapture_allowed(results: list[ResetResult]) -> bool:
+        """A failed or orphan-carrying reset must not refresh the baseline.
+
+        Recapture is scenario-wide, so ANY unclean account would absorb its live
+        orphan into a fresh POST_SETUP baseline (``current - snapshot`` subtracts
+        it forever). When unclean the trial fails and the run is discarded, so the
+        stale baseline is correct to keep.
+        """
+        return all(r.success and not r.unresolved_orphans for r in results)
+
+    @staticmethod
+    def _orphan_identifiers(results: list[ResetResult]) -> set[str]:
+        """Union of identifiers every result flagged as an unresolved orphan."""
+        idents: set[str] = set()
+        for r in results:
+            for ids in (r.unresolved_orphans or {}).values():
+                idents.update(item["Identifier"] for item in ids if "Identifier" in item)
+        return idents
 
     async def _apply_contamination_tags(self, results: list[ResetResult]) -> Exception | None:
         """SET the flag on accounts whose reset failed, CLEAR it on those that succeeded.
