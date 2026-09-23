@@ -112,6 +112,15 @@ AWS_MANAGED_FILTERS: dict[str, Callable[[str, dict], bool]] = {
     # lister emits the ARN (…:queues/Default). On-demand queues a task creates carry a
     # custom name and are NOT filtered.
     "AWS::MediaConvert::Queue": lambda id, _: id.endswith("queues/Default"),
+    # DynamoDB Import-from-S3 job records are permanent, undeletable import history: there is
+    # no DeleteImport API and CCAPI has no handler, so a completed import can never be cleaned
+    # up and the orphan/drift check flags it forever. The ``ListImports`` lister has no
+    # ``cfn_type``, so its ``ImportArn``s land in the synthetic ``AWS::dynamodb::*`` bucket
+    # alongside backups (``…/backup/…``), exports (``…/export/…``) and global tables (plain
+    # name). Match only the ``/import/`` ARN segment — table names forbid ``/``, so it appears
+    # solely in an import ARN — so real tables (proper ``AWS::DynamoDB::Table`` type) and the
+    # sibling backup/export/global-table records are NOT filtered.
+    "AWS::dynamodb::*": lambda id, _: "/import/" in id,
     # Service-managed secrets (e.g. a Redshift namespace's admin credentials) are
     # created and rotated BY the owning AWS service, which names them with a "!"
     # marker: ``redshift!…``, ``rds!…``, ``aws!…`` (ARN ``…:secret:redshift!…``).

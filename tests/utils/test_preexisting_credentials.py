@@ -91,69 +91,25 @@ def test_already_active_runner_role_is_not_self_assumed(tmp_path: Path, monkeypa
 
 
 def test_unnamed_role_assumes_runner_not_caller_credentials(tmp_path: Path, monkeypatch):
-    """A task with no role_name gets the runner role, even when the caller sits in the account.
-
-    The caller here is an admin identity inside the target account, so reusing the
-    ambient session would hand the task the operator's own credentials.
-    """
+    """A task with no role gets the runner session, not the caller's admin session."""
     _activate(tmp_path, monkeypatch)
-    provider, _ = _provider(arn="arn:aws:sts::111122223333:assumed-role/Admin/operator")
-    provider.assume_role = MagicMock(
-        return_value={
-            "AWS_ACCESS_KEY_ID": "runner-key",
-            "AWS_SECRET_ACCESS_KEY": "runner-secret",
-            "AWS_SESSION_TOKEN": "runner-token",
-        }
-    )
+    provider, session = _provider(arn="arn:aws:sts::111122223333:assumed-role/Admin/operator")
+    with patch(
+        "aws_bench.utils.credentials_provider._create_refreshable_session"
+    ) as create_session:
+        runner_session = provider.get_chained_session_for_account("111122223333", None, "app-task")
 
-    credentials = provider.chain_assume_role("111122223333", "app-task", role_name=None)
-
-    provider.assume_role.assert_called_once_with(
-        "111122223333", "AWSBenchRunner", "app-task", duration_seconds=3600
+    create_session.assert_called_once_with(
+        session,
+        "arn:aws:iam::111122223333:role/AWSBenchRunner",
+        "app-task",
+        "us-east-1",
     )
-    assert credentials["AWS_ACCESS_KEY_ID"] == "runner-key"
+    assert runner_session is create_session.return_value
 
 
 def test_account_outside_allowlist_is_refused(tmp_path: Path, monkeypatch):
     _activate(tmp_path, monkeypatch)
     provider, _ = _provider()
     with pytest.raises(AccountResolutionError, match="not in the active pre-existing allowlist"):
-        provider.chain_assume_role("999988887777", "app-test")
-
-
-def test_static_task_credentials_chain_through_runner(tmp_path: Path, monkeypatch):
-    _activate(tmp_path, monkeypatch, "AWSBenchRunner")
-    provider, _ = _provider()
-    runner_creds = {
-        "AWS_ACCESS_KEY_ID": "runner-key",
-        "AWS_SECRET_ACCESS_KEY": "runner-secret",
-        "AWS_SESSION_TOKEN": "runner-token",
-    }
-    provider.assume_role = MagicMock(return_value=runner_creds)
-    runner_session = MagicMock()
-    runner_sts = MagicMock()
-    runner_session.client.return_value = runner_sts
-    runner_sts.assume_role.return_value = {
-        "Credentials": {
-            "AccessKeyId": "task-key",
-            "SecretAccessKey": "task-secret",
-            "SessionToken": "task-token",
-        }
-    }
-    with patch(
-        "aws_bench.utils.credentials_provider.env_credentials_dict_to_session",
-        return_value=runner_session,
-    ):
-        credentials = provider.chain_assume_role("111122223333", "app-task", role_name="TaskRole")
-    provider.assume_role.assert_called_once_with(
-        "111122223333",
-        "AWSBenchRunner",
-        "app-session-223333",
-        duration_seconds=3600,
-    )
-    runner_sts.assume_role.assert_called_once_with(
-        RoleArn="arn:aws:iam::111122223333:role/TaskRole",
-        RoleSessionName="app-task",
-        DurationSeconds=3600,
-    )
-    assert credentials["AWS_ACCESS_KEY_ID"] == "task-key"
+        provider.get_chained_session_for_account("999988887777", None, "app-test")

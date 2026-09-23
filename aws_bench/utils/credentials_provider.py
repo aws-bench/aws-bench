@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
+import logging
 import time
+from collections.abc import Awaitable, Callable
+from datetime import datetime, timezone
 
 import boto3
 from botocore.config import Config
@@ -23,6 +27,10 @@ logger = get_logger(__name__)
 # out many concurrent clients against one account+region, so adaptive mode's
 # client-side rate limiter (vs. botocore's legacy default) damps throttle bursts.
 _RETRY_DEFAULTS = {"max_attempts": 8, "mode": "adaptive"}
+
+CRED_REFRESH_SKEW_SEC = 900
+CRED_REFRESH_MIN_SLEEP_SEC = 30
+CRED_REFRESH_RETRY_SEC = 60
 
 
 def _default_client_config() -> Config:
@@ -163,37 +171,31 @@ def session_to_credential_process(session: boto3.Session) -> dict[str, object]:
     }
 
 
-def assumed_credentials_dict_to_credentials_env(creds: dict[str, str]) -> dict[str, str]:
-    """Convert "sts.assume_role"-type credentials to env vars."""
-    return {
-        "AWS_ACCESS_KEY_ID": creds["AccessKeyId"],
-        "AWS_SECRET_ACCESS_KEY": creds["SecretAccessKey"],
-        "AWS_SESSION_TOKEN": creds["SessionToken"],
-    }
+def _seconds_until_refresh(expires_at: datetime) -> float:
+    """Return the wait before refresh, with a floor for credentials near expiry."""
+    remaining = (expires_at - datetime.now(timezone.utc)).total_seconds()
+    return max(remaining - CRED_REFRESH_SKEW_SEC, CRED_REFRESH_MIN_SLEEP_SEC)
 
 
-def _credentials_block(profile: str, creds: dict[str, str]) -> str:
-    return (
-        f"[{profile}]\n"
-        f"aws_access_key_id={creds['AWS_ACCESS_KEY_ID']}\n"
-        f"aws_secret_access_key={creds['AWS_SECRET_ACCESS_KEY']}\n"
-        f"aws_session_token={creds['AWS_SESSION_TOKEN']}\n"
-    )
+async def run_credential_refresh_loop(
+    mint: Callable[[], Awaitable[datetime]],
+    expires_at: datetime,
+    log: logging.Logger,
+) -> None:
+    """Refresh credentials before expiry until cancelled.
 
-
-def build_aws_credentials_file(per_tag_creds: dict[str, dict[str, str]]) -> str:
-    """Render an ``~/.aws/credentials`` body with static creds, one block per tag.
-
-    ``per_tag_creds`` maps each account tag to its already-assumed STS creds
-    (the ``AWS_ACCESS_KEY_ID`` / ``AWS_SECRET_ACCESS_KEY`` / ``AWS_SESSION_TOKEN``
-    keys). Each block is named for its tag; the caller selects one with
-    ``AWS_PROFILE=<tag>`` (or ``--profile <tag>``). No ``[default]`` block is
-    written: a tag is used only when named explicitly.
+    ``expires_at`` is the earliest expiry of credentials the caller already wrote.
+    ``mint`` renews and writes them, then returns their new earliest expiry.
+    Callback failures are logged and retried after a backoff.
     """
-    parts: list[str] = []
-    for tag, creds in per_tag_creds.items():
-        parts.append(_credentials_block(tag, creds))
-    return "\n".join(parts)
+    sleep_for = _seconds_until_refresh(expires_at)
+    while True:
+        await asyncio.sleep(sleep_for)
+        try:
+            sleep_for = _seconds_until_refresh(await mint())
+        except Exception as exc:
+            log.warning("Credential refresh failed; retrying: %s", exc)
+            sleep_for = CRED_REFRESH_RETRY_SEC
 
 
 def _create_refreshable_session(
@@ -313,34 +315,6 @@ class CredentialProvider:
             raise CredentialError("Failed to resolve caller account ID")
         return account_id
 
-    def assume_role(
-        self,
-        account_id: str,
-        role_name: str,
-        session_name: str,
-        duration_seconds: int = 3600,
-    ) -> dict[str, str]:
-        """Assume a role in a member account and returns credentials.
-
-        Args:
-            account_id: The target AWS account ID.
-            role_name: IAM role name to assume.
-            session_name: Session name for CloudTrail auditing.
-            duration_seconds: How long the credentials are valid.
-
-        Returns:
-            Dict with AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_SESSION_TOKEN.
-        """
-        role_arn = f"arn:aws:iam::{account_id}:role/{role_name}"
-        logger.debug(f"Assuming role {role_arn} (session={session_name}).")
-
-        response = self._sts.assume_role(
-            RoleArn=role_arn,
-            RoleSessionName=enforce_session_name(session_name),
-            DurationSeconds=duration_seconds,
-        )
-        return assumed_credentials_dict_to_credentials_env(response["Credentials"])
-
     def _preexisting_role(self, account_id: str, role_name: str | None) -> str:
         """Resolve the direct role used for an externally owned account.
 
@@ -376,104 +350,6 @@ class CredentialProvider:
         arn = str(identity.get("Arn", ""))
         marker = f"arn:aws:sts::{account_id}:assumed-role/{role_name}/"
         return arn.startswith(marker)
-
-    def chain_assume_role(
-        self,
-        account_id: str,
-        session_name: str,
-        role_name: str | None = None,
-        duration_seconds: int = 3600,
-    ) -> dict[str, str]:
-        """Assume into a member account, always via the org access role.
-
-        Hop 1 always assumes ORG_ACCESS_ROLE in the target account; this hop
-        is never skipped. If ``role_name`` is given and differs from
-        ORG_ACCESS_ROLE, hop 2 chains from that session into ``role_name``.
-        Otherwise the hop-1 credentials are returned directly.
-
-        Args:
-            account_id: The target AWS account ID.
-            role_name: IAM role name for the optional second hop. When unset
-                or equal to ORG_ACCESS_ROLE, only the first hop runs.
-            session_name: Session name for CloudTrail auditing.
-            duration_seconds: How long the credentials are valid.
-
-        Returns:
-            Dict with AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_SESSION_TOKEN.
-        """
-        parent_session = self._session
-        preexisting = active_account_config()
-        if preexisting is not None:
-            config, _ = preexisting
-            target_role = self._preexisting_role(account_id, role_name)
-            # Already running as the target role — self-assume would fail, so reuse it.
-            if self._ambient_is_target_role(account_id, target_role):
-                return session_to_env_credentials(self._session)
-            if target_role != config.runner_role and not self._ambient_is_target_role(
-                account_id, config.runner_role
-            ):
-                runner_creds = self.assume_role(
-                    account_id,
-                    config.runner_role,
-                    build_session_name("session", account_id[-6:]),
-                    duration_seconds=duration_seconds,
-                )
-                parent_session = env_credentials_dict_to_session(runner_creds)
-            if parent_session is not self._session:
-                role_arn = f"arn:aws:iam::{account_id}:role/{target_role}"
-                response = build_client(parent_session, "sts").assume_role(
-                    RoleArn=role_arn,
-                    RoleSessionName=enforce_session_name(session_name),
-                    DurationSeconds=duration_seconds,
-                )
-                return assumed_credentials_dict_to_credentials_env(response["Credentials"])
-            return self.assume_role(
-                account_id,
-                target_role,
-                session_name,
-                duration_seconds=duration_seconds,
-            )
-
-        # Hop 1: always go through the org access role
-        hop1_session_name = (
-            session_name
-            if (not role_name or role_name == ORG_ACCESS_ROLE)
-            else build_session_name("session", account_id[-6:])
-        )
-        try:
-            org_creds = self.assume_role(
-                account_id,
-                ORG_ACCESS_ROLE,
-                hop1_session_name,
-                duration_seconds=duration_seconds,
-            )
-        except Exception as e:
-            logger.error(f"First hop: Failed to assume {ORG_ACCESS_ROLE} in {account_id}: {e}")
-            raise e
-
-        # Single-hop case: caller wants the org-access session itself, no chained role.
-        if not role_name or role_name == ORG_ACCESS_ROLE:
-            if not role_name:
-                logger.debug(f"Assuming {ORG_ACCESS_ROLE} as no role was specified for second hop.")
-            return org_creds
-
-        # Hop 2: from the member account session, assume the target role
-        member_sts = build_client(env_credentials_dict_to_session(org_creds), "sts")
-
-        role_arn = f"arn:aws:iam::{account_id}:role/{role_name}"
-        logger.debug(f"Chained assume: {role_arn} (session={session_name}).")
-
-        try:
-            response = member_sts.assume_role(
-                RoleArn=role_arn,
-                RoleSessionName=enforce_session_name(session_name),
-                DurationSeconds=duration_seconds,
-            )
-        except Exception as e:
-            logger.error(f"Second hop: Failed to assume {role_arn} in {account_id}: {e}")
-            raise e
-
-        return assumed_credentials_dict_to_credentials_env(response["Credentials"])
 
     def wait_for_role(
         self,
@@ -570,4 +446,28 @@ class CredentialProvider:
             role_arn,
             session_name,
             region,
+        )
+
+    def get_chained_session_for_account(
+        self,
+        account_id: str,
+        role_name: str | None,
+        session_name: str,
+        region: str = DEFAULT_REGION,
+    ) -> boto3.Session:
+        """Return a refreshable session through the org access role.
+
+        Pre-existing accounts use ``get_session_for_account``'s runner-role chain.
+        """
+        role_name = role_name or ORG_ACCESS_ROLE
+        if role_name == ORG_ACCESS_ROLE or active_account_config() is not None:
+            return self.get_session_for_account(account_id, role_name, session_name, region)
+        org_session = self.get_session_for_account(
+            account_id,
+            ORG_ACCESS_ROLE,
+            build_session_name("session", account_id[-6:]),
+            region,
+        )
+        return _create_refreshable_session(
+            org_session, f"arn:aws:iam::{account_id}:role/{role_name}", session_name, region
         )

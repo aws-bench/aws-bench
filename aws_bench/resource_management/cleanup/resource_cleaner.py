@@ -45,6 +45,38 @@ _CFN_STACK_TYPE = "AWS::CloudFormation::Stack"
 # Bounded wait for the fallback delete: ~3 minutes (18 attempts * 10s).
 _STACK_DELETE_WAITER_DELAY = 10
 _STACK_DELETE_WAITER_MAX_ATTEMPTS = 18
+# Resource types whose custom deletion must finish before any general prepare
+# handler runs. An EKS-managed Auto Scaling group is prepared by suspending its
+# ReplaceUnhealthy process; if that happens while the owning nodegroup is still
+# being deleted, the nodegroup cannot recycle its instances and its deletion
+# enters DELETE_FAILED. Deleting the nodegroup to terminal completion first
+# removes that dependency before the ASG is ever touched.
+DELETE_BEFORE_PREPARE_TYPES = frozenset({"AWS::EKS::Nodegroup"})
+
+# Failure reason recorded for a resource that was never attempted because a
+# delete-before-prepare barrier resource failed to delete. The barrier fails
+# closed for the whole cleanup wave, so the remainder never reaches
+# prepare/custom/CCAPI.
+_BARRIER_BLOCKED_MESSAGE = (
+    "Not attempted: prerequisite delete-before-prepare barrier deletion failed"
+)
+
+
+def partition_delete_before_prepare(
+    resources: list[StackResource],
+) -> tuple[list[StackResource], list[StackResource]]:
+    """Split resources into ``(barrier, rest)`` by :data:`DELETE_BEFORE_PREPARE_TYPES`.
+
+    ``barrier`` holds the direct stack resources that must be custom-deleted to
+    completion before general preparation; ``rest`` is everything else and flows
+    through the unchanged pipeline.
+    """
+    barrier: list[StackResource] = []
+    rest: list[StackResource] = []
+    for resource in resources:
+        target = barrier if resource.resource_type in DELETE_BEFORE_PREPARE_TYPES else rest
+        target.append(resource)
+    return barrier, rest
 
 
 def truncate_for_log(text: str, limit: int) -> str:
@@ -107,6 +139,22 @@ class ResourceCleaner:
         if not any([prepare, handle_stuck, custom_delete, ccapi_fallback]):
             raise ValueError("At least one cleanup operation must be enabled")
 
+        if prepare and custom_delete:
+            barrier_resources, resources = partition_delete_before_prepare(resources)
+            barrier_failures = await self._delete_before_prepare(barrier_resources)
+            if barrier_failures:
+                # Fail closed for the whole stack: the barrier failed, so
+                # prepare/custom/CCAPI never run on the remainder. Preserve each
+                # real barrier failure and mark every remaining resource
+                # unattempted, so a downstream sweep cannot mistake a
+                # never-touched survivor for a successfully deleted one.
+                for resource in to_ccapi_resources(resources):
+                    barrier_failures.setdefault(
+                        resource, DeletionFailureEvent(_BARRIER_BLOCKED_MESSAGE)
+                    )
+                self._log_failures(barrier_failures)
+                return barrier_failures
+
         if prepare:
             ccapi_resources = to_ccapi_resources(resources)
             if ccapi_resources:
@@ -157,6 +205,44 @@ class ResourceCleaner:
         if failures:
             failures = await asyncio.to_thread(self._delete_failed_cfn_stacks, failures)
         self._log_failures(failures)
+        return failures
+
+    async def _delete_before_prepare(
+        self, resources: list[StackResource]
+    ) -> dict[Resource, DeletionFailureEvent]:
+        """Custom-delete barrier resources to completion before general preparation.
+
+        Runs the registered custom handler (with its bounded execution and PR #66
+        terminal waiter) for each barrier resource and fails closed:
+
+        * A handler failure (or raised exception) is returned as-is.
+        * A resource with no registered custom handler comes back in
+          ``_custom_delete().skipped``; that means nothing would delete it, so it
+          is converted into an explicit per-resource failure rather than silently
+          falling through to prepare/CCAPI. This is distinct from a handler
+          returning ``HandlerStatus.SKIPPED`` (already classified as succeeded by
+          ``_custom_delete`` — safe when the resource is simply absent).
+
+        Returns the failures mapping; empty means every barrier resource was
+        handled terminally and the caller may proceed with the remaining pipeline.
+        """
+        ccapi_resources = to_ccapi_resources(resources)
+        if not ccapi_resources:
+            return {}
+
+        result = await asyncio.to_thread(self._custom_delete, ccapi_resources)
+        if result.succeeded:
+            logger.debug(
+                "Custom-deleted %d resource(s): %s",
+                len(result.succeeded),
+                format_sample_list(result.succeeded, lambda r: r.type),
+            )
+
+        failures: dict[Resource, DeletionFailureEvent] = dict(result.failed)
+        for resource in result.skipped:
+            failures[resource] = DeletionFailureEvent(
+                f"No custom deletion handler registered for {resource.type}"
+            )
         return failures
 
     def _prepare_all(

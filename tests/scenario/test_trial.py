@@ -126,6 +126,10 @@ def mock_resource_manager():
             "aws_bench.resource_management.snapshot.manager.SnapshotManager.snapshot_exists",
             return_value=True,
         ),
+        patch(
+            "aws_bench.resource_management.snapshot.manager.SnapshotManager.validate_pre_setup_snapshot",
+            return_value=None,
+        ),
     ):
         yield
 
@@ -1446,17 +1450,13 @@ def test_run_writes_trial_log(tmp_path, fake_container, fake_creds):
     assert trial.paths.log_path.stat().st_size > 0
 
 
-# -- region-restriction SCP (applied before deploy.sh) -------------------
+# -- region-restriction SCP at DEPLOY ------------------------------------------
 
 
-def test_deploy_applies_region_restriction_scp(
+def test_deploy_ensures_region_scp_for_its_accounts(
     tmp_path, fake_container, fake_creds, mock_account_manager
 ):
-    """Deploy locks the scenario's accounts to its declared regions.
-
-    Applied for exactly the accounts this trial uses, with the scenario's
-    declared regions.
-    """
+    """DEPLOY attaches the scenario's SCP to exactly the trial's accounts."""
     trial = _build_trial(tmp_path, fake_container, fake_creds)
 
     result = asyncio.run(trial.run(ScenarioPhase.DEPLOY))
@@ -1467,29 +1467,10 @@ def test_deploy_applies_region_restriction_scp(
     )
 
 
-def test_region_restriction_scp_applied_before_deploy_script(
-    tmp_path, fake_container, fake_creds, mock_account_manager
-):
-    """The SCP is applied before deploy.sh runs, so a failing script still gets it.
-
-    The guardrail goes on first, so a non-zero script exit afterward neither
-    undoes nor skips the SCP — out-of-region actions were already denied.
-    """
-    fake_container.run_phase = AsyncMock(return_value=ExecResult(exit_code=7, stdout="boom\n"))
-    trial = _build_trial(tmp_path, fake_container, fake_creds)
-
-    result = asyncio.run(trial.run(ScenarioPhase.DEPLOY))
-
-    assert not result.success
-    mock_account_manager.ensure_region_restriction_scp.assert_called_once_with(
-        "sc", ["us-east-1"], ["111111111111"]
-    )
-
-
 def test_scp_failure_aborts_deploy_before_script(
     tmp_path, fake_container, fake_creds, mock_account_manager
 ):
-    """Fail-closed: if the guardrail can't be applied, deploy.sh never runs."""
+    """If the SCP cannot be attached, deploy.sh never runs."""
     mock_account_manager.ensure_region_restriction_scp.side_effect = RuntimeError("scp boom")
     trial = _build_trial(tmp_path, fake_container, fake_creds)
 
@@ -1501,14 +1482,16 @@ def test_scp_failure_aborts_deploy_before_script(
     assert "scp boom" in result.exception_info.exception_message
 
 
-def test_non_deploy_phase_skips_region_restriction_scp(
-    tmp_path, fake_container, fake_creds, mock_account_manager
+@pytest.mark.parametrize("phase", [p for p in ScenarioPhase if p is not ScenarioPhase.DEPLOY])
+def test_non_deploy_phases_do_not_touch_region_scp(
+    tmp_path, fake_container, fake_creds, mock_account_manager, phase
 ):
-    """Region restriction is a deploy-time action; recovery phases never apply it."""
+    """Every phase except DEPLOY runs its script without touching the SCP."""
     trial = _build_trial(tmp_path, fake_container, fake_creds)
 
-    asyncio.run(trial.run(ScenarioPhase.VERIFY))
+    asyncio.run(trial._run_phase_in_container(phase))
 
+    fake_container.run_phase.assert_awaited_once()
     mock_account_manager.ensure_region_restriction_scp.assert_not_called()
 
 
