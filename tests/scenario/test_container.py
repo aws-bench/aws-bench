@@ -795,8 +795,8 @@ def test_start_writes_credential_process_config_and_creds_file(sc):
         fake.when("exec", rc=0)
         asyncio.run(sc.start())
         try:
-            # Initial creds minted on the host before any phase runs.
-            sc._cred_provider.get_session_for_account.assert_called()
+            # The refresher waits before renewing the initial credentials.
+            assert sc._cred_provider.get_session_for_account.call_count == 1
             creds_path = sc._creds_dir / "PRIMARY.json"
             assert creds_path.exists()
             assert json.loads(creds_path.read_text())["AccessKeyId"] == "AKIATEST"
