@@ -22,11 +22,9 @@ tooling box. It is not the agent's environment.
 from __future__ import annotations
 
 import asyncio
-import csv
-import io
+import json
 import logging
 import os
-import posixpath
 import re
 import secrets
 import shlex
@@ -41,45 +39,26 @@ from tempfile import SpooledTemporaryFile
 
 from aws_bench.account_management.constants import ORG_ACCESS_ROLE
 from aws_bench.constants import DEFAULT_REGION
-from aws_bench.exceptions import CredentialError, OperationCancelled
 from aws_bench.logging.logger import get_logger
 from aws_bench.scenario.config import EnvironmentConfig
 from aws_bench.scenario.events import ScenarioPhase
 from aws_bench.scenario.paths import ScenarioPaths
 from aws_bench.utils.credentials_provider import (
-    CREDS_DIR,
     CredentialProvider,
-    build_aws_config,
     build_session_name,
-    check_static_profiles,
-    credential_command,
-    credential_env,
-    credential_refresh_delay,
-    mint_credentials,
-    refresh_credentials_loop,
+    run_credential_refresh_loop,
+    session_to_credential_process,
 )
 
 logger = get_logger(__name__)
 
+# Host bind-mounts the per-tag credential_process files here.
+CREDS_DIR = PurePosixPath("/awsbench-creds")
 
-async def _await_owned[T](task: asyncio.Task[T]) -> T:
-    """Finish an owned operation before propagating its caller's cancellation."""
-    cancelled = False
-    while True:
-        try:
-            result = await asyncio.shield(task)
-            break
-        except asyncio.CancelledError:
-            if task.cancelled():
-                raise
-            cancelled = True
-        except (OperationCancelled, Exception):
-            if cancelled:
-                raise asyncio.CancelledError from None
-            raise
-    if cancelled:
-        raise asyncio.CancelledError
-    return result
+# write_file path constraint. Tilde lets the in-container shell expand
+# $HOME; everything else is conservative ASCII so the unquoted path
+# interpolation in `cat > <path>` cannot inject shell metacharacters.
+_SAFE_PATH_RE = re.compile(r"^[A-Za-z0-9_./~-]+$")
 
 
 class DockerCLIError(RuntimeError):
@@ -163,7 +142,7 @@ class ScenarioContainer:
                 it is written. The trial reads phase outputs from here.
             cred_provider: Source of management credentials. The container's
                 per-account credentials are minted and refreshed from this by
-                the host-side refresher.
+                the host-side refresher (see ``run_credential_refresh_loop``).
             account_mapping: ``{account_tag: account_id}`` for the scenario.
                 Each tag becomes an ``AWS_PROFILE`` the container's scripts can
                 select; the refresher writes one credential file per tag.
@@ -178,23 +157,14 @@ class ScenarioContainer:
         self._container_name = container_name
         self._host_logs_dir = host_logs_dir
         self._cred_provider = cred_provider
-        self._account_mapping = dict(account_mapping)
-        self._profile = next(iter(self._account_mapping))
+        self._account_mapping = account_mapping
         self._labels = dict(labels or {})
         self._log = (log or logger).getChild(container_name)
         self._started = False
-        self._stopping = False
-        self._run_attempted = False
-        self._startup_task: asyncio.Task[None] | None = None
-        self._stop_task: asyncio.Task[None] | None = None
-        self._container_home: PurePosixPath | None = None
-        self._container_uid = 0
-        self._container_gid = 0
         # Cache for rootless-daemon detection (see _is_rootless_docker).
         self._rootless_docker: bool | None = None
-        # The private outer directory protects host access. Only its readable
-        # inner directory is mounted, so non-root container users can read it.
-        self._creds_root: Path | None = None
+        # Host dir bind-mounted at CREDS_DIR; holds one credential_process JSON
+        # per account tag. Created in start(), removed in stop().
         self._creds_dir: Path | None = None
         # Background task that re-mints the credential files before they expire.
         self._refresh_task: asyncio.Task[None] | None = None
@@ -253,36 +223,16 @@ class ScenarioContainer:
         for the trial's duration regardless of the image's ``CMD``. Resource
         limits come from the merged ``EnvironmentConfig``.
         """
-        if self._started or self._startup_task is not None:
+        if self._started:
             raise RuntimeError("Container already started.")
-        if self._stop_task is not None and not self._stop_task.done():
-            raise RuntimeError("Container is still stopping.")
-        if self._creds_root is not None:
-            await self._stop_credential_refresh()
-            if self._creds_root is not None:
-                raise RuntimeError("Previous scenario credentials could not be removed.")
 
-        self._stopping = False
-        self._startup_task = asyncio.create_task(self._start())
-        try:
-            await asyncio.shield(self._startup_task)
-        except BaseException:
-            await self.stop(delete=True)
-            raise
-        finally:
-            self._startup_task = None
-
-    async def _start(self) -> None:
         await self._remove_existing()
-        await self._resolve_container_user()
-        assert self._container_home is not None
         self._host_logs_dir.mkdir(parents=True, exist_ok=True)
-        self._creds_root = Path(tempfile.mkdtemp(prefix=f"awsbench-creds-{self._container_name}-"))
-        self._creds_root.chmod(0o700)
-        self._creds_dir = self._creds_root / "creds"
-        self._creds_dir.mkdir()
-        self._creds_dir.chmod(0o755)
-        expires_at = await self._refresh_credentials()
+        # Mint the initial credential files before the container starts, so a
+        # script's first AWS call resolves. Bind-mounted read-only; the refresher
+        # rewrites them in place as they near expiry.
+        self._creds_dir = Path(tempfile.mkdtemp(prefix=f"awsbench-creds-{self._container_name}-"))
+        expires_at = await self._write_all_creds_files()
         # --mount k=v form over --volume so a host path containing ':' can't
         # be misparsed into the target or options field; operator-supplied
         # output dirs flow into self._host_logs_dir.
@@ -296,255 +246,82 @@ class ScenarioContainer:
             "--memory",
             f"{self._env_config.memory_mb}m",
             "--mount",
-            self._mount_arg("bind", str(self._host_logs_dir.resolve()), str(self.LOGS_DIR)),
+            f"type=bind,source={self._host_logs_dir.resolve()},target={self.LOGS_DIR}",
             "--mount",
-            self._mount_arg(
-                "bind", str(self._creds_dir), str(self._container_home / CREDS_DIR), readonly=True
-            ),
+            f"type=bind,source={self._creds_dir},target={CREDS_DIR},readonly",
         ]
         # Operational labels (sorted for a deterministic command) so tooling can
         # match containers by role rather than by name.
         for key, value in sorted(self._labels.items()):
             args.extend(["--label", f"{key}={value}"])
         for m in self._env_config.mounts_json:
-            mount_str = self._mount_arg(
-                m["type"], m["source"], m["target"], readonly=bool(m.get("read_only"))
-            )
+            mount_str = f"type={m['type']},source={m['source']},target={m['target']}"
+            if m.get("read_only"):
+                mount_str += ",readonly"
             args.extend(["--mount", mount_str])
-        for key, value in credential_env(self._profile).items():
-            args.extend(["--env", f"{key}={value}"])
-        args.extend(["--env", f"HOME={self._container_home}"])
         args.extend([self._image_tag, *self.KEEPALIVE_CMD])
-        self._run_attempted = True
-        await _await_owned(asyncio.create_task(self._run_docker(args)))
+        await self._run_docker(args)
         self._started = True
-        await self._validate_credential_mount()
-        await self._prepare_aws_config()
-        self._check_publication_active()
-        credential_refresh_delay(expires_at)
+        # Scripts select an account with AWS_PROFILE=<tag>; each profile's
+        # credential_process reads the file the refresher keeps fresh.
+        await self.write_file("~/.aws/config", self._build_aws_config())
         self._refresh_task = asyncio.create_task(
-            refresh_credentials_loop(expires_at, self._refresh_credentials, self._log)
+            run_credential_refresh_loop(self._write_all_creds_files, expires_at, self._log)
         )
         self._log.debug("Started container %s.", self._container_name)
 
-    @staticmethod
-    def _mount_arg(kind: str, source: str, target: str, *, readonly: bool = False) -> str:
-        """Quote mount fields as CSV, including paths containing commas."""
-        buf = io.StringIO()
-        fields = [f"type={kind}", f"source={source}", f"target={target}"]
-        if readonly:
-            fields.append("readonly")
-        csv.writer(buf, lineterminator="").writerow(fields)
-        return buf.getvalue()
-
-    async def _resolve_container_user(self) -> None:
-        """Probe the built image without credentials, mounts, or network access."""
-        targets = [str(self.LOGS_DIR), *(m["target"] for m in self._env_config.mounts_json)]
-        for target in targets:
-            if not PurePosixPath(target).is_absolute() or any(c in target for c in "\0\r\n"):
-                raise ValueError("Mount targets must be absolute container paths.")
-        # Resolve existing parents so an image symlink cannot hide a mount overlap.
-        probe = """
-set -eu
-cd "$HOME"
-pwd -P
-id -u
-id -g
-for path in "$HOME/.aws" "$HOME/.aws/config" "$HOME/.aws/credentials" "$HOME/.aws/creds"; do
-    if [ -L "$path" ]; then
-        echo "AWS credential paths must not be symlinks" >&2
-        exit 1
-    fi
-done
-for target do
-    suffix=
-    while [ ! -d "$target" ]; do
-        if [ -L "$target" ]; then
-            echo "Mount target must not be a file symlink" >&2
-            exit 1
-        fi
-        suffix="/${target##*/}$suffix"
-        target="${target%/*}"
-        target="${target:-/}"
-    done
-    printf '%s%s\\n' "$(cd "$target" && pwd -P)" "$suffix"
-done
-"""
-        args = ["run", "--rm", "--network", "none", "--entrypoint", "sh"]
-        for key, value in credential_env(self._profile).items():
-            args.extend(["--env", f"{key}={value}"])
-        args.extend(
-            [
-                self._image_tag,
-                "-c",
-                credential_command(probe, self._profile),
-                "awsbench-home",
-                *(posixpath.normpath(t) for t in targets),
-            ]
-        )
-        _, stdout, _ = await self._run_docker_capture(args, settle_on_cancel=True)
-        parts = stdout.decode("utf-8").splitlines()
-        if (
-            len(parts) != 3 + len(targets)
-            or not PurePosixPath(parts[0]).is_absolute()
-            or not parts[1].isdigit()
-            or not parts[2].isdigit()
-        ):
-            raise RuntimeError("Could not resolve the scenario image's HOME and user.")
-        self._container_home = PurePosixPath(parts[0])
-        self._container_uid, self._container_gid = int(parts[1]), int(parts[2])
-        reserved = [
-            self._container_home / CREDS_DIR,
-            self._container_home / CREDS_DIR.parent / "config",
-        ]
-        for original, resolved in zip(targets, parts[3:], strict=True):
-            target = PurePosixPath("/" + posixpath.normpath(resolved).lstrip("/"))
-            if any(target.is_relative_to(path) or path.is_relative_to(target) for path in reserved):
-                raise ValueError(
-                    f"Mount target {original!r} overlaps reserved AWS credential paths."
-                )
-
-    async def _validate_credential_mount(self) -> None:
-        """Check actual mounts, including aliases supplied inside another author mount."""
-        assert self._container_home is not None
-        creds = self._container_home / CREDS_DIR
-        reserved = (creds, creds.parent / "config")
-        rc, body, _ = await self._exec_in_container_capture(
-            "cat /proc/self/mountinfo", env=None, timeout_sec=10
-        )
-        if rc != 0:
-            raise RuntimeError("Could not read scenario container mounts.")
-        found = False
-        for line in body.decode("utf-8").splitlines():
-            fields = line.split()
-            if len(fields) < 6:
-                raise RuntimeError("Invalid scenario container mount information.")
-            target = PurePosixPath(re.sub(r"\\([0-7]{3})", lambda m: chr(int(m[1], 8)), fields[4]))
-            if target == creds:
-                if found or "ro" not in fields[5].split(","):
-                    raise ValueError("Scenario credentials require one read-only directory mount.")
-                found = True
-            elif target != PurePosixPath("/") and any(
-                target.is_relative_to(path) or path.is_relative_to(target) for path in reserved
-            ):
-                raise ValueError(f"Container mount at {target} overlaps reserved AWS paths.")
-        if not found:
-            raise ValueError("Scenario credential directory is not mounted.")
-
-    async def _prepare_aws_config(self) -> None:
-        """Preserve image config and stream its merged contents through Docker stdin."""
-        assert self._container_home is not None
-        aws_dir = self._container_home / CREDS_DIR.parent
-        quoted_dir = shlex.quote(str(aws_dir))
-        # Docker can create a missing mount parent as root. Give that directory
-        # to the image user without changing any unrelated files beneath it.
-        rc = await self._exec_in_container(
-            f"test ! -L {quoted_dir} && mkdir -p {quoted_dir} && "
-            f"chown {self._container_uid}:{self._container_gid} {quoted_dir} && "
-            f"chmod 700 {quoted_dir}",
-            env=None,
-            timeout_sec=10,
-            user="0",
-        )
-        if rc != 0:
-            raise RuntimeError("Could not prepare the scenario user's AWS directory.")
-        existing: dict[str, str] = {}
-        for name in ("config", "credentials"):
-            path = shlex.quote(str(aws_dir / name))
-            rc, body, _ = await self._exec_in_container_capture(
-                f"test ! -L {path} && "
-                f"{{ if [ -e {path} ]; then test -f {path} && cat {path}; fi; }}",
-                env=None,
-                timeout_sec=10,
-            )
-            if rc != 0:
-                raise RuntimeError(f"Could not read the scenario user's AWS {name} file.")
-            existing[name] = body.decode("utf-8")
-        check_static_profiles(self._account_mapping, existing["credentials"])
-        config = build_aws_config(
-            self._account_mapping, existing=existing["config"], region=DEFAULT_REGION
-        )
-        if config != existing["config"]:
-            filename = f".config-{secrets.token_hex(8)}"
-            tmp_path = shlex.quote(str(aws_dir / filename))
-            body = config.encode("utf-8")
-            buf = io.BytesIO()
-            with tarfile.open(fileobj=buf, mode="w") as tar:
-                entry = tarfile.TarInfo(filename)
-                entry.size = len(body)
-                entry.mode = 0o600
-                tar.addfile(entry, io.BytesIO(body))
-            try:
-                await self._cp_to_container(buf.getvalue(), aws_dir)
-                self._check_publication_active()
-                rc = await self._exec_in_container(
-                    f"chown {self._container_uid}:{self._container_gid} {tmp_path} && "
-                    f"mv -f {tmp_path} {shlex.quote(str(aws_dir / 'config'))}",
-                    env=None,
-                    timeout_sec=10,
-                    user="0",
-                )
-                if rc != 0:
-                    raise RuntimeError("Could not publish the scenario user's AWS config.")
-            finally:
-                try:
-                    rc = await self._exec_in_container(
-                        f"rm -f {tmp_path}", env=None, timeout_sec=10
-                    )
-                    if rc != 0:
-                        self._log.warning("Could not remove temporary AWS config %s", tmp_path)
-                except Exception as exc:
-                    self._log.warning("Could not remove temporary AWS config: %s", exc)
-        paths = [aws_dir / "config", self._container_home / CREDS_DIR / f"{self._profile}.json"]
-        rc = await self._exec_in_container(
-            " && ".join(
-                f"test -f {shlex.quote(str(path))} && test -r {shlex.quote(str(path))}"
-                for path in paths
-            ),
-            env=None,
-            timeout_sec=10,
-        )
-        if rc != 0:
-            raise RuntimeError("Scenario credentials are not readable by the image user.")
-
-    def _check_publication_active(self) -> None:
-        task = asyncio.current_task()
-        if self._stopping or self._creds_dir is None or (task is not None and task.cancelling()):
-            raise asyncio.CancelledError
-
-    async def _refresh_credentials(self) -> datetime:
-        """Mint in a worker; publish atomic replacements only on the owning event loop."""
-        self._check_publication_active()
-        files, expires_at = await asyncio.to_thread(
-            mint_credentials,
-            self._cred_provider,
-            dict(self._account_mapping),
-            ORG_ACCESS_ROLE,
-            build_session_name("session", self._profile[-8:]),
-        )
-        self._check_publication_active()
+    def _creds_file(self, tag: str) -> Path:
+        """Host path of the credential_process JSON for account ``tag``."""
         assert self._creds_dir is not None
-        credential_refresh_delay(expires_at)
-        if set(files) != {f"{self._profile}.json"}:
-            raise ValueError("Credential mint returned unexpected scenario filenames.")
-        for filename, body in files.items():
-            path = self._creds_dir / filename
-            tmp = path.with_suffix(".json.tmp")
-            try:
-                tmp.write_text(body, encoding="utf-8")
-                tmp.chmod(0o644)
-                self._check_publication_active()
-                credential_refresh_delay(expires_at)
-                os.replace(tmp, path)
-            finally:
-                tmp.unlink(missing_ok=True)
-        credential_refresh_delay(expires_at)
-        return expires_at
+        return self._creds_dir / f"{tag}.json"
+
+    def _build_aws_config(self) -> str:
+        """Render ``~/.aws/config`` — one credential_process profile per account tag.
+
+        The host writes pre-assumed member-account creds to the bind-mounted file;
+        credential_process is the one source the SDK re-invokes on expiry, which
+        keeps long scripts alive.
+        """
+        parts: list[str] = []
+        for tag in self._account_mapping:
+            container_path = CREDS_DIR / f"{tag}.json"
+            parts.append(
+                f"[profile {tag}]\n"
+                f'credential_process = sh -c "cat {container_path}"\n'
+                f"region = {DEFAULT_REGION}\n"
+            )
+        return "\n".join(parts)
+
+    def _write_creds_file(self, tag: str) -> datetime:
+        """Mint fresh creds for ``tag``, write its credential_process file, return expiry.
+
+        Atomic (temp + ``os.replace``) so a reader never sees a partial file; mode
+        0644 so the container (root) can read the bind-mounted file.
+        """
+        session = self._cred_provider.get_session_for_account(
+            self._account_mapping[tag],
+            ORG_ACCESS_ROLE,
+            build_session_name("session", tag[-8:]),
+        )
+        creds = session_to_credential_process(session)
+        path = self._creds_file(tag)
+        tmp = path.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(creds))
+        tmp.chmod(0o644)
+        os.replace(tmp, path)
+        return datetime.fromisoformat(str(creds["Expiration"]))
+
+    async def _write_all_creds_files(self) -> datetime:
+        """Write every tag off-loop and return the soonest expiry."""
+        expiries = [
+            await asyncio.to_thread(self._write_creds_file, tag) for tag in self._account_mapping
+        ]
+        return min(expiries)
 
     async def _remove_existing(self) -> None:
         """Remove a stale container with the same name, if any."""
         rc, _, stderr = await self._run_docker_capture(
-            ["rm", "-f", self._container_name], check=False, settle_on_cancel=True
+            ["rm", "-f", self._container_name], check=False
         )
         if rc == 0:
             self._log.debug("Removed stale container %s.", self._container_name)
@@ -557,68 +334,47 @@ done
 
     async def stop(self, *, delete: bool) -> None:
         """Stop the container; remove it when ``delete`` is True."""
-        self._stopping = True
-        if self._stop_task is None or self._stop_task.done():
-            self._stop_task = asyncio.create_task(self._stop(delete=delete))
-        await _await_owned(self._stop_task)
-
-    async def _stop(self, *, delete: bool) -> None:
-        if self._startup_task is not None:
-            if not self._startup_task.done():
-                self._startup_task.cancel()
-            try:
-                await self._startup_task
-            except (asyncio.CancelledError, OperationCancelled, Exception):
-                pass
-        await self._stop_credential_refresh()
-        if not self._started and not self._run_attempted:
+        if not self._started:
             return
+        # Stop the refresher (and drop its credential dir) before tearing down.
+        await self._stop_credential_refresh()
         # Fix ownership of bind-mounted /logs so the host user can read/write/
         # delete phase outputs after the (root) container is gone. Must run
         # while the container is still up (uses docker exec). See
         # _chown_logs_to_host_user for the cross-platform rationale.
         await self._chown_logs_to_host_user()
-        commands = [["stop", "-t", "10", self._container_name]]
+        rc, _, stderr = await self._run_docker_capture(
+            ["stop", "-t", "10", self._container_name], check=False
+        )
+        if rc != 0:
+            self._log.warning(
+                "Failed to stop container %s: %s", self._container_name, stderr.strip()
+            )
         if delete:
-            commands.append(["rm", "-f", self._container_name])
-        for args in commands:
-            try:
-                rc, _, stderr = await self._run_docker_capture(args, check=False)
-                if rc != 0:
-                    self._log.warning(
-                        "Failed to %s container %s: %s",
-                        args[0],
-                        self._container_name,
-                        stderr.strip(),
-                    )
-                elif args[0] == "rm":
-                    self._run_attempted = False
-            except Exception as exc:
+            rc, _, stderr = await self._run_docker_capture(
+                ["rm", "-f", self._container_name], check=False
+            )
+            if rc != 0:
                 self._log.warning(
-                    "Failed to %s container %s: %s", args[0], self._container_name, exc
+                    "Failed to remove container %s: %s", self._container_name, stderr.strip()
                 )
         self._started = False
 
     async def _stop_credential_refresh(self) -> None:
-        """Settle refresh and remove the whole private root, retaining failures for retry."""
+        """Cancel the refresh task and remove the host credential dir.
+
+        Always removes the dir (it holds live member-account creds — a leak leaves
+        a secret on disk), even if cancellation or rmtree hiccups.
+        """
         if self._refresh_task is not None:
             self._refresh_task.cancel()
             try:
                 await self._refresh_task
-            except (asyncio.CancelledError, OperationCancelled, Exception):
+            except (asyncio.CancelledError, Exception):  # noqa: BLE001 — teardown, never raise
                 pass
             self._refresh_task = None
-        if self._creds_root is not None:
-            try:
-                shutil.rmtree(self._creds_root)
-            except FileNotFoundError:
-                pass
-            except OSError as exc:
-                self._log.warning(
-                    "Failed to remove scenario credentials at %s: %s", self._creds_root, exc
-                )
-                return
-            self._creds_root = None
+        if self._creds_dir is not None:
+            shutil.rmtree(self._creds_dir, ignore_errors=True)
             self._creds_dir = None
 
     async def _is_rootless_docker(self) -> bool:
@@ -659,53 +415,60 @@ done
         """
         if not self._started or not hasattr(os, "getuid"):
             return
+        if await self._is_rootless_docker():
+            uid, gid = 0, 0
+        else:
+            uid, gid = os.getuid(), os.getgid()
         try:
-            if await self._is_rootless_docker():
-                uid, gid = 0, 0
-            else:
-                uid, gid = os.getuid(), os.getgid()
             rc = await self._exec_in_container(
                 f"chown -R {uid}:{gid} {shlex.quote(str(self.LOGS_DIR))}",
                 env=None,
                 timeout_sec=120,
-                user="0",
             )
             if rc != 0:
                 self._log.warning("chown -R %s:%s %s exited %s", uid, gid, self.LOGS_DIR, rc)
         except Exception as e:  # noqa: BLE001 — best-effort ownership fixup
             self._log.warning("Failed to chown %s to host user: %s", self.LOGS_DIR, e)
 
+    async def write_file(self, container_path: str, content: str) -> None:
+        """Write ``content`` to ``container_path`` inside the running container.
+
+        Creates the parent directory and writes via a quoted-sentinel
+        heredoc, so the body is treated as literal text (no shell
+        expansion of ``$VAR`` or backticks). Path is interpolated
+        unquoted so a leading ``~`` is expanded by the in-container
+        shell; callers must pass paths matching ``[A-Za-z0-9_./~-]``.
+
+        The heredoc sentinel is randomized when ``content`` contains
+        the default token, so a payload cannot terminate the heredoc
+        early.
+        """
+        self._require_started()
+        if not _SAFE_PATH_RE.match(container_path):
+            raise ValueError(
+                f"Refusing to write {container_path!r}: path must match [A-Za-z0-9_./~-]"
+            )
+        parent = str(PurePosixPath(container_path).parent)
+        sentinel = self._unique_heredoc_sentinel(content)
+        cmd = f"mkdir -p {parent} && cat > {container_path} <<'{sentinel}'\n{content}\n{sentinel}"
+        rc = await self._exec_in_container(cmd, env=None, timeout_sec=10)
+        if rc != 0:
+            raise RuntimeError(
+                f"Failed to write {container_path} in {self._container_name} (exit {rc})"
+            )
+
+    @staticmethod
+    def _unique_heredoc_sentinel(content: str) -> str:
+        """Return a sentinel guaranteed not to appear as a line in ``content``."""
+        base = "AWSBENCH_EOF"
+        candidate = base
+        while f"\n{candidate}\n" in f"\n{content}\n":
+            candidate = f"{base}_{secrets.token_hex(4)}"
+        return candidate
+
     # ── phase execution ─────────────────────────────────────────────────
 
     async def run_phase(
-        self,
-        phase: ScenarioPhase,
-        *,
-        env: dict[str, str],
-        timeout_sec: float,
-    ) -> ExecResult:
-        """Run a phase only while its credential refresher remains active."""
-        self._require_started()
-        refresher = self._refresh_task
-        if refresher is None:
-            raise CredentialError("Scenario credential refresh is not running")
-        task: asyncio.Task[ExecResult] | None = None
-        try:
-            if not refresher.done() and not refresher.cancelling():
-                task = asyncio.create_task(self._run_phase(phase, env=env, timeout_sec=timeout_sec))
-                await asyncio.wait({task, refresher}, return_when=asyncio.FIRST_COMPLETED)
-            if refresher.done() or refresher.cancelling():
-                if refresher.done() and not refresher.cancelled():
-                    refresher.exception()
-                raise CredentialError("Scenario credential refresh stopped; ending the phase")
-            assert task is not None
-            return task.result()
-        finally:
-            if task is not None:
-                task.cancel()
-                await asyncio.gather(task, return_exceptions=True)
-
-    async def _run_phase(
         self,
         phase: ScenarioPhase,
         *,
@@ -725,6 +488,7 @@ done
              stdout read from the host side of the bind mount — no
              docker-cp round-trip.
         """
+        self._require_started()
         host_dir = self._paths.phase_dir(phase)
         if not host_dir.is_dir():
             raise FileNotFoundError(f"Phase directory not found: {host_dir}")
@@ -741,12 +505,9 @@ done
         await self._upload_dir(host_dir, container_phase_dir)
         # Helper commands must succeed; treat nonzero as a hard failure.
         helper_rc = await self._exec_in_container(
-            f"mkdir -p {container_logs_dir} && "
-            f"chown {self._container_uid}:{self._container_gid} {container_logs_dir} && "
-            f"chmod +x {container_entry}",
+            f"mkdir -p {container_logs_dir} && chmod +x {container_entry}",
             env=None,
             timeout_sec=10,
-            user="0",
         )
         if helper_rc != 0:
             raise RuntimeError(
@@ -780,42 +541,21 @@ done
         *,
         env: dict[str, str] | None,
         timeout_sec: float,
-        user: str | None = None,
     ) -> int:
         """``docker exec`` a shell command and return its exit code.
 
         Raises ``asyncio.TimeoutError`` on timeout; the in-container
         process may still be running until the daemon reaps it.
         """
-        rc, _, _ = await self._exec_in_container_capture(
-            command, env=env, timeout_sec=timeout_sec, user=user
-        )
-        return rc
-
-    async def _exec_in_container_capture(
-        self,
-        command: str,
-        *,
-        env: dict[str, str] | None,
-        timeout_sec: float,
-        user: str | None = None,
-    ) -> tuple[int, bytes, str]:
         self._require_started()
         args = ["exec"]
-        if user is not None:
-            args.extend(["--user", user])
-        overlay = credential_env(self._profile, env)
-        if self._container_home is not None:
-            overlay["HOME"] = str(self._container_home)
-        for k, v in overlay.items():
+        for k, v in (env or {}).items():
             args.extend(["--env", f"{k}={v}"])
-        args.extend([self._container_name, "sh", "-c", credential_command(command, self._profile)])
-        return await asyncio.wait_for(
-            self._run_docker_capture(
-                args, check=False, settle_on_cancel=self._startup_task is not None
-            ),
-            timeout=timeout_sec,
+        args.extend([self._container_name, "sh", "-c", command])
+        rc, _, _ = await asyncio.wait_for(
+            self._run_docker_capture(args, check=False), timeout=timeout_sec
         )
+        return rc
 
     async def _upload_dir(self, host_dir: Path, container_dir: PurePosixPath) -> None:
         """Tar ``host_dir`` (sync) and stream it into the container via ``docker cp``.
@@ -826,11 +566,7 @@ done
         bugs (escape paths, cycles, dangling targets in the container).
         """
         # Make sure the parent exists; `docker cp` requires it.
-        rc = await self._exec_in_container(
-            f"mkdir -p {container_dir}", env=None, timeout_sec=10, user="0"
-        )
-        if rc != 0:
-            raise RuntimeError(f"Could not create scenario script directory {container_dir}.")
+        await self._exec_in_container(f"mkdir -p {container_dir}", env=None, timeout_sec=10)
         tar_bytes = await asyncio.to_thread(self._tar_dir_bytes, host_dir)
         await self._cp_to_container(tar_bytes, container_dir)
 
@@ -858,8 +594,7 @@ done
     async def _cp_to_container(self, tar_bytes: bytes, container_dir: PurePosixPath) -> None:
         """``docker cp - <name>:<dst>`` — stream tar bytes into the container."""
         target = f"{self._container_name}:{container_dir}"
-        args = ["cp", "-", target]
-        await _await_owned(asyncio.create_task(self._run_docker(args, stdin=tar_bytes)))
+        await self._run_docker(["cp", "-", target], stdin=tar_bytes)
 
     # ── internal: docker CLI invocation ─────────────────────────────────
 
@@ -880,28 +615,18 @@ done
         *,
         stdin: bytes | None = None,
         check: bool = True,
-        settle_on_cancel: bool = False,
     ) -> tuple[int, bytes, str]:
         """Run ``docker <args>`` and return (returncode, stdout, stderr)."""
         cmd = self._build_command(args)
-
-        async def communicate() -> tuple[int, bytes, str]:
-            proc = await asyncio.create_subprocess_exec(
-                *cmd,
-                stdin=asyncio.subprocess.PIPE if stdin is not None else asyncio.subprocess.DEVNULL,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            stdout_bytes, stderr_bytes = await proc.communicate(input=stdin)
-            rc = proc.returncode if proc.returncode is not None else -1
-            return rc, stdout_bytes, stderr_bytes.decode("utf-8", errors="replace")
-
-        # Bootstrap must settle Docker writes before disposing of credentials.
-        # Phase commands retain their normal timeout and container-stop behavior.
-        if settle_on_cancel:
-            rc, stdout_bytes, stderr_text = await _await_owned(asyncio.create_task(communicate()))
-        else:
-            rc, stdout_bytes, stderr_text = await communicate()
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdin=asyncio.subprocess.PIPE if stdin is not None else asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout_bytes, stderr_bytes = await proc.communicate(input=stdin)
+        rc = proc.returncode if proc.returncode is not None else -1
+        stderr_text = stderr_bytes.decode("utf-8", errors="replace")
         if check and rc != 0:
             raise DockerCLIError(cmd, rc, stderr_text)
         return rc, stdout_bytes, stderr_text

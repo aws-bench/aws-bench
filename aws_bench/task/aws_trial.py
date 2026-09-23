@@ -9,26 +9,17 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import logging
-import re
-import shlex
-import tempfile
-from collections.abc import AsyncGenerator, Callable, Coroutine, Iterator
-from contextvars import ContextVar
+from collections.abc import AsyncGenerator, Iterable
 from datetime import datetime
-from pathlib import Path, PurePosixPath
-from typing import Any
 
 from harbor.agents.oracle import OracleAgent
-from harbor.environments.base import ExecResult
 from harbor.models.task.task import Task
 from harbor.models.trial.config import TrialConfig
 from harbor.models.trial.paths import TrialPaths
-from harbor.trial.errors import AgentTimeoutError
 from harbor.trial.single_step import SingleStepTrial
-from harbor.utils.env import resolve_env_vars
 
-from aws_bench.account_management.constants import ORG_ACCESS_ROLE
 from aws_bench.account_management.manager import AccountManager
 from aws_bench.dataset.models import RoleType, ScriptType
 from aws_bench.dataset.task_config import AwsBenchTask, ConcurrencyMode, PhaseScript
@@ -42,22 +33,13 @@ from aws_bench.logging.logger import (
 from aws_bench.scenario.events import ScenarioPhase
 from aws_bench.scenario.job_config import ScenarioTrialConfig
 from aws_bench.scenario.trial import ScenarioTrial
-from aws_bench.task.aws_creds import resolve_env_with_creds, session_name
+from aws_bench.task.aws_creds import resolve_env_with_creds, session_for_script
 from aws_bench.task.script_runner import ScriptRunner
 from aws_bench.task.trial_config import AwsBenchTrialConfig
-from aws_bench.utils import credentials_provider
 from aws_bench.utils.credentials_provider import (
-    CREDS_DIR,
-    CredentialError,
     CredentialProvider,
-    build_aws_config,
-    check_static_profiles,
-    credential_command,
-    credential_deadline,
-    credential_env,
-    credential_refresh_delay,
-    mint_credentials,
-    refresh_credentials_loop,
+    run_credential_refresh_loop,
+    session_to_credential_process,
 )
 from aws_bench.utils.placeholders import substitute_placeholders, update_placeholder_values
 
@@ -73,26 +55,53 @@ PLACEHOLDER_OUTPUT_FILE_NAME = "placeholder.json"
 _SCENARIO_RESET_ROLE = "scenario-reset"
 _ROLE_LABEL_KEY = "awsbench.role"
 
-_CREDENTIAL_OPERATION_TIMEOUT_SEC = 30
-_CREDENTIAL_CWD: ContextVar[PurePosixPath | None] = ContextVar("credential_cwd", default=None)
-_CREDENTIAL_UPLOAD_ROOT = PurePosixPath("/")
+# JSON payloads escape newlines; profile names come from validated account tags.
+_CREDS_DIR = "$HOME/.aws/creds"
+_AWS_CONFIG_PATH = "$HOME/.aws/config"
+_CREDS_HEREDOC_SENTINEL = "AWSBENCH_CREDS_EOF"
+
+# AWS env vars emptied in the stage env so neither a host-forwarded credential
+# set nor a stray default-profile selector can outrank the credentials file and
+# the AWS_PROFILE the stage sets to its tag.
+_RAW_CRED_VARS = (
+    "AWS_ACCESS_KEY_ID",
+    "AWS_SECRET_ACCESS_KEY",
+    "AWS_SESSION_TOKEN",
+    "AWS_DEFAULT_PROFILE",
+)
 
 
-def _in_credential_directory(directory: PurePosixPath, command: str) -> str:
-    """Pin a physical directory before running operations relative to it."""
-    quoted = shlex.quote(str(directory))
-    return f'cd -P -- {quoted} && test "$(pwd -P)" = {quoted} && {command}'
+def _creds_write_command(payloads: dict[str, dict[str, object]]) -> str:
+    """Write private process credentials, replacing each file atomically."""
+    lines = [
+        "set -e",
+        "umask 077",
+        f'mkdir -p "{_CREDS_DIR}"',
+        f'chmod 700 "{_CREDS_DIR}"',
+    ]
+    for tag, payload in payloads.items():
+        path = f"{_CREDS_DIR}/{tag}.json"
+        lines.extend(
+            [
+                f"cat > \"{path}.tmp\" <<'{_CREDS_HEREDOC_SENTINEL}'",
+                json.dumps(payload),
+                _CREDS_HEREDOC_SENTINEL,
+                f'mv -f -- "{path}.tmp" "{path}"',
+            ]
+        )
+    return "\n".join(lines)
 
 
-def _credential_file_permissions(path: PurePosixPath, owner: str) -> str:
-    """Change the opened file, refusing redirected paths and shared hard links."""
-    quoted = shlex.quote(str(path))
+def _aws_config_write_command(tags: Iterable[str]) -> str:
+    """Point each profile at the file the host refresher updates."""
+    body = "\n".join(
+        f"[profile {tag}]\ncredential_process = sh -c 'cat \"{_CREDS_DIR}/{tag}.json\"'\n"
+        for tag in tags
+    )
     return (
-        f"test -f {quoted} && test ! -L {quoted} && exec 3< {quoted} && "
-        'test -f "/proc/$$/fd/3" && '
-        f'test "$(readlink "/proc/$$/fd/3")" = {quoted} && '
-        'test "$(stat -Lc %h "/proc/$$/fd/3")" = 1 && '
-        f'chmod 600 "/proc/$$/fd/3" && chown {owner} "/proc/$$/fd/3"'
+        'set -e\numask 077\nmkdir -p "$HOME/.aws"\n'
+        f"cat > \"{_AWS_CONFIG_PATH}\" <<'{_CREDS_HEREDOC_SENTINEL}'\n"
+        f'{body}\n{_CREDS_HEREDOC_SENTINEL}\nchmod 600 "{_AWS_CONFIG_PATH}"'
     )
 
 
@@ -115,9 +124,6 @@ class AwsBenchSingleStepTrial(SingleStepTrial):
         self._aws_post_invoke_done = False
         # Gates post-invoke: skipped if setup never produced a running container.
         self._agent_container_started = False
-        self._credential_dir: PurePosixPath | None = None
-        self._credential_operation_task: asyncio.Task | None = None
-        self._credential_failed = False
         self._account_manager = AccountManager()
         super().__init__(config, _task=_task)
 
@@ -188,544 +194,96 @@ class AwsBenchSingleStepTrial(SingleStepTrial):
         except Exception as exc:  # noqa: BLE001 — reset must not fail a finished benchmark
             self.logger.error("Post-trial reset raised for %s: %s", self.config.scenario_id, exc)
 
-    @contextlib.contextmanager
-    def _credential_commands(
-        self,
-        profile: str,
-        user: str | int | None,
-        env: dict[str, str] | None = None,
-    ) -> Iterator[None]:
-        """Remove credential sources after Harbor and the image supply their env."""
-        environment = self.agent_environment
-        original_exec = environment.exec
-        had_override = "exec" in vars(environment)
-        phase_env = dict(env or {})
-
-        async def scoped_exec(
-            command: str,
-            cwd: str | None = None,
-            env: dict[str, str] | None = None,
-            timeout_sec: int | None = None,
-            user: str | int | None = None,
-        ) -> ExecResult:
-            directory = _CREDENTIAL_CWD.get()
-            if directory is not None:
-                command = _in_credential_directory(directory, command)
-            return await original_exec(
-                command=credential_command(command, profile),
-                cwd=cwd,
-                env=credential_env(profile, {**phase_env, **(env or {})}),
-                timeout_sec=timeout_sec,
-                user=user,
-            )
-
-        with environment.with_default_user(user):
-            environment.exec = scoped_exec
-            try:
-                yield
-            finally:
-                if had_override:
-                    environment.exec = original_exec
-                else:
-                    del environment.exec
-
-    async def _credential_operation[T](
-        self, operation: Coroutine[Any, Any, T], *, publication: bool = False
-    ) -> T:
-        """Settle a file operation before propagating cancellation to its owner."""
-        previous = self._credential_operation_task
-        if previous is not None and not previous.done():
-            operation.close()
-            raise RuntimeError("A previous credential file operation is still active")
-        task = asyncio.create_task(operation)
-        self._credential_operation_task = task
-        deadline = asyncio.get_running_loop().time() + _CREDENTIAL_OPERATION_TIMEOUT_SEC
-        cancellation: asyncio.CancelledError | None = None
-        try:
-            while not task.done():
-                remaining = deadline - asyncio.get_running_loop().time()
-                if remaining <= 0:
-                    self._credential_failed |= publication
-                    task.add_done_callback(
-                        lambda done: None if done.cancelled() else done.exception()
-                    )
-                    if cancellation is not None:
-                        raise cancellation
-                    raise TimeoutError("Credential file operation did not finish before timeout")
-                try:
-                    await asyncio.wait_for(asyncio.shield(task), timeout=remaining)
-                except asyncio.CancelledError as exc:
-                    cancellation = cancellation or exc
-                except Exception:
-                    if task.done():
-                        break
-            if task.cancelled():
-                self._credential_failed |= publication
-            if cancellation is not None:
-                if not task.cancelled():
-                    task.exception()
-                raise cancellation
-            return task.result()
-        finally:
-            if task.done():
-                self._credential_operation_task = None
-
-    async def _credential_home(self) -> tuple[PurePosixPath, str]:
-        """Resolve the same home and owner that the phase's commands use."""
-        result = await self._exec_checked(
-            command='test -n "$HOME" && cd -- "$HOME" && pwd -P && id -u && id -g',
-            user=None,
-            action="resolve the credential home",
-        )
-        parts = (result.stdout or "").splitlines()
-        if (
-            len(parts) != 3
-            or not PurePosixPath(parts[0]).is_absolute()
-            or ".." in PurePosixPath(parts[0]).parts
-            or "\0" in parts[0]
-            or not all(re.fullmatch(r"[0-9]+", value) for value in parts[1:])
-        ):
-            raise RuntimeError("Cannot determine the phase user's home and file ownership")
-        return PurePosixPath(parts[0]), f"{parts[1]}:{parts[2]}"
-
-    async def _check_credential_mounts(self, directory: PurePosixPath) -> None:
-        """Refuse mounts that would place credential cleanup outside the container."""
-        result = await self._exec_checked(
-            command="cat /proc/self/mountinfo", user=None, action="check credential mounts"
-        )
-        lines = (result.stdout or "").splitlines()
-        if not lines:
-            raise RuntimeError("Cannot inspect the container's credential mounts")
-        targets = (directory, directory.parent / "config")
-        for line in lines:
-            fields = line.split()
-            if len(fields) < 7 or "-" not in fields:
-                raise RuntimeError("Invalid container mount information")
-            destination = re.sub(r"\\([0-7]{3})", lambda match: chr(int(match[1], 8)), fields[4])
-            mounted = PurePosixPath(destination)
-            if mounted == PurePosixPath("/"):
-                continue
-            if not mounted.is_absolute() or ".." in mounted.parts:
-                raise RuntimeError("Invalid container mount destination")
-            if any(
-                target.is_relative_to(mounted) or mounted.is_relative_to(target)
-                for target in targets
-            ):
-                raise RuntimeError(f"Container mount overlaps the credential path: {destination}")
-
-    async def _read_credential_config(self, path: PurePosixPath) -> str:
-        """Read a regular config file without putting its contents in error messages."""
-        quoted = shlex.quote(str(path))
-        result = await self._exec_checked(
-            command=(
-                f"test ! -L {quoted} && "
-                f"if [ -e {quoted} ]; then test -f {quoted} && cat {quoted}; fi"
-            ),
-            user=None,
-            action="read AWS credential configuration",
-        )
-        return result.stdout or ""
-
-    async def _clear_credentials(self, directory: PurePosixPath) -> None:
-        """Clear every credential file, including partial uploads, through Harbor."""
-        child = shlex.quote(directory.name)
-        await self._exec_checked(
-            command=_in_credential_directory(
-                directory.parent,
-                f"if [ -L {child} ] || {{ [ -e {child} ] && [ ! -d {child} ]; }}; "
-                f"then rm -f -- {child}; fi && mkdir -p -- {child}",
-            ),
-            user="root",
-            action="prepare the credential directory",
-        )
-        # Harbor has no cwd argument here. Scope only this coroutine's exec so
-        # find and rm resolve ./children from the same opened directory.
-        token = _CREDENTIAL_CWD.set(directory)
-        try:
-            result = await self.agent_environment.empty_dirs([PurePosixPath(".")], chmod=False)
-        finally:
-            _CREDENTIAL_CWD.reset(token)
-        if result is None or result.return_code != 0:
-            raise RuntimeError("Failed to clear the credential directory")
-        if self._credential_dir == directory:
-            self._credential_dir = None
-
-    async def _publish_credential_file(
-        self,
-        path: PurePosixPath,
-        body: str,
-        owner: str,
-        expires_at: datetime | None = None,
-        *,
-        can_publish: Callable[[], bool] | None = None,
-        valid_until: datetime | None = None,
-    ) -> bool:
-        """Publish only while the caller permits it and the previous generation is valid.
-
-        A skipped publication returns False after disposing of its private upload.
-        """
-        assert self._credential_dir is not None
-        upload_dir: PurePosixPath | None = None
-        try:
-            root = shlex.quote(str(_CREDENTIAL_UPLOAD_ROOT))
-            result = await self._exec_checked(
-                command=(
-                    f'test "$(stat -c %u -- {root})" = "$(id -u)" && '
-                    f'test "$((0$(stat -c %a -- {root}) & 022))" -eq 0 && '
-                    "umask 077 && mktemp -d "
-                    f"{shlex.quote(str(_CREDENTIAL_UPLOAD_ROOT / '.aws-creds.XXXXXXXX'))}"
-                ),
-                user="root",
-                action="create a private credential upload directory",
-            )
-            candidate = PurePosixPath((result.stdout or "").strip())
-            if candidate.parent != _CREDENTIAL_UPLOAD_ROOT or not re.fullmatch(
-                r"\.aws-creds\.[A-Za-z0-9]{8}", candidate.name
-            ):
-                raise RuntimeError("Invalid credential upload directory")
-            upload_dir = candidate
-            if can_publish is not None and not can_publish():
-                return False
-            with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8") as temporary:
-                source = Path(temporary.name)
-                temporary.write(body)
-                temporary.flush()
-                destination = upload_dir / f".{path.name}.{source.name}.tmp"
-                await self.agent_environment.upload_file(str(source), str(destination))
-                # The copy must settle, but a closed phase cannot start a rename.
-                if can_publish is not None and not can_publish():
-                    return False
-                freshness = ""
-                if expires_at is not None:
-                    credential_refresh_delay(expires_at)
-                    latest = int(
-                        expires_at.timestamp() - credentials_provider.CRED_REFRESH_MIN_SLEEP_SEC
-                    )
-                    if valid_until is not None:
-                        latest = min(latest, int(valid_until.timestamp()))
-                    freshness = f'test "$(date +%s)" -lt {latest} && '
-                await self._exec_checked(
-                    command=_in_credential_directory(
-                        upload_dir,
-                        f"{_credential_file_permissions(destination, owner)} && "
-                        "exec 4< . && "
-                        + _in_credential_directory(
-                            path.parent,
-                            'test "$(stat -Lc %d /proc/$$/fd/4)" = "$(stat -c %d .)" && '
-                            f'{freshness}mv -fT -- "/proc/$$/fd/4"/'
-                            f"{shlex.quote(destination.name)} {shlex.quote(path.name)}",
-                        ),
-                    ),
-                    user="root",
-                    action="publish credential file",
+    def _mint_all_tags(self, role_type: RoleType) -> dict[str, dict[str, object]]:
+        """Snapshot the phase's role credentials and their exact STS expiry."""
+        role_name = self.task.config.scenario.role_name(role_type)
+        return {
+            tag: session_to_credential_process(
+                session_for_script(
+                    account_id=account_id,
+                    role_name=role_name,
+                    role_type=role_type,
+                    task_name=self.task.name,
+                    job_id=self.config.job_id,
                 )
-                return True
-        except Exception:
-            # Transport errors can include remote output. Never copy it into trial logs.
-            raise RuntimeError(f"Failed to publish credential file {path.name}") from None
-        finally:
-            if upload_dir is not None:
-                try:
-                    await self._exec_checked(
-                        command=f"rm -rf -- {shlex.quote(str(upload_dir))}",
-                        user="root",
-                        action="remove the private credential upload directory",
-                    )
-                except Exception:
-                    self.logger.warning("Private credential upload cleanup failed")
+            )
+            for tag, account_id in self.config.account_mapping.items()
+        }
+
+    async def _write_stage_credentials(
+        self, role_type: RoleType, user: str | int | None
+    ) -> datetime:
+        """Mint off-loop, publish the files, and return their soonest expiry."""
+        payloads = await asyncio.to_thread(self._mint_all_tags, role_type)
+        await self._exec_checked(
+            command=_creds_write_command(payloads), user=user, action="write credential files"
+        )
+        return min(datetime.fromisoformat(str(value["Expiration"])) for value in payloads.values())
 
     @contextlib.asynccontextmanager
     async def _staged_credentials(
-        self,
-        role_type: RoleType,
-        *,
-        user: str | int | None = None,
-        env: dict[str, str] | None = None,
+        self, role_type: RoleType, *, user: str | int | None = None
     ) -> AsyncGenerator[dict[str, str], None]:
-        """Publish renewable phase credentials and clear the directory on exit."""
-        accounts = dict(self.config.account_mapping)
-        if not accounts:
+        """Refresh this phase's credentials, then finish its writer before cleanup."""
+        if not self.config.account_mapping:
             raise RuntimeError(
                 f"trial {self.config.trial_name}: empty account_mapping; cannot stage credentials"
             )
-        if self._credential_failed:
-            raise RuntimeError("Previous credential phase failed; cannot start another phase")
-        profile = next(iter(accounts))
-        cred_env = credential_env(profile)
-        if role_type is RoleType.AGENT:
-            cred_env["AWS_REGION"] = self.config.regions[0]
-            cred_env["AWS_DEFAULT_REGION"] = self.config.regions[0]
-        role_name = self.task.config.scenario.role_name(role_type) or ORG_ACCESS_ROLE
-        label = session_name(job_id=self.config.job_id)
-        provider = CredentialProvider.get()
         refresher: asyncio.Task[None] | None = None
-        abort_phase: asyncio.Timeout | None = None
-        credential_error: Exception = CredentialError(
-            "AWS credentials expired before refresh completed"
-        )
-        consumer_started = False
-        primary: BaseException | None = None
-        scope_open = True
-        scope_task = asyncio.current_task()
-        scope_cancellations = scope_task.cancelling() if scope_task is not None else 0
-
-        def can_publish() -> bool:
-            if (
-                not scope_open
-                or self._credential_failed
-                or (scope_task is not None and scope_task.cancelling() > scope_cancellations)
-            ):
-                return False
-            if abort_phase is None:
-                return True
-            deadline = abort_phase.when()
-            return (
-                not abort_phase.expired()
-                and deadline is not None
-                and asyncio.get_running_loop().time() < deadline
+        try:
+            expires_at = await self._write_stage_credentials(role_type, user)
+            await self._exec_checked(
+                command=_aws_config_write_command(self.config.account_mapping),
+                user=user,
+                action="write AWS config",
             )
-
-        with self._credential_commands(profile, user, {**(env or {}), **cred_env}):
+            refresher = asyncio.create_task(
+                run_credential_refresh_loop(
+                    lambda: self._write_stage_credentials(role_type, user), expires_at, self.logger
+                )
+            )
+            cred_env: dict[str, str] = dict.fromkeys(_RAW_CRED_VARS, "")
+            tag = next(iter(self.config.account_mapping))
+            cred_env["AWS_PROFILE"] = tag
+            cred_env["AWS_DEFAULT_PROFILE"] = tag
+            # Script and verifier regions remain task-configured.
+            if role_type is RoleType.AGENT:
+                cred_env["AWS_REGION"] = self.config.regions[0]
+                cred_env["AWS_DEFAULT_REGION"] = self.config.regions[0]
+            yield cred_env
+        finally:
             try:
-                if self._credential_dir is not None:
-                    await self._credential_operation(self._clear_credentials(self._credential_dir))
-                home, owner = await self._credential_home()
-                directory = home / CREDS_DIR
-                await self._check_credential_mounts(directory)
-                await self._exec_checked(
-                    command=_in_credential_directory(
-                        home,
-                        f"mkdir -p -- {shlex.quote(directory.parent.name)} && "
-                        + _in_credential_directory(directory.parent, f"chown {owner} ."),
-                    ),
-                    user="root",
-                    action="prepare the AWS directory",
-                )
-                self._credential_dir = directory
-                await self._credential_operation(self._clear_credentials(directory))
-                self._credential_dir = directory
-                await self._exec_checked(
-                    command=_in_credential_directory(directory, f"chmod 700 . && chown {owner} ."),
-                    user="root",
-                    action="set credential directory permissions",
-                )
-                config_path = directory.parent / "config"
-                quoted_config = shlex.quote(str(config_path))
-                await self._exec_checked(
-                    command=_in_credential_directory(
-                        directory.parent,
-                        f"test ! -L {quoted_config} && "
-                        f"if [ -e {quoted_config} ]; then "
-                        f"{_credential_file_permissions(config_path, owner)}; fi",
-                    ),
-                    user="root",
-                    action="set AWS config permissions",
-                )
-                original_config = await self._read_credential_config(config_path)
-                static_config = await self._read_credential_config(directory.parent / "credentials")
-                check_static_profiles(accounts, static_config)
-                config = build_aws_config(accounts, original_config)
-                files, expires_at = await asyncio.to_thread(
-                    mint_credentials, provider, accounts, role_name, label
-                )
-
-                async def publish(
-                    changed: dict[str, str],
-                    expiration: datetime,
-                    valid_until: datetime | None = None,
-                ) -> bool:
-                    if not can_publish():
-                        return False
-                    for name, body in changed.items():
-                        if not await self._publish_credential_file(
-                            directory / name,
-                            body,
-                            owner,
-                            expiration,
-                            can_publish=can_publish,
-                            valid_until=valid_until,
-                        ):
-                            return False
-                    return True
-
-                if config != original_config:
-                    if not await self._credential_operation(
-                        self._publish_credential_file(
-                            config_path, config, owner, can_publish=can_publish
-                        ),
-                        publication=True,
-                    ):
-                        raise asyncio.CancelledError
-                if not await self._credential_operation(
-                    publish(files, expires_at), publication=True
-                ):
-                    raise asyncio.CancelledError
-                await self._exec_checked(
-                    command=" && ".join(
-                        f"test -r {shlex.quote(str(path))}"
-                        for path in (config_path, *(directory / name for name in files))
-                    ),
-                    user=None,
-                    action="check phase credential access",
-                )
-                credential_refresh_delay(expires_at)
-
-                def require_active_credentials() -> None:
-                    if abort_phase is None:
-                        raise asyncio.CancelledError
-                    deadline = abort_phase.when()
-                    if abort_phase.expired() or (
-                        deadline is not None and asyncio.get_running_loop().time() >= deadline
-                    ):
-                        self._credential_failed = True
-                        raise credential_error from None
-
-                async def refresh_once() -> datetime:
-                    nonlocal files, expires_at, credential_error
-                    fresh, expiration = await asyncio.to_thread(
-                        mint_credentials, provider, accounts, role_name, label
-                    )
-                    if fresh.keys() != files.keys():
-                        raise RuntimeError("Credential refresh changed the account profiles")
-                    changed = {name: body for name, body in fresh.items() if files[name] != body}
-                    require_active_credentials()
-                    try:
-                        published = await self._credential_operation(
-                            publish(changed, expiration, valid_until=expires_at), publication=True
-                        )
-                    finally:
-                        if (
-                            self._credential_failed
-                            and abort_phase is not None
-                            and not abort_phase.expired()
-                        ):
-                            credential_error = RuntimeError(
-                                "Credential publication did not settle; ending the trial"
-                            )
-                            abort_phase.reschedule(asyncio.get_running_loop().time())
-                    if not published:
-                        raise asyncio.CancelledError
-                    credential_refresh_delay(expiration)
-                    require_active_credentials()
-                    files = fresh
-                    expires_at = expiration
-                    assert abort_phase is not None
-                    abort_phase.reschedule(credential_deadline(expiration))
-                    return expiration
-
-                def refresh_stopped(done: asyncio.Task[None]) -> None:
-                    nonlocal credential_error
-                    if abort_phase is None:
-                        return
-                    if not self._credential_failed:
-                        credential_error = CredentialError(
-                            "Credential refresh stopped during the phase"
-                        )
-                    self._credential_failed = True
-                    if not abort_phase.expired():
-                        abort_phase.reschedule(asyncio.get_running_loop().time())
-
-                refresher = asyncio.create_task(
-                    refresh_credentials_loop(expires_at, refresh_once, self.logger)
-                )
-                refresher.add_done_callback(refresh_stopped)
-                guard = asyncio.timeout_at(credential_deadline(expires_at))
-                try:
-                    async with guard:
-                        abort_phase = guard
-                        if refresher.done():
-                            refresh_stopped(refresher)
-                            raise credential_error
-                        consumer_started = True
-                        try:
-                            yield cred_env
-                        except BaseException as exc:
-                            primary = exc
-                            raise
-                        finally:
-                            if refresher.done():
-                                refresh_stopped(refresher)
-                            # Final synchronous work can pass the deadline before
-                            # its callback runs. Preserve explicit cancellation.
-                            if not isinstance(
-                                primary, (asyncio.CancelledError, OperationCancelled)
-                            ):
-                                require_active_credentials()
-                except Exception:
-                    if guard.expired():
-                        self._credential_failed = True
-                        raise credential_error from None
-                    raise
-                finally:
-                    abort_phase = None
-                if guard.expired() or self._credential_failed:
-                    self._credential_failed = True
-                    raise credential_error
-            except BaseException as exc:
-                # Harbor cancellation can leave the container command alive.
-                # Never give that command credentials for a later role.
-                # Docker command timeouts arrive wrapped in RuntimeError.
-                cause = exc.__cause__ if exc.__cause__ is not None else exc.__context__
-                if consumer_started and (
-                    isinstance(
-                        exc,
-                        (
-                            asyncio.CancelledError,
-                            OperationCancelled,
-                            AgentTimeoutError,
-                            TimeoutError,
-                        ),
-                    )
-                    or isinstance(cause, TimeoutError)
-                ):
-                    self._credential_failed = True
-                primary = exc
-                raise
-            finally:
-                scope_open = False
-                exit_error: BaseException | None = None
-                current = asyncio.current_task()
-                cancellations = current.cancelling() if current is not None else 0
                 if refresher is not None:
                     refresher.cancel()
-                    try:
-                        await refresher
-                    except asyncio.CancelledError:
-                        if current is not None and current.cancelling() > cancellations:
-                            exit_error = asyncio.CancelledError()
-                    except BaseException as exc:
-                        exit_error = exc
-                operation = self._credential_operation_task
-                if self._credential_dir is not None and (operation is None or operation.done()):
-                    try:
-                        await self._credential_operation(
-                            self._clear_credentials(self._credential_dir)
-                        )
-                    except (asyncio.CancelledError, OperationCancelled) as exc:
-                        exit_error = exit_error or exc
-                        if self._credential_dir is not None:
-                            self.logger.warning("Credential cleanup was interrupted")
-                    except Exception:
-                        self.logger.warning("Credential cleanup failed; teardown will retry it")
-                elif self._credential_dir is not None:
-                    self.logger.warning(
-                        "Credential file operation is still active; container teardown will proceed"
+                    await asyncio.gather(refresher, return_exceptions=True)
+            finally:
+                try:
+                    await self._exec_checked(
+                        command=f'rm -rf -- "{_CREDS_DIR}" "{_AWS_CONFIG_PATH}"',
+                        user=user,
+                        action="remove credential files",
                     )
-                if exit_error is not None and primary is None:
-                    raise exit_error
-                if self._credential_failed and primary is None:
-                    raise RuntimeError("Credential publication did not settle; ending the trial")
+                except Exception as exc:  # noqa: BLE001 — preserve the phase's result
+                    self.logger.warning("Failed to remove credential files: %s", exc)
 
-    async def _exec_checked(
-        self, *, command: str, user: str | int | None, action: str
-    ) -> ExecResult:
-        """Check credential I/O without including possibly sensitive command output."""
-        result = await self.agent_environment.exec(
-            command=command, user=user, timeout_sec=_CREDENTIAL_OPERATION_TIMEOUT_SEC
-        )
+    async def _exec_checked(self, *, command: str, user, action: str):
+        """Exec in the agent environment; raise ``RuntimeError`` on non-zero exit.
+
+        ``environment.exec`` reports failures through the result object only, so
+        call this when a non-zero exit must abort. ``action`` names the step in
+        the error message.
+        """
+        # Cancel the refresher without abandoning an in-flight container write.
+        operation = asyncio.create_task(self.agent_environment.exec(command=command, user=user))
+        try:
+            result = await asyncio.shield(operation)
+        except asyncio.CancelledError:
+            await asyncio.gather(operation, return_exceptions=True)
+            raise
         if result.return_code != 0:
             raise RuntimeError(
-                f"Failed to {action} for {self.config.trial_name} (exit {result.return_code})"
+                f"Failed to {action} for {self.config.trial_name} "
+                f"(exit {result.return_code}): {result.stderr or result.stdout}"
             )
         return result
 
@@ -737,17 +295,12 @@ class AwsBenchSingleStepTrial(SingleStepTrial):
         phase: PhaseScript,
         output_file_name: str | None = None,
     ) -> dict[str, str]:
-        """Resolve the script's environment and run with renewable credentials."""
+        """Stage the phase's per-tag credentials file, resolve env, run the script."""
         self.logger.info("Running %s script", script_type)
-        phase_env = resolve_env_with_creds(
-            raw_env=phase.env,
-            placeholders=self._aws_placeholders,
-            creds=credential_env(next(iter(self.config.account_mapping))),
-        )
-        async with self._staged_credentials(
-            role_type, user=self.agent_environment.default_user, env=phase_env
-        ) as cred_env:
-            override_env = {**phase_env, **cred_env}
+        async with self._staged_credentials(role_type) as cred_env:
+            override_env = resolve_env_with_creds(
+                raw_env=phase.env, placeholders=self._aws_placeholders, creds=cred_env
+            )
             runner = ScriptRunner(
                 script_type=script_type,
                 task_dir=self.task.paths.task_dir,
@@ -815,7 +368,9 @@ class AwsBenchSingleStepTrial(SingleStepTrial):
             else:
                 self.logger.debug("No placeholders produced from pre-invoke script.")
 
-    async def _run_agent_phase(self, *, instruction: str, user: str | int | None, **kwargs) -> None:
+    async def _run_agent_phase(
+        self, *, instruction: str, user: str | int | None = None, **kwargs
+    ) -> None:
         """Substitute placeholders, then run the agent phase under scoped creds."""
         if self._aws_placeholders:
             instruction = substitute_placeholders(instruction, self._aws_placeholders)
@@ -827,29 +382,27 @@ class AwsBenchSingleStepTrial(SingleStepTrial):
                 "injection (no _extra_env); cannot run an aws-bench trial with it."
             )
 
-        extra_env = self.agent._extra_env  # type: ignore[attr-defined]
-        saved = dict(extra_env)
-        # Oracle reparses task.toml into its own config and reapplies solution.env.
-        # Resolve that copy here; real agents must never receive solution settings.
-        oracle_config = (
-            self.agent._task.config
-            if isinstance(self.agent, OracleAgent)
-            and getattr(self.agent, "_task", None) is not None
-            else None
-        )
-        solution_env = oracle_config.solution.env if oracle_config is not None else {}
-        phase_env = {
-            **extra_env,
-            **resolve_env_vars(
+        async with self._staged_credentials(RoleType.AGENT, user=user) as cred_env:
+            extra_env = self.agent._extra_env  # type: ignore[attr-defined]
+            saved = dict(extra_env)
+            # Oracle only: resolve [solution.env] placeholders into its env; real
+            # agents discover resources from the instruction and never see it.
+            # Harbor's OracleAgent re-parses task.toml into its OWN config and, in
+            # run(), re-applies the RAW solution.env via a ${VAR}-only resolver that
+            # mangles our {{...}} tokens. So resolve from and blank THAT object (the
+            # trial's copy wouldn't reach harbor); restore after, config outlives us.
+            oracle_config = (
+                self.agent._task.config
+                if isinstance(self.agent, OracleAgent)
+                and getattr(self.agent, "_task", None) is not None
+                else None
+            )
+            solution_env = oracle_config.solution.env if oracle_config is not None else {}
+            extra_env.update(
                 resolve_env_with_creds(
-                    raw_env=solution_env,
-                    placeholders=self._aws_placeholders,
-                    creds=credential_env(next(iter(self.config.account_mapping))),
+                    raw_env=solution_env, placeholders=self._aws_placeholders, creds=cred_env
                 )
-            ),
-        }
-        async with self._staged_credentials(RoleType.AGENT, user=user, env=phase_env) as cred_env:
-            extra_env.update({**phase_env, **cred_env})
+            )
             if oracle_config is not None:
                 oracle_config.solution.env = {}
             try:
@@ -861,39 +414,28 @@ class AwsBenchSingleStepTrial(SingleStepTrial):
                 extra_env.update(saved)
 
     @contextlib.asynccontextmanager
-    async def _verifier_creds(
-        self, *, user: str | int | None, env: dict[str, str] | None = None
-    ) -> AsyncGenerator[None, None]:
-        """Stage the verifier's credentials and overlay both configuration layers.
+    async def _verifier_creds(self, *, user: str | int | None = None) -> AsyncGenerator[None, None]:
+        """Stage the verifier's creds file and transiently overlay ``verifier.env``.
 
         The env overlay (placeholders + emptied raw-credential vars) is restored
         on exit: the config is persisted and reused across retries, so a permanent
         mutation would leak creds to disk and break resume equality. The creds
-        directory is cleared by the staging context.
+        file is removed by the staging context.
         """
-        original_task_env = self.task.config.verifier.env
-        original_trial_env = self.config.verifier.env
-        merged_env = resolve_env_with_creds(
-            raw_env={**original_task_env, **(env or {}), **original_trial_env},
-            placeholders=self._aws_placeholders,
-            creds=credential_env(next(iter(self.config.account_mapping))),
-        )
-        async with self._staged_credentials(
-            RoleType.VERIFIER, user=user, env=resolve_env_vars(merged_env)
-        ) as cred_env:
-            self.task.config.verifier.env = {**merged_env, **cred_env}
-            self.config.verifier.env = {**merged_env, **cred_env}
+        async with self._staged_credentials(RoleType.VERIFIER, user=user) as cred_env:
+            original_env = self.task.config.verifier.env
+            self.task.config.verifier.env = resolve_env_with_creds(
+                raw_env=original_env, placeholders=self._aws_placeholders, creds=cred_env
+            )
+
             try:
                 yield
             finally:
-                self.task.config.verifier.env = original_task_env
-                self.config.verifier.env = original_trial_env
+                self.task.config.verifier.env = original_env
 
-    async def _run_shared_verifier(
-        self, *, user: str | int | None, env: dict[str, str] | None = None, **kwargs
-    ):
-        async with self._verifier_creds(user=user, env=env):
-            return await super()._run_shared_verifier(user=user, env=env, **kwargs)
+    async def _run_shared_verifier(self, *, user: str | int | None = None, **kwargs):
+        async with self._verifier_creds(user=user):
+            return await super()._run_shared_verifier(user=user, **kwargs)
 
     async def _recover_outputs(self) -> None:
         """Salvage agent outputs without stopping the env.
@@ -919,7 +461,6 @@ class AwsBenchSingleStepTrial(SingleStepTrial):
             run_post_invoke = (
                 self._agent_container_started
                 and not self._aws_post_invoke_done
-                and not self._credential_failed
                 and self.task.has_phase_script(ScriptType.POST_INVOKE)
             )
             if run_post_invoke:
@@ -940,23 +481,7 @@ class AwsBenchSingleStepTrial(SingleStepTrial):
                     self.logger.exception("Post-invoke script failed")
                     self._record_exception(e)
         finally:
-            try:
-                if self._credential_dir is not None:
-                    operation = self._credential_operation_task
-                    if operation is None or operation.done():
-                        profile = next(iter(self.config.account_mapping))
-                        with self._credential_commands(profile, None):
-                            await self._credential_operation(
-                                self._clear_credentials(self._credential_dir)
-                            )
-                    else:
-                        self.logger.warning("Credential file operation remains active at teardown")
-            except (Exception, asyncio.CancelledError, OperationCancelled):
-                self.logger.warning(
-                    "Final credential cleanup failed; continuing container teardown"
-                )
-            finally:
-                await super()._stop_agent_environment()
+            await super()._stop_agent_environment()
 
 
 class AwsBenchTrial:

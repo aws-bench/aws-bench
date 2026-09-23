@@ -8,6 +8,8 @@ from __future__ import annotations
 
 from uuid import UUID
 
+import boto3
+
 from aws_bench.account_management.constants import ORG_ACCESS_ROLE
 from aws_bench.dataset.models import RoleType
 from aws_bench.logging.logger import get_logger
@@ -46,29 +48,27 @@ def resolve_env_with_creds(
     they override any conflicting keys. Used for pre-invoke, post-invoke, and
     verifier env sections.
     """
-    env = {
-        k: substitute_placeholders(v, placeholders) for k, v in raw_env.items() if k not in creds
-    }
+    env = {k: substitute_placeholders(v, placeholders) for k, v in raw_env.items()}
     env.update(creds)
     return env
 
 
-def assume_role_for_script(
+def session_for_script(
     *,
     account_id: str,
     role_name: str | None,
     role_type: RoleType,
     task_name: str,
     job_id: UUID | None,
-) -> dict[str, str]:
-    """Assume an IAM role for a script/verifier, falling back to org access role."""
+) -> boto3.Session:
+    """Return a refreshable script session, falling back to the org access role."""
     if not role_name:
         role_name = ORG_ACCESS_ROLE
         logger.debug(
             f"No custom role for {role_type} in {task_name}, using default org access role"
         )
 
-    return CredentialProvider.get().chain_assume_role(
+    return CredentialProvider.get().get_chained_session_for_account(
         account_id=account_id,
         role_name=role_name,
         session_name=session_name(job_id=job_id),

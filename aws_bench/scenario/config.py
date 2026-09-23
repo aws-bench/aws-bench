@@ -2,12 +2,21 @@
 
 from __future__ import annotations
 
+import re
 import tomllib
 
 from harbor.models.trial.config import ServiceVolumeConfig
 from pydantic import BaseModel, Field, field_validator, model_validator
 
-from aws_bench.utils.credentials_provider import validate_account_tag
+# Account tags become AWS profile names inside the scenario container,
+# get expanded into the deploy/verify/cleanup env as ``<TAG>=<account_id>``,
+# and are interpolated into a heredoc when aws-bench writes ~/.aws/config.
+# Constraining them to a conservative identifier shape closes shell-injection
+# and INI-parser breakage at the parse boundary so downstream layers can
+# trust the values verbatim. Length is capped at 32 chars to match the trial
+# name prefix and keep INI lines readable.
+_ACCOUNT_TAG_MAX_LEN = 32
+_ACCOUNT_TAG_RE = re.compile(rf"^[A-Za-z][A-Za-z0-9_]{{0,{_ACCOUNT_TAG_MAX_LEN - 1}}}$")
 
 
 class Author(BaseModel):
@@ -31,7 +40,12 @@ class ScenarioInfo(BaseModel):
     @classmethod
     def _validate_account_tags(cls, value: list[str]) -> list[str]:
         for tag in value:
-            validate_account_tag(tag)
+            if not _ACCOUNT_TAG_RE.match(tag):
+                raise ValueError(
+                    f"Invalid account_tag {tag!r}: must match "
+                    f"[A-Za-z][A-Za-z0-9_]{{0,{_ACCOUNT_TAG_MAX_LEN - 1}}} "
+                    f"(letter prefix; ≤{_ACCOUNT_TAG_MAX_LEN} chars)"
+                )
         if len(set(value)) != len(value):
             raise ValueError("account_tags must not contain duplicates")
         # Multi-account per scenario is a future extension.

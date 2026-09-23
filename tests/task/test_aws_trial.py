@@ -10,34 +10,24 @@ are faked down to what the overrides touch.
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import json
-import shlex
-from collections.abc import Awaitable, Callable
+import os
 from datetime import datetime, timedelta, timezone
-from pathlib import Path, PurePosixPath
-from types import MethodType, SimpleNamespace
-from typing import Any
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from harbor.agents.installed.base import NonZeroAgentExitCodeError
 from harbor.agents.oracle import OracleAgent
-from harbor.environments.base import BaseEnvironment, ExecResult
-from harbor.trial.errors import AgentTimeoutError
 from harbor.trial.single_step import SingleStepTrial
 from harbor.trial.trial import Trial
 
 from aws_bench.dataset.models import RoleType, ScriptType
 from aws_bench.dataset.task_config import AwsBenchTask
-from aws_bench.exceptions import AccountContaminatedError, OperationCancelled
+from aws_bench.exceptions import AccountContaminatedError
 from aws_bench.task import aws_trial
 from aws_bench.task.aws_trial import AwsBenchSingleStepTrial, AwsBenchTrial
-from aws_bench.utils import credentials_provider
-from aws_bench.utils.credentials_provider import CREDENTIAL_ENV_VARS, CredentialError
 
 TASK_NAME = "org/my-task"
-CREDS_PATH = PurePosixPath("/home/runner/.aws/creds")
 
 
 @pytest.fixture(autouse=True)
@@ -55,27 +45,38 @@ def no_contamination(mocker):
 
 @pytest.fixture
 def fake_creds(mocker):
-    """Mint synthetic process credentials without making AWS calls."""
-    expiry = datetime.now(timezone.utc) + timedelta(hours=1)
-    mocker.patch.object(aws_trial.CredentialProvider, "get", return_value=MagicMock())
-    return mocker.patch.object(
-        aws_trial,
-        "mint_credentials",
-        return_value=(
-            {
-                "PRIMARY.json": json.dumps(
-                    {
-                        "Version": 1,
-                        "AccessKeyId": "AKIA",
-                        "SecretAccessKey": "secret",
-                        "SessionToken": "token",
-                        "Expiration": expiry.isoformat(),
-                    }
-                )
-            },
-            expiry,
-        ),
+    """Use a session with fake keys and an expiry; never call STS."""
+    credentials = MagicMock()
+    credentials.get_frozen_credentials.return_value = SimpleNamespace(
+        access_key="AKIA", secret_key="secret", token="token"
     )
+    credentials._expiry_time = datetime(2099, 1, 1, tzinfo=timezone.utc)
+    session = MagicMock()
+    session.get_credentials.return_value = credentials
+    return mocker.patch.object(aws_trial, "session_for_script", return_value=session)
+
+
+@pytest.fixture
+def shell_environment(tmp_path):
+    """Execute the credential commands in an isolated local home."""
+    if os.name != "posix":
+        pytest.skip("Credential shell commands require POSIX")
+
+    async def execute(*, command, **kwargs):
+        process = await asyncio.create_subprocess_exec(
+            "sh",
+            "-c",
+            command,
+            env={"PATH": os.environ["PATH"], "HOME": str(tmp_path)},
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await process.communicate()
+        return SimpleNamespace(
+            return_code=process.returncode, stdout=stdout.decode(), stderr=stderr.decode()
+        )
+
+    return SimpleNamespace(exec=AsyncMock(side_effect=execute))
 
 
 def _scenario_ref(**roles):
@@ -98,77 +99,6 @@ def _exec_calls(trial):
     return trial.agent_environment.exec.call_args_list
 
 
-def _environment():
-    """Record Harbor operations and uploaded files, without a Docker dependency."""
-    environment = MagicMock()
-    environment.default_user = None
-    environment.files = {}
-    environment.uploads = []
-    environment.publications = []
-    environment.cleared_dirs = []
-    environment.private_uploads = 0
-    environment.mountinfo = "1 0 0:1 / / rw - overlay overlay rw\n"
-
-    async def execute(*, command, env=None, user=None, **kwargs):
-        stdout = ""
-        if "pwd -P && id -u && id -g" in command:
-            home = (env or {}).get("HOME", "/home/runner")
-            effective_user = user if user is not None else environment.default_user
-            uid = {"root": "0", "verifier": "1001"}.get(effective_user, "1000")
-            stdout = f"{home}\n{uid}\n{uid}\n"
-        elif "cat /proc/self/mountinfo" in command:
-            stdout = environment.mountinfo
-        elif "mktemp -d " in command:
-            environment.private_uploads += 1
-            stdout = str(
-                aws_trial._CREDENTIAL_UPLOAD_ROOT / f".aws-creds.{environment.private_uploads:08d}"
-            )
-        elif "cat " in command and "; fi" in command:
-            path = shlex.split(command.rsplit("cat ", 1)[1].split("; fi")[0])[0]
-            stdout = environment.files.get(path, "")
-        elif "mv -fT -- " in command:
-            source, destination = shlex.split(command.rsplit("mv -fT -- ", 1)[1])
-            tokens = shlex.split(command)
-            directories = [
-                tokens[index + 3]
-                for index in range(len(tokens) - 3)
-                if tokens[index : index + 3] == ["cd", "-P", "--"]
-            ]
-            source = str(PurePosixPath(directories[0]) / PurePosixPath(source).name)
-            destination = str(PurePosixPath(directories[-1]) / destination)
-            environment.files[destination] = environment.files.pop(source)
-            environment.publications.append((destination, environment.files[destination]))
-        elif "rm -rf -- " in command:
-            directory = PurePosixPath(shlex.split(command.rsplit("rm -rf -- ", 1)[1])[0])
-            environment.files = {
-                path: body
-                for path, body in environment.files.items()
-                if not PurePosixPath(path).is_relative_to(directory)
-            }
-        return ExecResult(return_code=0, stdout=stdout, stderr="")
-
-    async def upload(source_path, target_path):
-        source = Path(source_path)
-        body = source.read_text()
-        environment.uploads.append((target_path, body, source.stat().st_mode & 0o777))
-        environment.files[target_path] = body
-
-    async def empty(directories, *, chmod=True):
-        parent = aws_trial._CREDENTIAL_CWD.get()
-        directories = [parent / path if parent is not None else path for path in directories]
-        environment.cleared_dirs.extend(directories)
-        for path in list(environment.files):
-            if any(PurePosixPath(path).is_relative_to(directory) for directory in directories):
-                del environment.files[path]
-        return ExecResult(return_code=0, stdout="", stderr="")
-
-    environment.with_default_user = MethodType(BaseEnvironment.with_default_user, environment)
-    environment.exec = AsyncMock(side_effect=execute)
-    environment.upload_file = AsyncMock(side_effect=upload)
-    environment.empty_dirs = AsyncMock(side_effect=empty)
-    return environment
-
-
 def _make_trial(
     tmp_path,
     *,
@@ -177,7 +107,7 @@ def _make_trial(
     post_invoke=None,
     has_pre_script=False,
     has_post_script=False,
-) -> Any:
+):
     """Build an AwsBenchTrial with only the attributes the overrides touch.
 
     Bypasses __init__ (no Docker/agent factory) — sets the fields the AWS
@@ -189,11 +119,12 @@ def _make_trial(
     """
     trial = AwsBenchSingleStepTrial.__new__(AwsBenchSingleStepTrial)
 
+    verifier = SimpleNamespace(env={"REGION": "us-east-1"})
     task_config = SimpleNamespace(
         scenario=_scenario_ref(agent="AgentRole", verifier="VerifierRole"),
         pre_invoke=pre_invoke,
         post_invoke=post_invoke,
-        verifier=SimpleNamespace(env={"REGION": "us-east-1"}, user=None),
+        verifier=verifier,
         agent=SimpleNamespace(user=None),
     )
     task = SimpleNamespace(
@@ -210,7 +141,7 @@ def _make_trial(
         account_mapping={"PRIMARY": "123456789012"},
         regions=["us-east-1"],
         exports=exports or {},
-        verifier=SimpleNamespace(env={"REGION": "us-east-1"}),
+        verifier=verifier,
         job_id=None,
         trial_name="trial-0",
         verify_env=True,
@@ -219,15 +150,17 @@ def _make_trial(
     # The real agents (oracle / installed) carry _extra_env; the cred-injection
     # override refuses an agent without it, so the double must expose one.
     trial.agent = SimpleNamespace(_extra_env={})  # type: ignore[assignment]
-    trial.agent_environment = _environment()
+    # The staged-credentials helper execs (write + remove the creds file) on the
+    # agent environment, so exec must be awaitable.
+    trial.agent_environment = MagicMock()
+    trial.agent_environment.exec = AsyncMock(
+        return_value=MagicMock(return_code=0, stdout="", stderr="")
+    )
     trial.paths = SimpleNamespace(trial_dir=tmp_path / "trial")  # type: ignore[assignment]
     trial.logger = MagicMock()
     # __init__ is bypassed here; set the per-trial state it would establish.
     trial._aws_placeholders = {tag: dict(v) for tag, v in (exports or {}).items()}
     trial._aws_post_invoke_done = False
-    trial._credential_dir = None
-    trial._credential_operation_task = None
-    trial._credential_failed = False
     # __init__ builds one AccountManager and reuses it for the _prepare gate.
     # Bypassed here, so establish it too — resolves to the autouse no_contamination
     # mock (clean by default); the gate tests inject their own onto the instance.
@@ -369,18 +302,30 @@ async def test_run_agent_phase_no_solution_env_for_non_oracle(tmp_path, fake_cre
 
 
 @pytest.mark.asyncio
-async def test_run_agent_phase_writes_creds_file_and_empties_raw_creds(
-    tmp_path, fake_creds, mocker
+async def test_run_agent_phase_writes_process_credentials_and_empties_raw_creds(
+    tmp_path, fake_creds, mocker, shell_environment
 ):
-    """Agent gets a creds file in-container; raw cred vars are emptied during the run."""
+    """The agent sees private process credentials and no raw credential env."""
     trial = _make_trial(tmp_path)
+    trial.agent_environment = shell_environment
     trial._aws_placeholders = {}
 
     seen: dict[str, str] = {}
 
     async def fake_super_phase(self, *, instruction, **kw):
-        # The injected env is live only during the agent run; capture it here.
         seen.update(self.agent._extra_env)
+        directory = tmp_path / ".aws/creds"
+        payload = json.loads((directory / "PRIMARY.json").read_text())
+        assert payload == {
+            "Version": 1,
+            "AccessKeyId": "AKIA",
+            "SecretAccessKey": "secret",
+            "SessionToken": "token",
+            "Expiration": "2099-01-01T00:00:00+00:00",
+        }
+        assert directory.stat().st_mode & 0o777 == 0o700
+        assert (directory / "PRIMARY.json").stat().st_mode & 0o777 == 0o600
+        assert (tmp_path / ".aws/config").stat().st_mode & 0o777 == 0o600
 
     mocker.patch.object(Trial, "_run_agent_phase", fake_super_phase)
     await trial._run_agent_phase(target=MagicMock(), instruction="x", timeout_sec=None, user=None)
@@ -388,14 +333,6 @@ async def test_run_agent_phase_writes_creds_file_and_empties_raw_creds(
     # Raw creds are emptied so a host-forwarded set cannot outrank the file.
     assert seen["AWS_ACCESS_KEY_ID"] == ""
     assert seen["AWS_SESSION_TOKEN"] == ""
-    # Secret contents travel through upload_file, never through shell arguments.
-    write_cmds = [c.kwargs.get("command", "") for c in _exec_calls(trial)]
-    assert all("AKIA" not in cmd and "secret" not in cmd for cmd in write_cmds)
-    uploads = trial.agent_environment.uploads
-    assert any(
-        "PRIMARY.json" in path and '"AccessKeyId": "AKIA"' in body for path, body, _ in uploads
-    )
-    assert all(mode == 0o600 for _, _, mode in uploads)
 
 
 @pytest.mark.asyncio
@@ -450,9 +387,12 @@ async def test_run_agent_phase_restores_extra_env_after_run(tmp_path, fake_creds
 
 
 @pytest.mark.asyncio
-async def test_run_agent_phase_clears_creds_directory_after_run(tmp_path, fake_creds, mocker):
-    """Both cleanup points clear the whole directory without Harbor's chmod."""
+async def test_run_agent_phase_removes_credential_files_after_run(
+    tmp_path, fake_creds, mocker, shell_environment
+):
+    """The phase removes its credential directory and config."""
     trial = _make_trial(tmp_path)
+    trial.agent_environment = shell_environment
     trial._aws_placeholders = {}
 
     async def fake_super_phase(self, *, instruction, **kw):
@@ -460,13 +400,8 @@ async def test_run_agent_phase_clears_creds_directory_after_run(tmp_path, fake_c
 
     mocker.patch.object(Trial, "_run_agent_phase", fake_super_phase)
     await trial._run_agent_phase(target=MagicMock(), instruction="x", timeout_sec=None, user=None)
-    assert trial.agent_environment.cleared_dirs == [CREDS_PATH, CREDS_PATH]
-    assert all(
-        invocation.kwargs == {"chmod": False}
-        for invocation in trial.agent_environment.empty_dirs.await_args_list
-    )
-    assert trial._credential_dir is None
-    assert not any("/creds/" in path for path in trial.agent_environment.files)
+    assert not (tmp_path / ".aws/creds").exists()
+    assert not (tmp_path / ".aws/config").exists()
 
 
 @pytest.mark.asyncio
@@ -485,15 +420,15 @@ async def test_staged_credentials_raises_on_empty_account_mapping(tmp_path, fake
 
 @pytest.mark.asyncio
 async def test_staged_credentials_raises_when_write_fails(tmp_path, fake_creds):
-    """An upload error stops the phase and does not expose transport output."""
+    """A non-zero write exit fails the stage instead of running without creds."""
     trial = _make_trial(tmp_path)
-    trial.agent_environment.upload_file.side_effect = RuntimeError("disk full: secret")
+    trial.agent_environment.exec = AsyncMock(
+        return_value=MagicMock(return_code=1, stdout="", stderr="disk full")
+    )
 
-    with pytest.raises(RuntimeError, match="publish credential file") as error:
+    with pytest.raises(RuntimeError, match="write credential files"):
         async with trial._staged_credentials(RoleType.AGENT):
-            pytest.fail("Consumer must not run after a failed upload")
-    assert "secret" not in str(error.value)
-    assert trial._credential_dir is None
+            pass
 
 
 @pytest.mark.asyncio
@@ -501,10 +436,16 @@ async def test_staged_credentials_cleanup_failure_does_not_mask_body_error(tmp_p
     """A failed cleanup is logged, never replacing the body's exception."""
     trial = _make_trial(tmp_path)
 
-    trial.agent_environment.empty_dirs.side_effect = [
-        ExecResult(return_code=0),
-        ExecResult(return_code=1, stderr="container gone"),
-    ]
+    call_count = {"n": 0}
+
+    async def exec_write_ok_then_rm_fails(*, command, user=None, **kw):
+        call_count["n"] += 1
+        # First call (write) succeeds; the cleanup rm raises.
+        if command.startswith("rm -rf"):
+            raise RuntimeError("container gone")
+        return MagicMock(return_code=0, stdout="", stderr="")
+
+    trial.agent_environment.exec = AsyncMock(side_effect=exec_write_ok_then_rm_fails)
 
     with pytest.raises(ValueError, match="body blew up"):
         async with trial._staged_credentials(RoleType.AGENT):
@@ -515,1237 +456,117 @@ async def test_staged_credentials_cleanup_failure_does_not_mask_body_error(tmp_p
 
 
 @pytest.mark.asyncio
-async def test_staging_preserves_unrelated_config_and_clears_all_credential_files(
-    tmp_path, fake_creds
+async def test_config_write_failure_removes_partial_credentials(
+    tmp_path, fake_creds, shell_environment
 ):
     trial = _make_trial(tmp_path)
-    environment = trial.agent_environment
-    original_config = "[profile unrelated]\nregion = eu-west-2\n"
-    original_static = "[unrelated]\naws_access_key_id = unrelated-key\n"
-    environment.files.update(
-        {
-            "/home/runner/.aws/config": original_config,
-            "/home/runner/.aws/credentials": original_static,
-            str(CREDS_PATH / "OLD.json"): "old",
-            str(CREDS_PATH / ".interrupted-upload"): "old",
-            str(CREDS_PATH / "nested/old.json"): "old",
-        }
-    )
+    trial.agent_environment = shell_environment
+    (tmp_path / ".aws/config").mkdir(parents=True)
+    with pytest.raises(RuntimeError, match="write AWS config") as error:
+        async with trial._staged_credentials(RoleType.AGENT):
+            pytest.fail("A failed config write must prevent phase entry")
+    assert ".aws/config" in str(error.value)
+    assert not (tmp_path / ".aws/creds").exists()
 
+
+@pytest.mark.asyncio
+async def test_refresh_updates_a_long_lived_sdk_session(
+    tmp_path, fake_creds, shell_environment, mocker, monkeypatch
+):
+    from botocore.session import Session
+
+    trial = _make_trial(tmp_path)
+    trial.agent_environment = shell_environment
+    credentials = fake_creds.return_value.get_credentials.return_value
+    # Inside the SDK's advisory window, the same client re-reads the process output.
+    credentials._expiry_time = datetime.now(timezone.utc) + timedelta(minutes=10)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    refresh = asyncio.Event()
+    refreshed = asyncio.Event()
+
+    async def loop(mint, expires_at, log):
+        await refresh.wait()
+        await mint()
+        refreshed.set()
+        await asyncio.Event().wait()
+
+    mocker.patch.object(aws_trial, "run_credential_refresh_loop", loop)
     async with trial._staged_credentials(RoleType.AGENT):
-        config = environment.files["/home/runner/.aws/config"]
-        assert config.startswith(original_config)
-        assert "[profile PRIMARY]\ncredential_process = sh -c" in config
-        assert environment.files["/home/runner/.aws/credentials"] == original_static
-        assert {
-            path for path in environment.files if PurePosixPath(path).is_relative_to(CREDS_PATH)
-        } == {str(CREDS_PATH / "PRIMARY.json")}
-        environment.files[str(CREDS_PATH / ".consumer-created")] = "discard"
-
-    assert environment.files == {
-        "/home/runner/.aws/config": config,
-        "/home/runner/.aws/credentials": original_static,
-    }
-    assert not trial.logger.warning.called  # type: ignore[attr-defined]
+        session = Session(profile="PRIMARY")
+        session.set_config_variable("config_file", str(tmp_path / ".aws/config"))
+        session.set_config_variable("credentials_file", str(tmp_path / ".aws/credentials"))
+        sdk_credentials = session.get_credentials()
+        assert sdk_credentials is not None
+        assert sdk_credentials.get_frozen_credentials().access_key == "AKIA"
+        credentials.get_frozen_credentials.return_value.access_key = "REFRESHED"
+        refresh.set()
+        await asyncio.wait_for(refreshed.wait(), timeout=2)
+        assert sdk_credentials.get_frozen_credentials().access_key == "REFRESHED"
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("filename", "contents"),
-    [
-        ("credentials", "[PRIMARY]\naws_access_key_id = other-key\n"),
-        ("config", "[profile PRIMARY]\nrole_arn = arn:aws:iam::111122223333:role/Other\n"),
-        ("config", "[profile PRIMARY]\ncredential_process = echo wrong\n"),
-        ("config", "[profile PRIMARY\ninvalid = secret\n"),
-    ],
-)
-async def test_staging_rejects_conflicting_config_before_mint(
-    tmp_path, fake_creds, filename, contents
+async def test_phase_exit_waits_for_upload_before_cleanup(
+    tmp_path, fake_creds, shell_environment, mocker
 ):
+    """A transport write that survives cancellation must finish before cleanup."""
     trial = _make_trial(tmp_path)
-    path = f"/home/runner/.aws/{filename}"
-    trial.agent_environment.files[path] = contents
-
-    with pytest.raises(CredentialError):
-        async with trial._staged_credentials(RoleType.AGENT):
-            pytest.fail("Conflicting configuration must stop the consumer")
-
-    fake_creds.assert_not_called()
-    assert trial.agent_environment.files[path] == contents
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "mountpoint",
-    [
-        "/home",
-        "/home/runner/.aws",
-        "/home/runner/.aws/creds",
-        "/home/runner/.aws/creds/nested",
-        "/home/runner/.aws/config",
-    ],
-)
-async def test_staging_refuses_mounts_that_overlap_credential_writes(
-    tmp_path, fake_creds, mountpoint
-):
-    trial = _make_trial(tmp_path)
-    trial.agent_environment.mountinfo += f"2 1 0:2 / {mountpoint} rw - tmpfs tmpfs rw\n"
-
-    with pytest.raises(RuntimeError, match="mount overlaps"):
-        async with trial._staged_credentials(RoleType.AGENT):
-            pytest.fail("A mount conflict must stop the consumer")
-
-    trial.agent_environment.empty_dirs.assert_not_awaited()
-    trial.agent_environment.upload_file.assert_not_awaited()
-    fake_creds.assert_not_called()
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("probe", ["", "/home/runner\n", "relative\n1\n1\n", "/x\nuid\n1\n"])
-async def test_staging_rejects_unresolved_home_before_cleanup(tmp_path, fake_creds, probe):
-    trial = _make_trial(tmp_path)
-    trial.agent_environment.exec.side_effect = None
-    trial.agent_environment.exec.return_value = ExecResult(return_code=0, stdout=probe)
-
-    with pytest.raises(RuntimeError, match="home and file ownership"):
-        async with trial._staged_credentials(RoleType.AGENT):
-            pytest.fail("An invalid home must stop the consumer")
-
-    trial.agent_environment.empty_dirs.assert_not_awaited()
-    fake_creds.assert_not_called()
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("result", [None, ExecResult(return_code=1)])
-async def test_failed_entry_cleanup_prevents_mint_and_consumer(tmp_path, fake_creds, result):
-    trial = _make_trial(tmp_path)
-    trial.agent_environment.empty_dirs.return_value = result
-    trial.agent_environment.empty_dirs.side_effect = None
-
-    with pytest.raises(RuntimeError, match="clear the credential directory"):
-        async with trial._staged_credentials(RoleType.AGENT):
-            pytest.fail("Failed cleanup must stop the consumer")
-
-    fake_creds.assert_not_called()
-    trial.agent_environment.upload_file.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_exit_cleanup_retries_before_a_phase_with_a_different_home(tmp_path, fake_creds):
-    trial = _make_trial(tmp_path)
-    environment = trial.agent_environment
-    empty = environment.empty_dirs.side_effect
-    count = 0
-
-    async def fail_first_exit(directories, *, chmod):
-        nonlocal count
-        count += 1
-        if count == 2:
-            return ExecResult(return_code=1)
-        return await empty(directories, chmod=chmod)
-
-    environment.empty_dirs.side_effect = fail_first_exit
-    async with trial._staged_credentials(RoleType.AGENT):
-        pass
-    assert trial._credential_dir == CREDS_PATH
-
-    verifier_path = PurePosixPath("/home/verifier/.aws/creds")
-    async with trial._staged_credentials(
-        RoleType.VERIFIER, user="verifier", env={"HOME": "/home/verifier"}
-    ):
-        assert str(CREDS_PATH / "PRIMARY.json") not in environment.files
-        assert str(verifier_path / "PRIMARY.json") in environment.files
-        assert environment.default_user == "verifier"
-
-    assert environment.cleared_dirs == [CREDS_PATH, CREDS_PATH, verifier_path, verifier_path]
-    assert environment.empty_dirs.await_count == 5
-    assert environment.default_user is None
-    assert trial._credential_dir is None
-    commands = [c.kwargs["command"] for c in _exec_calls(trial)]
-    assert any(
-        "cd -P -- /home/verifier/.aws/creds" in command and "chmod 700 ." in command
-        for command in commands
+    trial.agent_environment = shell_environment
+    execute = shell_environment.exec.side_effect
+    begin_refresh, upload_started, release_upload = (
+        asyncio.Event(),
+        asyncio.Event(),
+        asyncio.Event(),
     )
-    assert any("chmod 600 " in command and "chown 1001:1001 " in command for command in commands)
+    phase_entered, end_phase = asyncio.Event(), asyncio.Event()
+    remote_writes = []
 
+    async def delayed_write(command):
+        upload_started.set()
+        await release_upload.wait()
+        return await execute(command=command)
 
-@pytest.mark.asyncio
-async def test_config_owner_follows_users_who_share_a_home(tmp_path, fake_creds):
-    import re
+    async def transport(*, command, **kwargs):
+        if begin_refresh.is_set() and not remote_writes:
+            remote_writes.append(asyncio.create_task(delayed_write(command)))
+            return await asyncio.shield(remote_writes[0])
+        return await execute(command=command)
 
-    trial = _make_trial(tmp_path)
-    environment = trial.agent_environment
-    execute = environment.exec.side_effect
-    config_owner = None
-
-    async def permission_checked_exec(*, command, user=None, **kwargs):
-        nonlocal config_owner
-        if "chown " in command and "/config" in command:
-            match = re.search(r"chown ([0-9]+):[0-9]+ ", command)
-            assert match is not None and user == "root"
-            config_owner = int(match[1])
-        if "cat /home/runner/.aws/config; fi" in command and config_owner is not None:
-            effective_user = user if user is not None else environment.default_user
-            uid = {"root": 0, "runner": 1000, "verifier": 1001}[effective_user]
-            if uid != config_owner:
-                return ExecResult(return_code=1, stderr="Permission denied")
-        return await execute(command=command, user=user, **kwargs)
-
-    environment.exec.side_effect = permission_checked_exec
-    for role, user, uid in (
-        (RoleType.PRE_INVOKE, "root", 0),
-        (RoleType.AGENT, "runner", 1000),
-        (RoleType.VERIFIER, "verifier", 1001),
-    ):
-        async with trial._staged_credentials(role, user=user):
-            assert config_owner == uid
-            assert str(CREDS_PATH / "PRIMARY.json") in environment.files
-
-    configs = [path for path, _, _ in environment.uploads if "/.config." in path]
-    assert len(configs) == 1
-    assert environment.default_user is None
-
-
-@pytest.mark.asyncio
-@pytest.mark.skipif(not Path("/proc/self/fd").is_dir(), reason="Linux container file descriptors")
-@pytest.mark.parametrize("refresh", [False, True])
-async def test_delayed_remote_rename_preserves_old_credentials(
-    tmp_path, fake_creds, monkeypatch, refresh
-):
-    import os
-    import shutil
-    import subprocess
-
-    trial = _make_trial(tmp_path)
-    monkeypatch.setattr(aws_trial, "_CREDENTIAL_UPLOAD_ROOT", PurePosixPath(tmp_path))
-    directory = tmp_path / "creds"
-    directory.mkdir(mode=0o700)
-    destination = directory / "PRIMARY.json"
-    destination.write_text("OLD_KEY")
-    trial._credential_dir = PurePosixPath(directory)
-    expiration = datetime.now(timezone.utc) + timedelta(seconds=31)
-    payload_expiration = expiration + timedelta(hours=1) if refresh else expiration
-    valid_until = expiration if refresh else None
-    remote_now = int(expiration.timestamp()) - 60
-
-    async def upload(source, target):
-        shutil.copyfile(source, target)
-
-    async def execute(*, command, **kwargs):
-        # Control the clock at the final rename to model transport delay.
-        result = subprocess.run(
-            ["sh", "-c", f"date() {{ printf '%s\\n' {remote_now}; }}\n{command}"],
-            text=True,
-            capture_output=True,
-            check=False,
-        )
-        return ExecResult(return_code=result.returncode, stdout=result.stdout, stderr=result.stderr)
-
-    trial.agent_environment.upload_file.side_effect = upload
-    trial.agent_environment.exec.side_effect = execute
-    owner = f"{os.getuid()}:{os.getgid()}"
-    await trial._publish_credential_file(
-        PurePosixPath(destination),
-        "VALID_KEY",
-        owner,
-        payload_expiration,
-        valid_until=valid_until,
-    )
-    assert destination.read_text() == "VALID_KEY"
-
-    remote_now = int(expiration.timestamp()) + (1 if refresh else -29)
-    with pytest.raises(RuntimeError, match="publish credential file"):
-        await trial._publish_credential_file(
-            PurePosixPath(destination),
-            "NEAR_EXPIRY_KEY",
-            owner,
-            payload_expiration,
-            valid_until=valid_until,
-        )
-    assert destination.read_text() == "VALID_KEY"
-
-
-def _local_credential_environment(home, monkeypatch):
-    """Execute credential shell operations on temporary files through Harbor's cleanup."""
-    import os
-    import shutil
-    import subprocess
-
-    from harbor.models.task.config import TaskOS
-
-    if not Path("/proc/self/fd").is_dir():
-        pytest.skip("Linux container file descriptors")
-    upload_root = home / "private-uploads"
-    upload_root.mkdir(mode=0o700, exist_ok=True)
-    monkeypatch.setattr(aws_trial, "_CREDENTIAL_UPLOAD_ROOT", PurePosixPath(upload_root))
-    environment = _environment()
-    environment.os = TaskOS.LINUX
-    environment._empty_dirs_command = MethodType(BaseEnvironment._empty_dirs_command, environment)
-    environment._reset_dirs_user = lambda: "root"
-
-    async def execute(command, *, env=None, **kwargs):
-        if "cat /proc/self/mountinfo" in command:
-            return ExecResult(return_code=0, stdout="1 0 0:1 / / rw - overlay overlay rw\n")
-        result = subprocess.run(
-            ["sh", "-c", command],
-            env={**os.environ, **(env or {}), "HOME": str(home)},
-            capture_output=True,
-            text=True,
-            timeout=3,
-            check=False,
-        )
-        return ExecResult(return_code=result.returncode, stdout=result.stdout, stderr=result.stderr)
-
-    async def upload(source, destination):
-        shutil.copyfile(source, destination)
-
-    async def empty(directories, *, chmod):
-        return await BaseEnvironment.empty_dirs(environment, directories, chmod=chmod)
-
-    environment.exec.side_effect = execute
-    environment.upload_file.side_effect = upload
-    environment.empty_dirs.side_effect = empty
-    return environment
-
-
-@pytest.mark.asyncio
-async def test_native_credential_staging_preserves_other_files(tmp_path, fake_creds, monkeypatch):
-    home = tmp_path / "home with spaces"
-    home.mkdir()
-    unrelated = home / "keep"
-    unrelated.write_text("unrelated")
-    trial = _make_trial(tmp_path)
-    trial.agent_environment = _local_credential_environment(home, monkeypatch)
-    directory = home / ".aws" / "creds"
-
-    async with trial._staged_credentials(RoleType.AGENT):
-        assert json.loads((directory / "PRIMARY.json").read_text())["AccessKeyId"] == "AKIA"
-        assert directory.stat().st_mode & 0o777 == 0o700
-        assert (directory / "PRIMARY.json").stat().st_mode & 0o777 == 0o600
-        assert (directory.parent / "config").stat().st_mode & 0o777 == 0o600
-    assert list(directory.iterdir()) == []
-    assert list((home / "private-uploads").iterdir()) == []
-    assert unrelated.read_text() == "unrelated"
-
-
-@pytest.mark.asyncio
-async def test_writable_upload_root_is_rejected_before_transfer(tmp_path, fake_creds, monkeypatch):
-    import os
-
-    directory = tmp_path / "creds"
-    directory.mkdir()
-    trial = _make_trial(tmp_path)
-    environment = trial.agent_environment = _local_credential_environment(tmp_path, monkeypatch)
-    trial._credential_dir = PurePosixPath(directory)
-    (tmp_path / "private-uploads").chmod(0o777)
-    with pytest.raises(RuntimeError, match="publish credential file"):
-        await trial._publish_credential_file(
-            PurePosixPath(directory / "PRIMARY.json"), "SYNTHETIC", f"{os.getuid()}:{os.getgid()}"
-        )
-    assert list(directory.iterdir()) == []
-    assert list((tmp_path / "private-uploads").iterdir()) == []
-    environment.upload_file.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_directory_swap_cannot_redirect_permission_changes(tmp_path, fake_creds, monkeypatch):
-    """Changing the path after validation must not change another directory's mode."""
-    home = tmp_path / "home"
-    home.mkdir()
-    directory = home / ".aws" / "creds"
-    displaced = tmp_path / "original-creds"
-    other = tmp_path / "other-directory"
-    other.mkdir(mode=0o750)
-    trial = _make_trial(tmp_path)
-    environment = trial.agent_environment = _local_credential_environment(home, monkeypatch)
-    execute = environment.exec.side_effect
-    swapped = False
-
-    async def swap_before_chmod(command, **kwargs):
-        nonlocal swapped
-        if not swapped and "chmod 700" in command:
-            swapped = True
-            command = (
-                "chmod() { "
-                f"command mv -- {shlex.quote(str(directory))} {shlex.quote(str(displaced))}; "
-                f"command ln -s -- {shlex.quote(str(other))} {shlex.quote(str(directory))}; "
-                'command chmod "$@"; }\n' + command
-            )
-        return await execute(command, **kwargs)
-
-    environment.exec.side_effect = swap_before_chmod
-    with contextlib.suppress(RuntimeError):
-        async with trial._staged_credentials(RoleType.AGENT):
-            pass
-    assert swapped
-    assert other.stat().st_mode & 0o777 == 0o750
-
-
-@pytest.mark.asyncio
-async def test_publication_swap_cannot_redirect_permission_changes(
-    tmp_path, fake_creds, monkeypatch
-):
-    """The uploaded file's open descriptor must survive replacement of its path."""
-    import os
-
-    directory = tmp_path / "creds"
-    directory.mkdir()
-    displaced = tmp_path / "original-upload"
-    other = tmp_path / "other-file"
-    other.write_text("unrelated")
-    other.chmod(0o640)
-    trial = _make_trial(tmp_path)
-    environment = trial.agent_environment = _local_credential_environment(tmp_path, monkeypatch)
-    trial._credential_dir = PurePosixPath(directory)
-    execute = environment.exec.side_effect
-    upload = environment.upload_file.side_effect
-    uploaded: Path | None = None
-
-    async def remember_upload(source, destination):
-        nonlocal uploaded
-        uploaded = Path(destination)
-        await upload(source, destination)
-
-    async def swap_before_chmod(command, **kwargs):
-        if uploaded is not None and "chmod 600" in command:
-            command = (
-                "chmod() { "
-                f"command mv -- {shlex.quote(str(uploaded))} {shlex.quote(str(displaced))}; "
-                f"command ln -s -- {shlex.quote(str(other))} {shlex.quote(str(uploaded))}; "
-                'command chmod "$@"; }\n' + command
-            )
-        return await execute(command, **kwargs)
-
-    environment.upload_file.side_effect = remember_upload
-    environment.exec.side_effect = swap_before_chmod
-    with contextlib.suppress(RuntimeError):
-        await trial._publish_credential_file(
-            PurePosixPath(directory / "PRIMARY.json"), "SYNTHETIC", f"{os.getuid()}:{os.getgid()}"
-        )
-    assert uploaded is not None
-    assert other.read_text() == "unrelated"
-    assert other.stat().st_mode & 0o777 == 0o640
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("kind", ["symlink", "hardlink", "fifo"])
-async def test_publication_refuses_nonprivate_uploaded_file(
-    tmp_path, fake_creds, monkeypatch, kind
-):
-    import os
-
-    directory = tmp_path / "creds"
-    directory.mkdir()
-    other = tmp_path / "other-file"
-    other.write_text("unrelated")
-    other.chmod(0o640)
-    trial = _make_trial(tmp_path)
-    environment = trial.agent_environment = _local_credential_environment(tmp_path, monkeypatch)
-    trial._credential_dir = PurePosixPath(directory)
-
-    async def substitute_upload(source, destination):
-        path = Path(destination)
-        if kind == "symlink":
-            path.symlink_to(other)
-        elif kind == "hardlink":
-            path.hardlink_to(other)
-        else:
-            os.mkfifo(path)
-
-    environment.upload_file.side_effect = substitute_upload
-    destination = directory / "PRIMARY.json"
-    with pytest.raises(RuntimeError, match="publish credential file"):
-        await trial._publish_credential_file(
-            PurePosixPath(destination), "SYNTHETIC", f"{os.getuid()}:{os.getgid()}"
-        )
-    assert not destination.exists()
-    assert other.read_text() == "unrelated"
-    assert other.stat().st_mode & 0o777 == 0o640
-
-
-@pytest.mark.asyncio
-async def test_cleanup_parent_swap_preserves_unrelated_files(tmp_path, fake_creds, monkeypatch):
-    """Harbor cleanup must use the checked parent, not follow a replaced ancestor."""
-    home = tmp_path / "home"
-    aws_dir = home / ".aws"
-    aws_dir.mkdir(parents=True)
-    displaced = tmp_path / "original-aws"
-    other = tmp_path / "other-directory"
-    (other / "creds").mkdir(parents=True)
-    sentinel = other / "creds" / "sentinel"
-    sentinel.write_text("unrelated")
-    trial = _make_trial(tmp_path)
-    environment = trial.agent_environment = _local_credential_environment(home, monkeypatch)
-    empty = environment.empty_dirs.side_effect
-    swapped = False
-
-    async def swap_before_empty(directories, *, chmod):
-        nonlocal swapped
-        if not swapped:
-            swapped = True
-            aws_dir.rename(displaced)
-            aws_dir.symlink_to(other, target_is_directory=True)
-        return await empty(directories, chmod=chmod)
-
-    environment.empty_dirs.side_effect = swap_before_empty
-    with contextlib.suppress(RuntimeError):
-        async with trial._staged_credentials(RoleType.AGENT):
-            pass
-    assert swapped
-    assert sentinel.read_text() == "unrelated"
-
-
-@pytest.mark.asyncio
-async def test_cleanup_child_swap_preserves_unrelated_files(tmp_path, fake_creds, monkeypatch):
-    """Deletion must resolve ./children from the opened credential directory."""
-    import os
-    import shutil
-
-    home = tmp_path / "home"
-    directory = home / ".aws" / "creds"
-    directory.mkdir(parents=True)
-    (directory / "sentinel").write_text("credential")
-    displaced = tmp_path / "original-creds"
-    other = tmp_path / "other-directory"
-    other.mkdir()
-    sentinel = other / "sentinel"
-    sentinel.write_text("unrelated")
-    binaries = tmp_path / "bin"
-    binaries.mkdir()
-    real_rm = shutil.which("rm")
-    assert real_rm is not None
-    shim = binaries / "rm"
-    shim.write_text(
-        "#!/bin/sh\n"
-        'case "$3" in\n'
-        "  *sentinel)\n"
-        f"    mv -- {shlex.quote(str(directory))} {shlex.quote(str(displaced))}\n"
-        f"    ln -s -- {shlex.quote(str(other))} {shlex.quote(str(directory))}\n"
-        "    ;;\n"
-        "esac\n"
-        f'exec {shlex.quote(real_rm)} "$@"\n'
-    )
-    shim.chmod(0o700)
-    trial = _make_trial(tmp_path)
-    trial.agent_environment = _local_credential_environment(home, monkeypatch)
-    with trial._credential_commands("PRIMARY", None, {"PATH": f"{binaries}:{os.defpath}"}):
-        await trial._clear_credentials(PurePosixPath(directory))
-    assert displaced.exists()
-    assert sentinel.read_text() == "unrelated"
-
-
-@pytest.mark.asyncio
-async def test_upload_parent_swap_cannot_write_outside_credentials(
-    tmp_path, fake_creds, monkeypatch
-):
-    import os
-
-    directory = tmp_path / "creds"
-    directory.mkdir()
-    displaced = tmp_path / "original-creds"
-    other = tmp_path / "other-directory"
-    other.mkdir()
-    trial = _make_trial(tmp_path)
-    environment = trial.agent_environment = _local_credential_environment(tmp_path, monkeypatch)
-    trial._credential_dir = PurePosixPath(directory)
-    upload = environment.upload_file.side_effect
-
-    async def redirect_before_upload(source, destination):
-        directory.rename(displaced)
-        directory.symlink_to(other, target_is_directory=True)
-        await upload(source, destination)
-
-    environment.upload_file.side_effect = redirect_before_upload
-    with pytest.raises(RuntimeError, match="publish credential file"):
-        await trial._publish_credential_file(
-            PurePosixPath(directory / "PRIMARY.json"), "SYNTHETIC", f"{os.getuid()}:{os.getgid()}"
-        )
-    assert list(other.iterdir()) == []
-
-
-@pytest.mark.asyncio
-async def test_final_cleanup_failure_warns_and_still_stops_container(tmp_path, fake_creds, mocker):
-    trial = _make_trial(tmp_path)
-    trial._credential_dir = CREDS_PATH
-    trial.agent_environment.empty_dirs.side_effect = RuntimeError("container unavailable")
-    stopped = mocker.patch.object(Trial, "_stop_agent_environment", AsyncMock())
-    recorded = mocker.patch.object(trial, "_record_exception")
-
-    await trial._stop_agent_environment()
-
-    trial.agent_environment.empty_dirs.assert_awaited_once_with([PurePosixPath(".")], chmod=False)
-    stopped.assert_awaited_once()
-    recorded.assert_not_called()
-    trial.logger.warning.assert_called()  # type: ignore[attr-defined]
-
-
-@pytest.mark.asyncio
-async def test_cancelled_mint_cannot_publish_after_cleanup(tmp_path, fake_creds):
-    import threading
-
-    trial = _make_trial(tmp_path)
-    started, release, finished = (threading.Event() for _ in range(3))
-    credentials = fake_creds.return_value
-
-    def blocked_mint(*args):
-        started.set()
-        assert release.wait(timeout=5)
-        finished.set()
-        return credentials
-
-    fake_creds.side_effect = blocked_mint
+    async def loop(mint, expires_at, log):
+        await begin_refresh.wait()
+        await mint()
 
     async def phase():
         async with trial._staged_credentials(RoleType.AGENT):
-            pytest.fail("A cancelled mint must not start the consumer")
+            phase_entered.set()
+            await end_phase.wait()
 
+    shell_environment.exec.side_effect = transport
+    mocker.patch.object(aws_trial, "run_credential_refresh_loop", loop)
     task = asyncio.create_task(phase())
     try:
-        assert await asyncio.to_thread(started.wait, 5)
-        task.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await task
-        assert trial._credential_dir is None
-        trial.agent_environment.upload_file.assert_not_awaited()
-    finally:
-        release.set()
-        assert await asyncio.to_thread(finished.wait, 5)
-
-    await asyncio.sleep(0)
-    trial.agent_environment.upload_file.assert_not_awaited()
-    assert trial.agent_environment.files == {}
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("filename", ["config", "PRIMARY.json"])
-async def test_cancelled_upload_finishes_before_cleanup(tmp_path, fake_creds, filename):
-    trial = _make_trial(tmp_path)
-    environment = trial.agent_environment
-    upload = environment.upload_file.side_effect
-    started, release = asyncio.Event(), asyncio.Event()
-    local_source: Path | None = None
-
-    async def blocked_upload(source, destination):
-        nonlocal local_source
-        if f"/.{filename}." in destination:
-            local_source = Path(source)
-            started.set()
-            await release.wait()
-            assert local_source.exists()
-        await upload(source, destination)
-
-    environment.upload_file.side_effect = blocked_upload
-
-    async def phase():
-        async with trial._staged_credentials(RoleType.AGENT):
-            pytest.fail("A cancelled upload must not start the consumer")
-
-    task = asyncio.create_task(phase())
-    await asyncio.wait_for(started.wait(), timeout=5)
-    task.cancel()
-    await asyncio.sleep(0)
-    assert not task.done()
-    assert local_source is not None and local_source.exists()
-    assert environment.empty_dirs.await_count == 1
-    release.set()
-    with pytest.raises(asyncio.CancelledError):
-        await task
-
-    assert environment.empty_dirs.await_count == 2
-    assert not local_source.exists()
-    assert trial._credential_dir is None
-    assert not any("/creds/" in path for path in environment.files)
-    assert not any(PurePosixPath(path).name == filename for path, _ in environment.publications)
-
-
-@pytest.mark.asyncio
-async def test_unsettled_publication_blocks_later_roles_and_still_stops(
-    tmp_path, fake_creds, mocker
-):
-    trial = _make_trial(tmp_path, post_invoke=_phase(), has_post_script=True)
-    release = asyncio.Event()
-    upload = trial.agent_environment.upload_file.side_effect
-
-    async def blocked_upload(source, destination):
-        await release.wait()
-        await upload(source, destination)
-
-    trial.agent_environment.upload_file.side_effect = blocked_upload
-    mocker.patch.object(aws_trial, "_CREDENTIAL_OPERATION_TIMEOUT_SEC", 0.01)
-
-    with pytest.raises(TimeoutError, match="Credential file operation"):
-        async with trial._staged_credentials(RoleType.AGENT):
-            pytest.fail("An unsettled publication must stop the consumer")
-
-    operation = trial._credential_operation_task
-    assert operation is not None and not operation.done()
-    assert trial._credential_failed
-    with pytest.raises(RuntimeError, match="cannot start another phase"):
-        async with trial._staged_credentials(RoleType.VERIFIER):
-            pytest.fail("A verifier must not overlap an unresolved agent publication")
-
-    post = mocker.patch.object(trial, "_run_phase_script", AsyncMock())
-    stopped = mocker.patch.object(Trial, "_stop_agent_environment", AsyncMock())
-    await trial._stop_agent_environment()
-    post.assert_not_awaited()
-    stopped.assert_awaited_once()
-    release.set()
-    await operation
-    await trial._stop_agent_environment()
-    assert trial._credential_dir is None
-
-
-@pytest.mark.asyncio
-async def test_cleanup_timeout_does_not_fail_a_completed_phase(tmp_path, fake_creds, mocker):
-    trial = _make_trial(tmp_path)
-    release = asyncio.Event()
-    empty = trial.agent_environment.empty_dirs.side_effect
-    count = 0
-
-    async def blocked_exit(directories, *, chmod):
-        nonlocal count
-        count += 1
-        if count == 2:
-            await release.wait()
-        return await empty(directories, chmod=chmod)
-
-    trial.agent_environment.empty_dirs.side_effect = blocked_exit
-    mocker.patch.object(aws_trial, "_CREDENTIAL_OPERATION_TIMEOUT_SEC", 0.01)
-    async with trial._staged_credentials(RoleType.AGENT):
-        pass
-
-    assert not trial._credential_failed
-    operation = trial._credential_operation_task
-    assert operation is not None and not operation.done()
-    stopped = mocker.patch.object(Trial, "_stop_agent_environment", AsyncMock())
-    await trial._stop_agent_environment()
-    stopped.assert_awaited_once()
-    trial.logger.warning.assert_called()  # type: ignore[attr-defined]
-    release.set()
-    await operation
-    assert trial._credential_dir is None
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "failure",
-    [
-        asyncio.CancelledError(),
-        AgentTimeoutError("agent timeout"),
-        TimeoutError("script timeout"),
-        OperationCancelled(),
-    ],
-)
-async def test_interrupted_consumer_cannot_receive_later_role_credentials(
-    tmp_path, fake_creds, mocker, failure
-):
-    trial = _make_trial(tmp_path, post_invoke=_phase(), has_post_script=True)
-    with pytest.raises(type(failure)) as error:
-        async with trial._staged_credentials(RoleType.AGENT):
-            raise failure
-    assert error.value is failure
-    assert trial._credential_failed
-
-    with pytest.raises(RuntimeError, match="cannot start another phase"):
-        async with trial._staged_credentials(RoleType.VERIFIER):
-            pytest.fail("The old command may still be alive; do not publish another role")
-
-    post = mocker.patch.object(trial, "_run_phase_script", AsyncMock())
-    stopped = mocker.patch.object(Trial, "_stop_agent_environment", AsyncMock())
-    await trial._stop_agent_environment()
-    post.assert_not_awaited()
-    stopped.assert_awaited_once()
-    assert fake_creds.call_count == 1
-    assert not any("/creds/" in path for path in trial.agent_environment.files)
-
-
-@pytest.mark.asyncio
-async def test_wrapped_docker_timeout_blocks_later_roles(tmp_path, fake_creds, mocker):
-    trial = _make_trial(tmp_path, post_invoke=_phase(), has_post_script=True)
-    with pytest.raises(RuntimeError, match="Command timed out after 1 seconds") as error:
-        async with trial._staged_credentials(RoleType.PRE_INVOKE):
-            try:
-                raise TimeoutError()
-            except TimeoutError:
-                # Match Harbor DockerEnvironment's exception conversion.
-                raise RuntimeError("Command timed out after 1 seconds")
-
-    assert isinstance(error.value.__context__, TimeoutError)
-    assert trial._credential_failed
-    with pytest.raises(RuntimeError, match="cannot start another phase"):
-        async with trial._staged_credentials(RoleType.AGENT):
-            pytest.fail("A timed-out pre-invoke command must not receive agent credentials")
-    post = mocker.patch.object(trial, "_run_phase_script", AsyncMock())
-    stopped = mocker.patch.object(Trial, "_stop_agent_environment", AsyncMock())
-    await trial._stop_agent_environment()
-    post.assert_not_awaited()
-    stopped.assert_awaited_once()
-    assert fake_creds.call_count == 1
-
-
-@pytest.mark.asyncio
-async def test_exited_agent_can_still_receive_a_verifier_result(tmp_path, fake_creds):
-    trial = _make_trial(tmp_path)
-    with pytest.raises(NonZeroAgentExitCodeError):
-        async with trial._staged_credentials(RoleType.AGENT):
-            raise NonZeroAgentExitCodeError("agent exited with code 1")
-
-    assert not trial._credential_failed
-    async with trial._staged_credentials(RoleType.VERIFIER):
-        assert str(CREDS_PATH / "PRIMARY.json") in trial.agent_environment.files
-    assert fake_creds.call_count == 2
-
-
-@pytest.mark.asyncio
-async def test_unsettled_refresh_aborts_the_active_consumer(tmp_path, fake_creds, mocker):
-    trial = _make_trial(tmp_path)
-    release = asyncio.Event()
-    upload = trial.agent_environment.upload_file.side_effect
-    files, expiry = fake_creds.return_value
-    fake_creds.side_effect = [
-        (files, expiry),
-        ({"PRIMARY.json": files["PRIMARY.json"].replace("AKIA", "RENEWED")}, expiry),
-    ]
-    publications = 0
-
-    async def blocked_renewal(source, destination):
-        nonlocal publications
-        if ".PRIMARY.json." in destination:
-            publications += 1
-            if publications == 2:
-                await release.wait()
-        await upload(source, destination)
-
-    trial.agent_environment.upload_file.side_effect = blocked_renewal
-    mocker.patch.object(aws_trial, "_CREDENTIAL_OPERATION_TIMEOUT_SEC", 0.01)
-    mocker.patch.object(credentials_provider, "CRED_REFRESH_MIN_SLEEP_SEC", 0.005)
-    mocker.patch.object(credentials_provider, "_CRED_REFRESH_SKEW_SEC", 3600)
-
-    async def phase():
-        async with trial._staged_credentials(RoleType.AGENT):
-            await asyncio.sleep(1000)
-
-    task = asyncio.create_task(phase())
-    with pytest.raises(RuntimeError, match="publication did not settle"):
-        await asyncio.wait_for(task, timeout=2)
-    assert task.cancelling() == 0
-    assert trial._credential_failed
-    operation = trial._credential_operation_task
-    assert operation is not None
-    original = trial.agent_environment.files[str(CREDS_PATH / "PRIMARY.json")]
-    release.set()
-    await operation
-    assert trial.agent_environment.files[str(CREDS_PATH / "PRIMARY.json")] == original
-    mocker.patch.object(Trial, "_stop_agent_environment", AsyncMock())
-    await trial._stop_agent_environment()
-    assert trial._credential_dir is None
-
-
-@pytest.mark.asyncio
-async def test_normal_phase_exit_discards_a_pending_refresh(tmp_path, fake_creds, mocker):
-    trial = _make_trial(tmp_path)
-    environment = trial.agent_environment
-    files, expiry = fake_creds.return_value
-    fake_creds.side_effect = [
-        (files, expiry),
-        ({"PRIMARY.json": files["PRIMARY.json"].replace("AKIA", "RENEWED")}, expiry),
-    ]
-    started, release, consumer_finished = (asyncio.Event() for _ in range(3))
-    upload = environment.upload_file.side_effect
-
-    async def delayed_upload(source, destination):
-        if "RENEWED" in Path(source).read_text():
-            started.set()
-            await release.wait()
-        await upload(source, destination)
-
-    environment.upload_file.side_effect = delayed_upload
-    mocker.patch.object(credentials_provider, "CRED_REFRESH_MIN_SLEEP_SEC", 0.005)
-    mocker.patch.object(credentials_provider, "_CRED_REFRESH_SKEW_SEC", 3600)
-
-    async def phase():
-        async with trial._staged_credentials(RoleType.AGENT):
-            await started.wait()
-            consumer_finished.set()
-
-    task = asyncio.create_task(phase())
-    try:
-        await asyncio.wait_for(consumer_finished.wait(), timeout=2)
+        await asyncio.wait_for(phase_entered.wait(), timeout=2)
+        begin_refresh.set()
+        await asyncio.wait_for(upload_started.wait(), timeout=2)
+        end_phase.set()
+        await asyncio.sleep(0.02)
         assert not task.done()
-        release.set()
-        await asyncio.wait_for(task, timeout=2)
+        release_upload.set()
+        await task
+        assert remote_writes[0].done()
+        assert not (tmp_path / ".aws/creds").exists()
     finally:
-        release.set()
-        if not task.done():
-            task.cancel()
-        await asyncio.gather(task, return_exceptions=True)
-    assert not trial._credential_failed
-    assert not any("RENEWED" in body for _, body in environment.publications)
-    assert trial._credential_dir is None
+        release_upload.set()
+        task.cancel()
+        await asyncio.gather(task, *remote_writes, return_exceptions=True)
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("failure", ["mint", "publication", "stalled_mint"])
-@pytest.mark.parametrize("suppress_cancel", [False, True])
-async def test_expired_credentials_abort_consumer_and_block_later_roles(
-    tmp_path, fake_creds, mocker, failure, suppress_cancel
-):
-    """Neither repeated errors nor a pending mint may keep an expired phase active."""
-    import threading
-
-    trial = _make_trial(tmp_path, post_invoke=_phase(), has_post_script=True)
-    files, _ = fake_creds.return_value
-    release = threading.Event()
-    finished = threading.Event()
-    calls = 0
-
-    def mint(*args):
-        nonlocal calls
-        calls += 1
-        if calls == 1:
-            expiry = datetime.now(timezone.utc) + timedelta(seconds=0.25)
-            payload = {**json.loads(files["PRIMARY.json"]), "Expiration": expiry.isoformat()}
-            return {"PRIMARY.json": json.dumps(payload)}, expiry
-        if failure == "stalled_mint":
-            try:
-                assert release.wait(timeout=5)
-            finally:
-                finished.set()
-        if failure != "publication":
-            raise RuntimeError("synthetic refresh failure")
-        return (
-            {"PRIMARY.json": files["PRIMARY.json"].replace("AKIA", "RENEWED")},
-            datetime.now(timezone.utc) + timedelta(hours=1),
-        )
-
-    fake_creds.side_effect = mint
-    upload = trial.agent_environment.upload_file.side_effect
-
-    async def fail_renewal_upload(source, destination):
-        if failure == "publication" and calls > 1:
-            raise RuntimeError("synthetic publication failure")
-        await upload(source, destination)
-
-    trial.agent_environment.upload_file.side_effect = fail_renewal_upload
-    mocker.patch.object(credentials_provider, "CRED_REFRESH_MIN_SLEEP_SEC", 0.01)
-    mocker.patch.object(credentials_provider, "_CRED_REFRESH_RETRY_SEC", 0.01)
-
-    async def phase():
-        async with trial._staged_credentials(RoleType.AGENT):
-            try:
-                await asyncio.Future()
-            except asyncio.CancelledError:
-                if not suppress_cancel:
-                    raise
-
-    try:
-        with pytest.raises(CredentialError, match="expired|refresh"):
-            await asyncio.wait_for(phase(), timeout=2)
-    finally:
-        release.set()
-        if failure == "stalled_mint" and calls > 1:
-            assert await asyncio.to_thread(finished.wait, 5)
-    assert calls > 1
-    assert trial._credential_failed
-    assert trial._credential_operation_task is None
-    assert not any("/creds/" in path for path in trial.agent_environment.files)
-    with pytest.raises(RuntimeError, match="cannot start another phase"):
-        async with trial._staged_credentials(RoleType.VERIFIER):
-            pytest.fail("Expired phase must not grant credentials for another role")
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("exit_kind", ["return", "nonzero", "cancel"])
-async def test_phase_exit_checks_elapsed_expiry_before_disarming_timer(
-    tmp_path, fake_creds, mocker, exit_kind
-):
-    """Final synchronous work must not outrun the timeout callback and admit a verifier."""
-    import time
-
+async def test_verifier_credentials_use_verifier_user(tmp_path, fake_creds, mocker):
     trial = _make_trial(tmp_path)
-    record = json.loads(fake_creds.return_value[0]["PRIMARY.json"])
-
-    def mint(*args):
-        expiry = datetime.now(timezone.utc) + timedelta(seconds=0.15)
-        return {"PRIMARY.json": json.dumps({**record, "Expiration": expiry.isoformat()})}, expiry
-
-    fake_creds.side_effect = mint
-    mocker.patch.object(credentials_provider, "CRED_REFRESH_MIN_SLEEP_SEC", 0.001)
-    expected = asyncio.CancelledError if exit_kind == "cancel" else CredentialError
-    with pytest.raises(expected):
-        async with trial._staged_credentials(RoleType.AGENT):
-            time.sleep(0.2)
-            if exit_kind == "nonzero":
-                raise NonZeroAgentExitCodeError("agent exited")
-            if exit_kind == "cancel":
-                raise asyncio.CancelledError
-    assert trial._credential_failed
-    with pytest.raises(RuntimeError, match="cannot start another phase"):
-        async with trial._staged_credentials(RoleType.VERIFIER):
-            pytest.fail("Elapsed expiration must prevent a later role")
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("explicit_cause", [False, True])
-async def test_wrapped_expiry_cancellation_remains_a_credential_error(
-    tmp_path, fake_creds, mocker, explicit_cause
-):
-    trial = _make_trial(tmp_path)
-    record = json.loads(fake_creds.return_value[0]["PRIMARY.json"])
-    minted = False
-
-    def mint(*args):
-        nonlocal minted
-        if minted:
-            raise RuntimeError("synthetic renewal failure")
-        minted = True
-        expiry = datetime.now(timezone.utc) + timedelta(seconds=0.15)
-        return {"PRIMARY.json": json.dumps({**record, "Expiration": expiry.isoformat()})}, expiry
-
-    fake_creds.side_effect = mint
-    mocker.patch.object(credentials_provider, "CRED_REFRESH_MIN_SLEEP_SEC", 0.001)
-    with pytest.raises(CredentialError):
-        async with trial._staged_credentials(RoleType.AGENT):
-            try:
-                await asyncio.Future()
-            except asyncio.CancelledError as exc:
-                if explicit_cause:
-                    raise NonZeroAgentExitCodeError("agent exited") from exc
-                raise NonZeroAgentExitCodeError("agent exited")
-    assert trial._credential_failed
-    with pytest.raises(RuntimeError, match="cannot start another phase"):
-        async with trial._staged_credentials(RoleType.VERIFIER):
-            pytest.fail("An error wrapper must not allow later-role credentials")
-
-
-@pytest.mark.asyncio
-async def test_successful_publication_extends_consumer_deadline(tmp_path, fake_creds, mocker):
-    trial = _make_trial(tmp_path)
-    record = json.loads(fake_creds.return_value[0]["PRIMARY.json"])
-    initial_expiry = datetime.now(timezone.utc) + timedelta(seconds=0.25)
-    renewed_expiry = initial_expiry + timedelta(seconds=5)
-    initial = {"PRIMARY.json": json.dumps({**record, "Expiration": initial_expiry.isoformat()})}
-    renewed = {
-        "PRIMARY.json": json.dumps(
-            {**record, "AccessKeyId": "RENEWED", "Expiration": renewed_expiry.isoformat()}
-        )
-    }
-    fake_creds.side_effect = [(initial, initial_expiry)]
-    published = asyncio.Event()
-    upload = trial.agent_environment.upload_file.side_effect
-
-    async def observe_publication(source, destination):
-        await upload(source, destination)
-        if "RENEWED" in Path(source).read_text():
-            published.set()
-
-    trial.agent_environment.upload_file.side_effect = observe_publication
-    mocker.patch.object(credentials_provider, "CRED_REFRESH_MIN_SLEEP_SEC", 0.01)
-    async with trial._staged_credentials(RoleType.AGENT):
-        fake_creds.side_effect = None
-        fake_creds.return_value = renewed, renewed_expiry
-        await asyncio.wait_for(published.wait(), timeout=2)
-        await asyncio.sleep(0.3)
-        assert datetime.now(timezone.utc) > initial_expiry
-        assert (
-            json.loads(trial.agent_environment.files[str(CREDS_PATH / "PRIMARY.json")])[
-                "AccessKeyId"
-            ]
-            == "RENEWED"
-        )
-    assert not trial._credential_failed
-
-
-@pytest.mark.asyncio
-async def test_expiration_aborts_consumer_before_pending_upload_settles(
-    tmp_path, fake_creds, mocker
-):
-    trial = _make_trial(tmp_path)
-    record = json.loads(fake_creds.return_value[0]["PRIMARY.json"])
-    expiry = datetime.now(timezone.utc) + timedelta(seconds=0.25)
-    initial = {"PRIMARY.json": json.dumps({**record, "Expiration": expiry.isoformat()})}
-    renewed_expiry = expiry + timedelta(hours=1)
-    renewed = {
-        "PRIMARY.json": json.dumps(
-            {**record, "AccessKeyId": "RENEWED", "Expiration": renewed_expiry.isoformat()}
-        )
-    }
-    fake_creds.side_effect = [(initial, expiry), (renewed, renewed_expiry)]
-    started, release, consumer_cancelled = (asyncio.Event() for _ in range(3))
-    upload = trial.agent_environment.upload_file.side_effect
-
-    async def delayed_upload(source, destination):
-        if "RENEWED" in Path(source).read_text():
-            started.set()
-            await release.wait()
-        await upload(source, destination)
-
-    trial.agent_environment.upload_file.side_effect = delayed_upload
-    mocker.patch.object(credentials_provider, "CRED_REFRESH_MIN_SLEEP_SEC", 0.01)
-
-    async def phase():
-        async with trial._staged_credentials(RoleType.AGENT):
-            try:
-                await asyncio.Future()
-            except asyncio.CancelledError:
-                consumer_cancelled.set()
-                raise
-
-    task = asyncio.create_task(phase())
-    try:
-        await asyncio.wait_for(started.wait(), timeout=2)
-        await asyncio.wait_for(consumer_cancelled.wait(), timeout=2)
-        assert not release.is_set()
-        release.set()
-        with pytest.raises(CredentialError, match="expired|refresh"):
-            await asyncio.wait_for(task, timeout=2)
-    finally:
-        release.set()
-        if not task.done():
-            task.cancel()
-        await asyncio.gather(task, return_exceptions=True)
-    assert trial._credential_failed
-    assert trial._credential_operation_task is None
-    assert not any("/creds/" in path for path in trial.agent_environment.files)
-
-
-@pytest.mark.asyncio
-async def test_unexpected_refresher_exit_aborts_active_consumer(tmp_path, fake_creds, mocker):
-    trial = _make_trial(tmp_path)
-
-    async def stopped_refresh(*args):
-        return
-
-    mocker.patch.object(aws_trial, "refresh_credentials_loop", stopped_refresh)
-
-    async def phase():
-        async with trial._staged_credentials(RoleType.AGENT):
-            await asyncio.Future()
-
-    with pytest.raises(CredentialError, match="refresh"):
-        await asyncio.wait_for(phase(), timeout=2)
-    assert trial._credential_failed
-    assert not any("/creds/" in path for path in trial.agent_environment.files)
-
-
-@pytest.mark.asyncio
-async def test_refresh_freezes_account_role_and_reuses_unchanged_files(
-    tmp_path, fake_creds, mocker
-):
-    trial = _make_trial(tmp_path)
-    ready: asyncio.Future[Callable[[], Awaitable[datetime]]] = (
-        asyncio.get_running_loop().create_future()
-    )
-
-    async def capture_refresh(expires_at, refresh_once, log):
-        ready.set_result(refresh_once)
-        await asyncio.Future()
-
-    mocker.patch.object(aws_trial, "refresh_credentials_loop", capture_refresh)
-    async with trial._staged_credentials(RoleType.AGENT):
-        refresh = await asyncio.wait_for(ready, timeout=5)
-        uploads = trial.agent_environment.upload_file.await_count
-        trial.config.account_mapping = {"OTHER": "999900001111"}  # type: ignore[attr-defined]
-        trial.task.config.scenario = _scenario_ref(agent="OtherRole")
-        assert await refresh() == fake_creds.return_value[1]
-        assert trial.agent_environment.upload_file.await_count == uploads
-
-    assert fake_creds.call_count == 2
-    for minted in fake_creds.call_args_list:
-        assert minted.args[1:] == ({"PRIMARY": "123456789012"}, "AgentRole", "app-session")
-
-
-@pytest.mark.asyncio
-async def test_failed_refresh_keeps_the_last_complete_file(tmp_path, fake_creds, mocker):
-    trial = _make_trial(tmp_path)
-    ready: asyncio.Future[Callable[[], Awaitable[datetime]]] = (
-        asyncio.get_running_loop().create_future()
-    )
-
-    async def capture_refresh(expires_at, refresh_once, log):
-        ready.set_result(refresh_once)
-        await asyncio.Future()
-
-    mocker.patch.object(aws_trial, "refresh_credentials_loop", capture_refresh)
-    async with trial._staged_credentials(RoleType.AGENT):
-        refresh = await asyncio.wait_for(ready, timeout=5)
-        old_file = trial.agent_environment.files[str(CREDS_PATH / "PRIMARY.json")]
-        files, expiry = fake_creds.return_value
-        fake_creds.return_value = (
-            {"PRIMARY.json": files["PRIMARY.json"].replace("AKIA", "RENEWED")},
-            expiry,
-        )
-        upload = trial.agent_environment.upload_file.side_effect
-
-        async def partial_upload(source, destination):
-            await upload(source, destination)
-            raise RuntimeError("upload failed with secret contents")
-
-        trial.agent_environment.upload_file.side_effect = partial_upload
-        with pytest.raises(RuntimeError, match="publish credential file") as error:
-            await refresh()
-        assert "secret contents" not in str(error.value)
-        assert trial.agent_environment.files[str(CREDS_PATH / "PRIMARY.json")] == old_file
-        assert not any(".PRIMARY.json." in path for path in trial.agent_environment.files)
-
-    assert not any("/creds/" in path for path in trial.agent_environment.files)
-
-
-@pytest.mark.asyncio
-async def test_environment_wrapper_removes_image_and_transport_credentials(tmp_path, monkeypatch):
-    import os
-    import subprocess
-    import sys
-
-    trial = _make_trial(tmp_path)
-    inherited = {name: f"image-{name}" for name in CREDENTIAL_ENV_VARS}
-    inherited["AWS_BEARER_TOKEN_BEDROCK"] = "model-token"
-    inherited["AWS_REGION"] = "eu-west-1"
-    persistent = dict.fromkeys(CREDENTIAL_ENV_VARS, "persistent-secret")
-    captured: dict[str, str] = {}
-    monkeypatch.setenv("AWS_ACCESS_KEY_ID", "host-key")
-
-    async def execute(*, command, env, **kwargs):
-        captured.update(env)
-        process = subprocess.run(
-            ["sh", "-c", command],
-            env={**os.environ, **inherited, **persistent, **env},
-            capture_output=True,
-            text=True,
-            check=True,
-        )
-        return ExecResult(return_code=process.returncode, stdout=process.stdout)
-
-    trial.agent_environment.exec = AsyncMock(side_effect=execute)
-    original_exec = trial.agent_environment.exec
-    names = [
-        *CREDENTIAL_ENV_VARS,
-        "AWS_BEARER_TOKEN_BEDROCK",
-        "AWS_REGION",
-        "AWS_EC2_METADATA_DISABLED",
-    ]
-    script = (
-        f"import json, os; "
-        f"print(json.dumps({{k: os.environ[k] for k in {names!r} if k in os.environ}}))"
-    )
-    with trial._credential_commands("PRIMARY", "runner"):
-        result = await trial.agent_environment.exec(
-            command=f"{shlex.quote(sys.executable)} -c {shlex.quote(script)}",
-            env={**dict.fromkeys(CREDENTIAL_ENV_VARS, "command-secret"), "AWS_CONFIG_FILE": ""},
-        )
-        assert trial.agent_environment.default_user == "runner"
-
-    assert json.loads(result.stdout) == {
-        "AWS_PROFILE": "PRIMARY",
-        "AWS_BEARER_TOKEN_BEDROCK": "model-token",
-        "AWS_REGION": "eu-west-1",
-        "AWS_EC2_METADATA_DISABLED": "true",
-    }
-    assert "command-secret" not in captured.values()
-    assert "persistent-secret" not in captured.values()
-    assert os.environ["AWS_ACCESS_KEY_ID"] == "host-key"
-    assert trial.agent_environment.exec is original_exec
-    assert trial.agent_environment.default_user is None
+    trial.task.config.agent.user = "agent"  # type: ignore[attr-defined]
+    mocker.patch.object(Trial, "_run_shared_verifier", AsyncMock())
+    await trial._run_shared_verifier(user="verifier")
+    assert {call.kwargs["user"] for call in _exec_calls(trial)} == {"verifier"}
 
 
 # --- verifier creds at the precedence the verifier reads ------------------
@@ -1802,97 +623,6 @@ async def test_verifier_env_restored_when_super_raises(tmp_path, fake_creds, moc
 
     assert trial.config.verifier.env is original_env
     assert "AWS_ACCESS_KEY_ID" not in trial.config.verifier.env
-
-
-@pytest.mark.asyncio
-async def test_verifier_uses_distinct_config_layers_and_its_actual_home(
-    tmp_path, fake_creds, mocker
-):
-    trial = _make_trial(tmp_path)
-    task_env = {
-        "HOME": "/home/task",
-        "AWS_PROFILE": "OLD",
-        "TASK_ONLY": "keep",
-        "RESOURCE": "{{BucketName}}",
-    }
-    override_env = {
-        "HOME": "/home/verifier",
-        "AWS_PROFILE": "OVERRIDE",
-        "AWS_DEFAULT_PROFILE": "OTHER",
-        "AWS_REGION": "ap-south-1",
-        "AWS_WEB_IDENTITY_TOKEN_FILE": "${MISSING_UNUSED_TOKEN}",
-    }
-    trial._aws_placeholders = {"PRIMARY": {"BucketName": "bucket-123"}}
-    trial.task.config.verifier.env = task_env
-    trial.config.verifier.env = override_env
-    command_env = {"AWS_PROFILE": "COMMAND", "HOME": "/home/command"}
-
-    async def verify(self, **kwargs):
-        assert self.agent_environment.default_user == "verifier"
-        for layer in (self.task.config.verifier.env, self.config.verifier.env):
-            assert layer["AWS_PROFILE"] == "PRIMARY"
-            assert layer["AWS_DEFAULT_PROFILE"] == ""
-            assert layer["AWS_WEB_IDENTITY_TOKEN_FILE"] == ""
-        assert self.task.config.verifier.env["RESOURCE"] == "bucket-123"
-        assert self.config.verifier.env["AWS_REGION"] == "ap-south-1"
-        assert "/home/verifier/.aws/creds/PRIMARY.json" in self.agent_environment.files
-        assert kwargs["env"] is command_env
-
-    mocker.patch.object(Trial, "_run_shared_verifier", verify)
-    await trial._run_shared_verifier(user="verifier", timeout_sec=None, env=command_env)
-    assert trial.task.config.verifier.env is task_env
-    assert trial.config.verifier.env is override_env
-    assert command_env["AWS_PROFILE"] == "COMMAND"
-    assert trial.agent_environment.default_user is None
-
-
-@pytest.mark.asyncio
-async def test_verifier_does_not_resolve_shadowed_values(tmp_path, fake_creds, mocker, monkeypatch):
-    from harbor.utils.env import resolve_env_vars
-
-    trial = _make_trial(tmp_path)
-    original_task = {"HOME": "{{UNUSED_HOME}}", "VALUE": "{{UNUSED_VALUE}}"}
-    original_override = {"HOME": "/home/verifier", "VALUE": "${LIVE_VALUE}"}
-    trial.task.config.verifier.env = original_task
-    trial.config.verifier.env = original_override
-    monkeypatch.setenv("LIVE_VALUE", "${LITERAL_VALUE}")
-    monkeypatch.delenv("LITERAL_VALUE", raising=False)
-
-    async def verify(self, **kwargs):
-        merged = {
-            **self.task.config.verifier.env,
-            **(kwargs["env"] or {}),
-            **self.config.verifier.env,
-        }
-        resolved = resolve_env_vars(merged)
-        assert resolved["HOME"] == "/home/verifier"
-        assert resolved["VALUE"] == "${LITERAL_VALUE}"
-        assert "/home/verifier/.aws/creds/PRIMARY.json" in self.agent_environment.files
-
-    mocker.patch.object(Trial, "_run_shared_verifier", verify)
-    await trial._run_shared_verifier(
-        user="verifier", timeout_sec=None, env={"VALUE": "{{ALSO_UNUSED}}"}
-    )
-    assert trial.task.config.verifier.env is original_task
-    assert trial.config.verifier.env is original_override
-
-
-@pytest.mark.asyncio
-async def test_agent_home_override_matches_credential_owner(tmp_path, fake_creds, mocker):
-    trial = _make_trial(tmp_path)
-    trial.agent._extra_env = {"HOME": "/home/agent"}  # type: ignore[attr-defined]
-
-    async def run(self, **kwargs):
-        assert self.agent_environment.default_user == "runner"
-        assert "/home/agent/.aws/creds/PRIMARY.json" in self.agent_environment.files
-        assert self.agent._extra_env["HOME"] == "/home/agent"
-        assert kwargs["user"] == "runner"
-
-    mocker.patch.object(Trial, "_run_agent_phase", run)
-    await trial._run_agent_phase(
-        instruction="x", target=MagicMock(), timeout_sec=None, user="runner"
-    )
-    assert trial.agent._extra_env == {"HOME": "/home/agent"}  # type: ignore[attr-defined]
 
 
 @pytest.mark.asyncio

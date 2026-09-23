@@ -2,67 +2,25 @@
 
 from __future__ import annotations
 
-import json
-import os
-import shlex
-import subprocess
-import sys
-import traceback
-from concurrent.futures import ThreadPoolExecutor
+import asyncio
 from datetime import datetime, timedelta, timezone
-from pathlib import Path, PurePosixPath
-from threading import Event
-from types import MappingProxyType
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, call, patch
 
 import boto3
 import pytest
-from botocore.client import BaseClient
-from botocore.configloader import load_config
-from botocore.credentials import Credentials, DeferredRefreshableCredentials, RefreshableCredentials
-from botocore.exceptions import ClientError, NoCredentialsError
 
 from aws_bench.account_management.constants import ORG_ACCESS_ROLE
-from aws_bench.account_management.preexisting import ACCOUNT_CONFIG_ENV_VAR
-from aws_bench.exceptions import CredentialError
 from aws_bench.utils.credentials_provider import (
-    CREDENTIAL_ENV_VARS,
-    CREDS_DIR,
     MAX_SESSION_NAME_LEN,
     SESSION_NAME_PREFIX,
     CredentialProvider,
     _create_refreshable_session,
-    build_aws_config,
-    build_aws_credentials_file,
     build_session_name,
-    check_static_profiles,
     create_regional_session,
-    credential_command,
-    credential_env,
     enforce_session_name,
-    mint_credentials,
-    session_to_credential_process,
+    run_credential_refresh_loop,
     session_to_env_credentials,
-    validate_account_tag,
 )
-
-
-@pytest.fixture(autouse=True)
-def _isolate_aws(tmp_path, monkeypatch):
-    """Use synthetic credentials and refuse any unmocked cloud call."""
-    for key in (*CREDENTIAL_ENV_VARS, ACCOUNT_CONFIG_ENV_VAR):
-        monkeypatch.delenv(key, raising=False)
-    monkeypatch.setenv("AWS_ACCESS_KEY_ID", "HOST_TEST_KEY")
-    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "HOST_TEST_SECRET")
-    monkeypatch.setenv("AWS_SESSION_TOKEN", "HOST_TEST_TOKEN")
-    monkeypatch.setenv("AWS_CONFIG_FILE", str(tmp_path / "unused-config"))
-    monkeypatch.setenv("AWS_SHARED_CREDENTIALS_FILE", str(tmp_path / "unused-credentials"))
-    monkeypatch.setenv("AWS_EC2_METADATA_DISABLED", "true")
-
-    def unexpected_call(*args, **kwargs):
-        pytest.fail("Unmocked AWS call")
-
-    monkeypatch.setattr(BaseClient, "_make_api_call", unexpected_call)
 
 
 @pytest.fixture(autouse=True)
@@ -552,35 +510,21 @@ def test_session_to_env_credentials_forces_refresh_for_refreshable_creds():
     The snapshot is static, so the recipient must start with a full-duration
     credential rather than the parent's remaining lifetime.
     """
-    expiry = datetime.now(timezone.utc) + timedelta(hours=1)
+    frozen = MagicMock(access_key="AKIA-FRESH", secret_key="s", token="t")
+    # spec= limits the mock to real RefreshableCredentials attributes, so
+    # _protected_refresh exists (and is asserted) while absent ones would not.
+    from botocore.credentials import RefreshableCredentials
 
-    def refresh():
-        assert creds._refresh_lock.locked()
-        return {
-            "access_key": "AKIA-FRESH",
-            "secret_key": "fresh-secret",
-            "token": "fresh-token",
-            "expiry_time": expiry.isoformat(),
-        }
+    creds = MagicMock(spec=RefreshableCredentials)
+    creds.get_frozen_credentials.return_value = frozen
 
-    creds = RefreshableCredentials(
-        "AKIA-OLD",
-        "old-secret",
-        "old-token",
-        expiry,
-        refresh,
-        "test",
-    )
-    session = boto3.Session(region_name="us-east-1")
-    session._session._credentials = creds
+    session = MagicMock()
+    session.get_credentials.return_value = creds
 
     result = session_to_env_credentials(session)
 
-    assert result == {
-        "AWS_ACCESS_KEY_ID": "AKIA-FRESH",
-        "AWS_SECRET_ACCESS_KEY": "fresh-secret",
-        "AWS_SESSION_TOKEN": "fresh-token",
-    }
+    creds._protected_refresh.assert_called_once_with(is_mandatory=True)
+    assert result["AWS_ACCESS_KEY_ID"] == "AKIA-FRESH"
 
 
 def test_session_to_env_credentials_skips_refresh_for_static_creds():
@@ -798,45 +742,6 @@ def test_wait_for_role_raises_on_shutdown():
         concurrent.reset_shutdown()
 
 
-# ── build_aws_credentials_file ──
-
-
-def _creds(n: str) -> dict[str, str]:
-    return {
-        "AWS_ACCESS_KEY_ID": f"AKIA{n}",
-        "AWS_SECRET_ACCESS_KEY": f"secret{n}",
-        "AWS_SESSION_TOKEN": f"token{n}",
-    }
-
-
-def test_build_aws_credentials_file_one_block_per_tag():
-    body = build_aws_credentials_file({"PRIMARY": _creds("1"), "SECONDARY": _creds("2")})
-    assert "[PRIMARY]" in body
-    assert "[SECONDARY]" in body
-    assert "aws_access_key_id=AKIA1" in body
-    assert "aws_session_token=token2" in body
-
-
-def test_build_aws_credentials_file_writes_no_default_block():
-    """No [default] for any tag count: a profile must always be named explicitly."""
-    single = build_aws_credentials_file({"PRIMARY": _creds("1")})
-    multi = build_aws_credentials_file({"PRIMARY": _creds("1"), "SECONDARY": _creds("2")})
-    assert "[default]" not in single
-    assert "[default]" not in multi
-    assert "[PRIMARY]" in single
-
-
-def test_build_aws_credentials_file_omits_role_arn_and_credential_source():
-    """Static creds only — never the credential_source/role_arn chaining form."""
-    body = build_aws_credentials_file({"PRIMARY": _creds("1")})
-    assert "role_arn" not in body
-    assert "credential_source" not in body
-
-
-def test_build_aws_credentials_file_empty_mapping_returns_empty_string():
-    assert build_aws_credentials_file({}) == ""
-
-
 # ── build_session_name (the single CloudTrail naming constructor) ──
 
 
@@ -923,784 +828,141 @@ def test_assume_role_enforces_session_name_convention():
     mock_session.client.return_value.assume_role.assert_not_called()
 
 
-def _session_with_credentials(creds) -> boto3.Session:
-    session = boto3.Session(region_name="us-east-1")
-    session._session._credentials = creds
-    return session
+# ── get_chained_session_for_account ──
 
 
-def _refreshable_credentials(
-    generation: str, expiry: datetime | None, refresh=None
-) -> RefreshableCredentials:
-    def unexpected_refresh():
-        pytest.fail("Unexpected credential refresh")
+@pytest.mark.parametrize("role_name", [None, ORG_ACCESS_ROLE])
+@patch("aws_bench.utils.credentials_provider._create_refreshable_session")
+def test_get_chained_session_without_scoped_role_returns_org_session(mock_create, role_name):
+    parent = MagicMock()
+    provider = CredentialProvider(session=parent)
 
-    return RefreshableCredentials(
-        f"{generation}_KEY",
-        f"{generation}_SECRET",
-        f"{generation}_TOKEN",
-        expiry,
-        refresh or unexpected_refresh,
-        "test",
+    session = provider.get_chained_session_for_account("111122223333", role_name, "app-session")
+
+    assert session is mock_create.return_value
+    mock_create.assert_called_once_with(
+        parent,
+        "arn:aws:iam::111122223333:role/OrganizationAccountAccessRole",
+        "app-session",
+        "us-east-1",
     )
 
 
-def _metadata(generation: str, expiry: datetime) -> dict[str, str]:
-    return {
-        "access_key": f"{generation}_KEY",
-        "secret_key": f"{generation}_SECRET",
-        "token": f"{generation}_TOKEN",
-        "expiry_time": expiry.isoformat(),
-    }
+@patch("aws_bench.utils.credentials_provider._create_refreshable_session")
+def test_get_chained_session_scoped_role_uses_org_session(mock_create):
+    parent = MagicMock()
+    org_session, scoped_session = MagicMock(), MagicMock()
+    mock_create.side_effect = [org_session, scoped_session]
+    provider = CredentialProvider(session=parent)
 
-
-def test_credentials_directory_is_relative_to_container_home():
-    assert CREDS_DIR == PurePosixPath(".aws/creds")
-    assert PurePosixPath("/home/runner") / CREDS_DIR == PurePosixPath("/home/runner/.aws/creds")
-
-
-def test_credential_env_blocks_the_exact_spec_sources():
-    expected = (
-        "AWS_ACCESS_KEY_ID",
-        "AWS_SECRET_ACCESS_KEY",
-        "AWS_SESSION_TOKEN",
-        "AWS_SECURITY_TOKEN",
-        "AWS_CREDENTIAL_EXPIRATION",
-        "AWS_ACCOUNT_ID",
-        "AWS_CONFIG_FILE",
-        "AWS_SHARED_CREDENTIALS_FILE",
-        "AWS_CREDENTIAL_FILE",
-        "BOTO_CONFIG",
-        "AWS_WEB_IDENTITY_TOKEN_FILE",
-        "AWS_ROLE_ARN",
-        "AWS_ROLE_SESSION_NAME",
-        "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI",
-        "AWS_CONTAINER_CREDENTIALS_FULL_URI",
-        "AWS_CONTAINER_AUTHORIZATION_TOKEN",
-        "AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE",
-        "AWS_EC2_METADATA_SERVICE_ENDPOINT",
-        "AWS_EC2_METADATA_SERVICE_ENDPOINT_MODE",
-        "AWS_PROFILE",
-        "AWS_DEFAULT_PROFILE",
+    session = provider.get_chained_session_for_account(
+        "111122223333", "AgentRole", "app-session", "us-west-2"
     )
-    assert CREDENTIAL_ENV_VARS == expected
-    assert len(CREDENTIAL_ENV_VARS) == 21
-    result = credential_env("PRIMARY")
-    assert result == {
-        **dict.fromkeys(expected, ""),
-        "AWS_PROFILE": "PRIMARY",
-        "AWS_EC2_METADATA_DISABLED": "true",
-    }
 
-
-def test_credential_env_preserves_model_region_and_host_environment():
-    original = {
-        **dict.fromkeys(CREDENTIAL_ENV_VARS, "OLD_SECRET"),
-        "AWS_EC2_METADATA_DISABLED": "false",
-        "AWS_BEARER_TOKEN_BEDROCK": "MODEL_TOKEN",
-        "AWS_REGION": "eu-west-1",
-        "AWS_DEFAULT_REGION": "us-east-1",
-        "AWS_MAX_ATTEMPTS": "3",
-        "HOME": "/home/runner",
-        "PATH": "/usr/bin",
-        "CUSTOM": "value",
-    }
-    before = dict(os.environ)
-    result = credential_env("PRIMARY", MappingProxyType(original))
-    assert "OLD_SECRET" not in result.values()
-    assert original["AWS_SECRET_ACCESS_KEY"] == "OLD_SECRET"
-    assert result["AWS_DEFAULT_PROFILE"] == ""
-    for key in (
-        "AWS_BEARER_TOKEN_BEDROCK",
-        "AWS_REGION",
-        "AWS_DEFAULT_REGION",
-        "AWS_MAX_ATTEMPTS",
-        "HOME",
-        "PATH",
-        "CUSTOM",
-    ):
-        assert result[key] == original[key]
-    assert dict(os.environ) == before
-
-
-@pytest.mark.parametrize("inherited", ["OLD_SECRET", ""])
-@pytest.mark.parametrize("transport_overlay", [False, True])
-def test_credential_command_unsets_sources_in_real_child_shell(inherited, transport_overlay):
-    env = {
-        **dict.fromkeys(CREDENTIAL_ENV_VARS, inherited),
-        "PATH": os.defpath,
-        "AWS_BEARER_TOKEN_BEDROCK": "MODEL_TOKEN",
-        "AWS_REGION": "eu-west-1",
-        "AWS_DEFAULT_REGION": "us-east-1",
-        "CUSTOM": "kept",
-    }
-    if transport_overlay:
-        env.update(credential_env("PRIMARY"))
-    script = "import json, os; print(json.dumps(dict(os.environ)))"
-    command = f"{shlex.quote(sys.executable)} -c {shlex.quote(script)}"
-    result = subprocess.run(
-        ["sh", "-c", credential_command(command, "PRIMARY")],
-        env=env,
-        capture_output=True,
-        text=True,
-        check=True,
-    )
-    child = json.loads(result.stdout)
-    assert child["AWS_PROFILE"] == "PRIMARY"
-    assert child["AWS_EC2_METADATA_DISABLED"] == "true"
-    assert not (set(CREDENTIAL_ENV_VARS) - {"AWS_PROFILE"}).intersection(child)
-    for key in ("AWS_BEARER_TOKEN_BEDROCK", "AWS_REGION", "AWS_DEFAULT_REGION", "CUSTOM"):
-        assert child[key] == env[key]
-    assert "OLD_SECRET" not in credential_command(command, "PRIMARY")
-
-
-def test_credential_command_preserves_shell_script_and_exit_status():
-    command = 'cat <<\'EOF\'\n"quoted" $literal `literal`\nEOF\nprintf "%s" "$AWS_PROFILE"\nexit 17'
-    wrapped = credential_command(command, "Primary_1")
-    result = subprocess.run(
-        ["sh", "-c", wrapped], env={"PATH": os.defpath}, capture_output=True, text=True
-    )
-    assert wrapped.endswith(command)
-    assert result.returncode == 17
-    assert result.stdout == '"quoted" $literal `literal`\nPrimary_1'
-
-
-@pytest.mark.parametrize("readonly", ["AWS_PROFILE", "AWS_EC2_METADATA_DISABLED"])
-def test_credential_command_stops_if_environment_cleanup_fails(readonly):
-    result = subprocess.run(
-        ["sh", "-c", f"readonly {readonly}=OLD\n" + credential_command("echo UNSAFE", "PRIMARY")],
-        env={"PATH": os.defpath},
-        capture_output=True,
-        text=True,
-    )
-    assert result.returncode != 0
-    assert "UNSAFE" not in result.stdout
-
-
-@pytest.mark.parametrize("tag", ["A", "PRIMARY", "primary", "Primary_1", "A" * 32, "default"])
-def test_shared_account_tag_validation_accepts_safe_names(tag):
-    assert validate_account_tag(tag) == tag
+    assert session is scoped_session
+    assert mock_create.call_args_list == [
+        call(
+            parent,
+            "arn:aws:iam::111122223333:role/OrganizationAccountAccessRole",
+            "app-session-223333",
+            "us-west-2",
+        ),
+        call(
+            org_session,
+            "arn:aws:iam::111122223333:role/AgentRole",
+            "app-session",
+            "us-west-2",
+        ),
+    ]
 
 
 @pytest.mark.parametrize(
-    "tag",
+    "role_name, expected_role",
+    [(None, ORG_ACCESS_ROLE), (ORG_ACCESS_ROLE, ORG_ACCESS_ROLE), ("AgentRole", "AgentRole")],
+)
+def test_get_chained_session_preexisting_delegates_to_runner_chain(
+    mocker, role_name, expected_role
+):
+    mocker.patch(
+        "aws_bench.utils.credentials_provider.active_account_config",
+        return_value=(MagicMock(), None),
+    )
+    provider = CredentialProvider(session=MagicMock())
+    delegated = mocker.patch.object(provider, "get_session_for_account")
+
+    session = provider.get_chained_session_for_account(
+        "111122223333", role_name, "app-session", "us-west-2"
+    )
+
+    assert session is delegated.return_value
+    delegated.assert_called_once_with("111122223333", expected_role, "app-session", "us-west-2")
+
+
+# ── run_credential_refresh_loop ──
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "remaining, mint_results, expected_sleeps",
     [
-        "",
-        "1PRIMARY",
-        "_PRIMARY",
-        "A" * 33,
-        "PRIMARY\n",
-        "PRIMARY\r",
-        "PRI\0MARY",
-        "PŘIMARY",
-        "../PRIMARY",
-        "PRIMARY.json",
-        "PRIMARY; echo BAD",
-        "PRIMARY'\"",
-        "PRIMARY$(echo BAD)",
-        "PRIMARY-2",
-        "HOME",
-        "PATH",
-        "MANAGEMENT_ROLE",
-        "AWS_EC2_METADATA_DISABLED",
-        "AWS_BEARER_TOKEN_BEDROCK",
-        "AWS_REGION",
-        "AWS_DEFAULT_REGION",
-        *CREDENTIAL_ENV_VARS,
+        (3600, [], [2700]),
+        (931, [], [31]),
+        (930, [], [30]),
+        (60, [], [30]),
+        (1000, [3600], [100, 2700]),
+        (1000, [RuntimeError("sts down"), 3600], [100, 60, 2700]),
     ],
 )
-def test_all_credential_entrypoints_reject_unsafe_tags_before_cloud_calls(tag):
-    provider = MagicMock()
-    calls = [
-        lambda: credential_env(tag),
-        lambda: credential_command("true", tag),
-        lambda: build_aws_config([tag]),
-        lambda: build_aws_credentials_file({tag: _creds("1")}),
-        lambda: check_static_profiles([tag], ""),
-        lambda: mint_credentials(provider, {tag: "111122223333"}, "TaskRole", "app-session"),
-    ]
-    for call in calls:
-        with pytest.raises(ValueError, match="Invalid account_tag"):
-            call()
-    provider.get_chained_session_for_account.assert_not_called()
-
-
-def _parsed_config(tmp_path: Path, content: str) -> dict:
-    path = tmp_path / "config"
-    path.write_text(content)
-    return load_config(str(path))
-
-
-def test_build_aws_config_creates_only_process_profiles(tmp_path):
-    body = build_aws_config(iter(["PRIMARY", "Secondary_2"]), region="eu-west-1")
-    parsed = _parsed_config(tmp_path, body)["profiles"]
-    assert set(parsed) == {"PRIMARY", "Secondary_2"}
-    for tag, profile in parsed.items():
-        assert profile == {
-            "credential_process": f"""sh -c 'cat "$HOME/.aws/creds/{tag}.json"'""",
-            "region": "eu-west-1",
-        }
-    assert build_aws_config(["PRIMARY"]) == (
-        "[profile PRIMARY]\ncredential_process = sh -c 'cat \"$HOME/.aws/creds/PRIMARY.json\"'\n"
+async def test_refresh_loop_cadence(mocker, remaining, mint_results, expected_sleeps):
+    """Sleep before minting, use each new expiry, and recover after callback failures."""
+    now = datetime(2026, 9, 23, tzinfo=timezone.utc)
+    mocker.patch("aws_bench.utils.credentials_provider.datetime").now.return_value = now
+    sleep = mocker.patch(
+        "aws_bench.utils.credentials_provider.asyncio.sleep",
+        new_callable=AsyncMock,
+        side_effect=[None] * (len(expected_sleeps) - 1) + [asyncio.CancelledError],
     )
-    assert build_aws_config([], existing="# untouched\n") == "# untouched\n"
-
-
-@pytest.mark.parametrize("header", ["profile PRIMARY", 'profile "PRIMARY"', "profile 'PRIMARY'"])
-@pytest.mark.parametrize("newline", ["\n", "\r\n"])
-def test_build_aws_config_preserves_text_and_existing_region(tmp_path, header, newline):
-    existing = newline.join(
-        [
-            "# Keep comments and formatting",
-            "[profile OTHER]",
-            "aws_access_key_id = OTHER_SECRET",
-            "region = us-west-2",
-            "",
-            f"[{header}]",
-            "region=ap-south-1",
-            "output = json",
-            "s3 =",
-            "  addressing_style = path",
-            "# 100% preserved",
-            "[plugins]",
-            "custom = plugin",
-            "",
+    mint = AsyncMock(
+        side_effect=[
+            now + timedelta(seconds=result) if isinstance(result, int) else result
+            for result in mint_results
         ]
     )
-    body = build_aws_config(["PRIMARY", "SECONDARY"], existing, region="eu-west-1")
-    addition = "credential_process = sh -c 'cat \"$HOME/.aws/creds/PRIMARY.json\"'\n"
-    assert body.replace(addition, "", 1).startswith(existing)
-    parsed = _parsed_config(tmp_path, body)["profiles"]
-    assert parsed["PRIMARY"]["region"] == "ap-south-1"
-    assert parsed["PRIMARY"]["s3"]["addressing_style"] == "path"
-    assert parsed["SECONDARY"]["region"] == "eu-west-1"
-    assert parsed["OTHER"]["aws_access_key_id"] == "OTHER_SECRET"
-    assert build_aws_config(["PRIMARY", "SECONDARY"], body, region="us-east-1") == body
+    log = MagicMock()
+
+    with pytest.raises(asyncio.CancelledError):
+        await run_credential_refresh_loop(mint, now + timedelta(seconds=remaining), log)
+
+    assert sleep.await_args_list == [call(seconds) for seconds in expected_sleeps]
+    assert mint.await_count == len(mint_results)
+    assert log.warning.call_count == sum(isinstance(result, Exception) for result in mint_results)
 
 
-@pytest.mark.parametrize("indent", ["  ", "\t"], ids=["spaces", "tab"])
-@pytest.mark.parametrize(
-    "first_option, addition, expected_region",
-    [
-        (
-            "region = eu-west-1",
-            """credential_process = sh -c 'cat "$HOME/.aws/creds/PRIMARY.json"'""",
-            "eu-west-1",
-        ),
-        (
-            """credential_process = sh -c 'cat "$HOME/.aws/creds/PRIMARY.json"'""",
-            "region = us-east-1",
-            "us-east-1",
-        ),
-    ],
-    ids=["add-process", "add-region"],
-)
-def test_build_aws_config_preserves_indented_profile_settings(
-    tmp_path, monkeypatch, indent, first_option, addition, expected_region
-):
-    existing = (
-        "[profile OTHER]\nregion=us-west-2\n"
-        "[profile PRIMARY]\n    ; keep this comment\n\n"
-        f"{indent}{first_option}\n"
-        f"{indent}output = json\n"
-        f"{indent}s3 =\n"
-        f"{indent}  addressing_style = path\n"
-        "[plugins]\ncustom=kept\n"
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cancel_during", ["sleep", "mint"])
+async def test_refresh_loop_cancellation(mocker, cancel_during):
+    """Task cancellation escapes both the sleep and callback without a retry warning."""
+    started = asyncio.Event()
+
+    async def wait(*_args):
+        started.set()
+        await asyncio.Event().wait()
+
+    sleep = mocker.patch(
+        "aws_bench.utils.credentials_provider.asyncio.sleep", new_callable=AsyncMock
     )
-    body = build_aws_config(["PRIMARY"], existing, region="us-east-1")
-    parsed = _parsed_config(tmp_path, body)
-    assert parsed["profiles"]["PRIMARY"] == {
-        "credential_process": """sh -c 'cat "$HOME/.aws/creds/PRIMARY.json"'""",
-        "region": expected_region,
-        "output": "json",
-        "s3": {"addressing_style": "path"},
-    }
-    assert parsed["profiles"]["OTHER"] == {"region": "us-west-2"}
-    assert parsed["plugins"] == {"custom": "kept"}
-    assert body.replace(f"{indent}{addition}\n", "", 1) == existing
-    assert build_aws_config(["PRIMARY"], body, region="us-east-1") == body
-
-    monkeypatch.setenv("AWS_CONFIG_FILE", str(tmp_path / "config"))
-    monkeypatch.delenv("AWS_DEFAULT_REGION", raising=False)
-    session = boto3.Session(
-        profile_name="PRIMARY",
-        aws_access_key_id="SYNTHETIC_KEY",
-        aws_secret_access_key="SYNTHETIC_SECRET",
+    mint = AsyncMock()
+    (sleep if cancel_during == "sleep" else mint).side_effect = wait
+    log = MagicMock()
+    task = asyncio.create_task(
+        run_credential_refresh_loop(mint, datetime.now(timezone.utc) + timedelta(hours=1), log)
     )
-    client = session.client("ec2")
-    try:
-        assert client.meta.region_name == expected_region
-    finally:
-        client.close()
-
-
-def test_build_aws_config_preserves_indented_header_after_empty_profile(tmp_path):
-    existing = "[profile PRIMARY]\n  [profile OTHER]\n  region = eu-west-1\n"
-    body = build_aws_config(["PRIMARY"], existing)
-    parsed = _parsed_config(tmp_path, body)["profiles"]
-    assert parsed == {
-        "PRIMARY": {"credential_process": """sh -c 'cat "$HOME/.aws/creds/PRIMARY.json"'"""},
-        "OTHER": {"region": "eu-west-1"},
-    }
-    assert build_aws_config(["PRIMARY"], body) == body
-
-
-@pytest.mark.parametrize("existing", ["", "# comment", "[profile PRIMARY]", "[profile PRIMARY]\n"])
-def test_build_aws_config_handles_missing_final_newline(tmp_path, existing):
-    body = build_aws_config(["PRIMARY"], existing)
-    assert _parsed_config(tmp_path, body)["profiles"]["PRIMARY"]["credential_process"]
-    assert body.startswith(existing)
-
-
-def test_build_aws_config_preserves_exact_existing_process(tmp_path):
-    existing = build_aws_config(["PRIMARY"])
-    assert build_aws_config(["PRIMARY"], existing) == existing
-    body = build_aws_config(["PRIMARY"], existing, region="us-west-2")
-    assert _parsed_config(tmp_path, body)["profiles"]["PRIMARY"]["region"] == "us-west-2"
-    assert body.count("credential_process") == 1
-
-
-@pytest.mark.parametrize("header", ["default", "profile default", 'profile "default"'])
-def test_build_aws_config_supports_default_profile(tmp_path, header):
-    body = build_aws_config(["default"], f"[{header}]\noutput=json\n")
-    assert _parsed_config(tmp_path, body)["profiles"]["default"] == {
-        "credential_process": """sh -c 'cat "$HOME/.aws/creds/default.json"'""",
-        "output": "json",
-    }
-
-
-@pytest.mark.parametrize(
-    "setting",
-    [
-        "aws_access_key_id",
-        "aws_secret_access_key",
-        "aws_session_token",
-        "aws_security_token",
-        "aws_account_id",
-        "role_arn",
-        "source_profile",
-        "credential_source",
-        "web_identity_token_file",
-        "role_session_name",
-        "external_id",
-        "mfa_serial",
-        "duration_seconds",
-        "sso_session",
-        "sso_start_url",
-        "sso_region",
-        "sso_account_id",
-        "sso_role_name",
-        "login_session",
-        "credential_process",
-    ],
-)
-@pytest.mark.parametrize("value", ["DO_NOT_LOG_THIS_VALUE", ""])
-def test_build_aws_config_rejects_selected_credential_settings_with_redacted_errors(setting, value):
-    existing = f"[profile PRIMARY]\n{setting.upper()} = {value}\n"
-    with pytest.raises(CredentialError, match="conflicting credential settings") as exc:
-        build_aws_config(["PRIMARY"], existing)
-    assert "DO_NOT_LOG_THIS_VALUE" not in "".join(traceback.format_exception(exc.value))
-
-
-@pytest.mark.parametrize(
-    "existing",
-    [
-        "[DEFAULT]\naws_secret_access_key=DO_NOT_LOG_THIS_VALUE\n",
-        '[profile "PRIMARY"]\ncredential_process=DO_NOT_LOG_THIS_VALUE\n',
-        "[profile PRIMARY]\n[profile 'PRIMARY']\n",
-        "[default]\n[profile default]\n",
-    ],
-)
-def test_build_aws_config_rejects_inherited_or_aliased_conflicts(existing):
-    with pytest.raises(CredentialError) as exc:
-        build_aws_config(["PRIMARY", "default"], existing)
-    assert "DO_NOT_LOG_THIS_VALUE" not in "".join(traceback.format_exception(exc.value))
-
-
-@pytest.mark.parametrize(
-    "existing",
-    [
-        "DO_NOT_LOG_THIS_VALUE",
-        "[broken\nDO_NOT_LOG_THIS_VALUE",
-        "[profile PRIMARY]\nkey=DO_NOT_LOG_THIS_VALUE\nkey=duplicate\n",
-        "[PRIMARY]\n[PRIMARY]\nsecret=DO_NOT_LOG_THIS_VALUE\n",
-    ],
-)
-def test_ini_parse_errors_do_not_disclose_file_contents(existing):
-    for operation in (build_aws_config, check_static_profiles):
-        with pytest.raises(CredentialError, match="Cannot parse AWS") as exc:
-            operation(["PRIMARY"], existing)
-        assert "DO_NOT_LOG_THIS_VALUE" not in "".join(traceback.format_exception(exc.value))
-
-
-def test_build_aws_config_refuses_ambiguous_multiline_header():
-    existing = "[profile OTHER]\ns3=\n  [profile PRIMARY]\n[profile PRIMARY]\n"
-    with pytest.raises(CredentialError, match="unambiguously"):
-        build_aws_config(["PRIMARY"], existing)
-
-
-@pytest.mark.parametrize("region", ["", "us-east-1\n", "x\naws_access_key_id=secret", "x y"])
-def test_build_aws_config_rejects_region_injection(region):
-    with pytest.raises(ValueError, match="Invalid AWS region"):
-        build_aws_config(["PRIMARY"], region=region)
-
-
-@pytest.mark.parametrize(
-    "contents", ["", "region=us-east-1\n", "aws_access_key_id=STATIC_SECRET\n"]
-)
-@pytest.mark.parametrize("tag", ["PRIMARY", "default"])
-def test_check_static_profiles_rejects_any_selected_section(tag, contents):
-    with pytest.raises(CredentialError, match="selected profile") as exc:
-        check_static_profiles([tag], f"[{tag}]\n{contents}")
-    assert "STATIC_SECRET" not in str(exc.value)
-
-
-def test_check_static_profiles_allows_unrelated_profiles():
-    existing = "[OTHER]\naws_access_key_id=KEEP_ME\n[primary]\naws_secret_access_key=KEEP_ME\n"
-    assert check_static_profiles(["PRIMARY"], existing) is None
-    assert check_static_profiles(["PRIMARY"], "") is None
-    assert check_static_profiles([], existing) is None
-
-
-def test_process_snapshot_fetches_deferred_credentials_before_validating_expiry():
-    expiry = datetime.now(timezone.utc) + timedelta(hours=1)
-    refresh = MagicMock(return_value=_metadata("FRESH", expiry))
-    creds = DeferredRefreshableCredentials(refresh, "test")
-    assert creds._expiry_time is None
-    result = session_to_credential_process(_session_with_credentials(creds))
-    assert result["AccessKeyId"] == "FRESH_KEY"
-    assert result["Expiration"] == expiry.isoformat()
-    refresh.assert_called_once()
-
-
-def test_process_snapshot_reads_keys_and_expiry_after_a_forced_refresh(monkeypatch):
-    old_expiry = datetime.now(timezone.utc) + timedelta(hours=1)
-    new_expiry = old_expiry + timedelta(hours=1)
-    creds = _refreshable_credentials("OLD", old_expiry, lambda: _metadata("NEW", new_expiry))
-    session = _session_with_credentials(creds)
-    original = creds.get_frozen_credentials
-
-    def freeze_then_refresh():
-        frozen = original()
-        with patch.object(creds, "get_frozen_credentials", original):
-            session_to_env_credentials(session)
-        return frozen
-
-    monkeypatch.setattr(creds, "get_frozen_credentials", freeze_then_refresh)
-    assert session_to_credential_process(session) == {
-        "Version": 1,
-        "AccessKeyId": "NEW_KEY",
-        "SecretAccessKey": "NEW_SECRET",
-        "SessionToken": "NEW_TOKEN",
-        "Expiration": new_expiry.isoformat(),
-    }
-
-
-def test_process_snapshot_waits_for_concurrent_forced_refresh(monkeypatch):
-    old_expiry = datetime.now(timezone.utc) + timedelta(hours=1)
-    new_expiry = old_expiry + timedelta(hours=1)
-    creds = _refreshable_credentials("OLD", old_expiry, lambda: _metadata("NEW", new_expiry))
-    session = _session_with_credentials(creds)
-    updated = Event()
-    release = Event()
-    snapshot_started = Event()
-    snapshot_finished = Event()
-    original_set = creds._set_from_data
-    original_freeze = creds.get_frozen_credentials
-
-    def pause_before_frozen_credentials(data):
-        original_set(data)
-        updated.set()
-        assert release.wait(5)
-
-    def freeze():
-        snapshot_started.set()
-        return original_freeze()
-
-    def snapshot():
-        try:
-            return session_to_credential_process(session)
-        finally:
-            snapshot_finished.set()
-
-    monkeypatch.setattr(creds, "_set_from_data", pause_before_frozen_credentials)
-    monkeypatch.setattr(creds, "get_frozen_credentials", freeze)
-    with ThreadPoolExecutor(max_workers=2) as executor:
-        env_result = executor.submit(session_to_env_credentials, session)
-        try:
-            assert updated.wait(5)
-            process_result = executor.submit(snapshot)
-            assert snapshot_started.wait(5)
-            assert not snapshot_finished.wait(0.1)
-        finally:
-            release.set()
-        assert env_result.result(timeout=5)["AWS_ACCESS_KEY_ID"] == "NEW_KEY"
-        result = process_result.result(timeout=5)
-    assert result["AccessKeyId"] == "NEW_KEY"
-    assert result["SecretAccessKey"] == "NEW_SECRET"
-    assert result["SessionToken"] == "NEW_TOKEN"
-    assert result["Expiration"] == new_expiry.isoformat()
-
-
-@pytest.mark.parametrize("kind", ["missing", "naive", "expired", "malformed"])
-def test_process_snapshot_rejects_invalid_real_credentials(kind):
-    expiry = datetime.now(timezone.utc) + timedelta(hours=1)
-    if kind == "missing":
-        creds = Credentials("STATIC_KEY", "STATIC_SECRET", "STATIC_TOKEN")
-    else:
-        returned_expiry = {
-            "naive": expiry.replace(tzinfo=None).isoformat(),
-            "expired": (expiry - timedelta(hours=2)).isoformat(),
-            "malformed": "not-a-date",
-        }[kind]
-        metadata = {**_metadata("BAD", expiry), "expiry_time": returned_expiry}
-        creds = DeferredRefreshableCredentials(lambda: metadata, "test")
-    with pytest.raises(CredentialError):
-        session_to_credential_process(_session_with_credentials(creds))
-
-
-@pytest.mark.parametrize("kind", ["naive", "expired", "missing"])
-def test_process_snapshot_rejects_invalid_cached_expiry(kind):
-    expiry = datetime.now(timezone.utc) + timedelta(hours=1)
-    if kind == "naive":
-        expiry = expiry.replace(tzinfo=None)
-    elif kind == "expired":
-        expiry -= timedelta(hours=2)
-    else:
-        expiry = None
-    creds = _refreshable_credentials("BAD", expiry)
-    if kind == "expired":
-        # Model a credential provider that returned an expired cached snapshot.
-        creds._advisory_refresh_timeout = -7200
-    with pytest.raises(CredentialError):
-        session_to_credential_process(_session_with_credentials(creds))
-
-
-@pytest.mark.parametrize(
-    "error",
-    [
-        ClientError({"Error": {"Code": "AccessDenied", "Message": "denied"}}, "AssumeRole"),
-        NoCredentialsError(),
-    ],
-)
-@pytest.mark.parametrize("failure_at", ["session", "refresh"])
-def test_env_snapshot_preserves_native_retrieval_errors(error, failure_at):
-    session = MagicMock()
-    if failure_at == "session":
-        session.get_credentials.side_effect = error
-    else:
-        session.get_credentials.return_value = DeferredRefreshableCredentials(
-            MagicMock(side_effect=error), "test"
-        )
-    with pytest.raises(type(error)) as exc:
-        session_to_env_credentials(session)
-    assert exc.value is error
-
-
-@pytest.mark.parametrize(
-    "error",
-    [
-        ClientError({"Error": {"Code": "AccessDenied", "Message": "denied"}}, "AssumeRole"),
-        NoCredentialsError(),
-    ],
-)
-def test_process_snapshot_preserves_retrieval_failure_before_expiry_validation(error):
-    refresh = MagicMock(side_effect=error)
-    creds = DeferredRefreshableCredentials(refresh, "test")
-    with pytest.raises(CredentialError, match="Failed to retrieve") as exc:
-        session_to_credential_process(_session_with_credentials(creds))
-    assert exc.value.__cause__ is error
-    assert creds._expiry_time is None
-
-
-def test_regional_session_resolves_lazy_ambient_credentials_once():
-    parent = boto3.Session(region_name="us-east-1")
-    assert parent._session._credentials is None
-    regional = create_regional_session(parent, "eu-west-1")
-    assert regional.get_credentials() is parent.get_credentials()
-    assert regional.get_credentials().get_frozen_credentials().access_key == "HOST_TEST_KEY"
-
-
-@pytest.fixture
-def fake_sts(monkeypatch):
-    calls = []
-    signers = []
-
-    def call(client, operation, params):
-        assert operation == "AssumeRole"
-        parent = client._request_signer._credentials
-        frozen = parent.get_frozen_credentials()
-        calls.append((params, frozen.access_key))
-        signers.append(parent)
-        generation = len(calls)
-        return {
-            "Credentials": {
-                "AccessKeyId": f"ROLE_{generation}_KEY",
-                "SecretAccessKey": f"ROLE_{generation}_SECRET",
-                "SessionToken": f"ROLE_{generation}_TOKEN",
-                "Expiration": datetime.now(timezone.utc) + timedelta(hours=1),
-            }
-        }
-
-    monkeypatch.setattr(BaseClient, "_make_api_call", call)
-    return calls, signers
-
-
-@pytest.mark.parametrize("role", [None, ORG_ACCESS_ROLE, "service/TaskRole"])
-def test_refreshable_managed_chain_preserves_role_order_and_neutral_names(fake_sts, role):
-    calls, _ = fake_sts
-    provider = CredentialProvider()
-    session = provider.get_chained_session_for_account(
-        "111122223333", role, "app-session-opaque", "eu-west-1"
-    )
-    assert isinstance(session.get_credentials(), DeferredRefreshableCredentials)
-    assert calls == []
-    result = session_to_credential_process(session)
-    assert session.region_name == "eu-west-1"
-    expected_roles = [ORG_ACCESS_ROLE] + ([role] if role not in (None, ORG_ACCESS_ROLE) else [])
-    assert [params["RoleArn"] for params, _ in calls] == [
-        f"arn:aws:iam::111122223333:role/{name}" for name in expected_roles
-    ]
-    assert [parent for _, parent in calls] == ["HOST_TEST_KEY"] + (
-        ["ROLE_1_KEY"] if len(expected_roles) == 2 else []
-    )
-    assert calls[-1][0]["RoleSessionName"] == "app-session-opaque"
-    if len(expected_roles) == 2:
-        assert calls[0][0]["RoleSessionName"] == "app-session-223333"
-    assert result["AccessKeyId"] == f"ROLE_{len(expected_roles)}_KEY"
-
-
-def test_direct_session_api_keeps_single_hop_for_managed_accounts(fake_sts):
-    calls, _ = fake_sts
-    session = CredentialProvider().get_session_for_account(
-        "111122223333", "TaskRole", "app-session"
-    )
-    session_to_credential_process(session)
-    assert len(calls) == 1
-    assert calls[0] == (
-        {
-            "RoleArn": "arn:aws:iam::111122223333:role/TaskRole",
-            "RoleSessionName": "app-session",
-        },
-        "HOST_TEST_KEY",
-    )
-
-
-def test_refreshable_managed_chain_renews_host_and_both_role_hops(fake_sts):
-    calls, signers = fake_sts
-    expiry = datetime.now(timezone.utc) + timedelta(hours=1)
-    host = _refreshable_credentials("HOST_OLD", expiry, lambda: _metadata("HOST_NEW", expiry))
-    provider = CredentialProvider(_session_with_credentials(host))
-    session = provider.get_chained_session_for_account("111122223333", "TaskRole", "app-session")
-    first = session_to_credential_process(session)
-    assert first["AccessKeyId"] == "ROLE_2_KEY"
-    expired = datetime.now(timezone.utc) - timedelta(seconds=1)
-    for creds in [*signers, session.get_credentials()]:
-        creds._expiry_time = expired
-    second = session_to_credential_process(session)
-    assert second["AccessKeyId"] == "ROLE_4_KEY"
-    assert [parent for _, parent in calls] == [
-        "HOST_OLD_KEY",
-        "ROLE_1_KEY",
-        "HOST_NEW_KEY",
-        "ROLE_3_KEY",
-    ]
-    assert [params["RoleArn"] for params, _ in calls[:2]] == [
-        params["RoleArn"] for params, _ in calls[2:]
-    ]
-
-
-def test_mint_credentials_returns_only_json_files_and_earliest_expiry(monkeypatch, tmp_path):
-    expiry = datetime.now(timezone.utc) + timedelta(hours=1)
-    sessions = [
-        _session_with_credentials(_refreshable_credentials("PRIMARY", expiry + timedelta(hours=1))),
-        _session_with_credentials(_refreshable_credentials("SECONDARY", expiry)),
-    ]
-    provider = CredentialProvider()
-    get_session = MagicMock(side_effect=sessions)
-    monkeypatch.setattr(provider, "get_chained_session_for_account", get_session)
-    before = set(tmp_path.iterdir())
-    files, expires_at = mint_credentials(
-        provider,
-        MappingProxyType({"PRIMARY": "111122223333", "SECONDARY": "444455556666"}),
-        "TaskRole",
-        "app-session",
-    )
-    assert set(files) == {"PRIMARY.json", "SECONDARY.json"}
-    assert expires_at == expiry
-    assert json.loads(files["PRIMARY.json"])["AccessKeyId"] == "PRIMARY_KEY"
-    assert json.loads(files["SECONDARY.json"])["Expiration"] == expiry.isoformat()
-    assert get_session.call_args_list[0].args == ("111122223333", "TaskRole", "app-session")
-    assert get_session.call_args_list[1].args == ("444455556666", "TaskRole", "app-session")
-    assert set(tmp_path.iterdir()) == before
-
-
-def test_mint_credentials_uses_the_real_managed_chain(fake_sts):
-    calls, _ = fake_sts
-    files, expiry = mint_credentials(
-        CredentialProvider(), {"PRIMARY": "111122223333"}, "TaskRole", "app-session"
-    )
-    assert len(calls) == 2
-    assert json.loads(files["PRIMARY.json"])["AccessKeyId"] == "ROLE_2_KEY"
-    assert datetime.fromisoformat(json.loads(files["PRIMARY.json"])["Expiration"]) == expiry
-
-
-def test_mint_credentials_copies_mapping_before_cloud_calls(monkeypatch):
-    accounts = {"PRIMARY": "111122223333"}
-    provider = CredentialProvider()
-    expiry = datetime.now(timezone.utc) + timedelta(hours=1)
-
-    def get_session(account_id, role_name, session_name):
-        accounts["PRIMARY"] = "999988887777"
-        accounts["SECONDARY"] = "444455556666"
-        assert account_id == "111122223333"
-        return _session_with_credentials(_refreshable_credentials("ORIGINAL", expiry))
-
-    monkeypatch.setattr(provider, "get_chained_session_for_account", get_session)
-    files, _ = mint_credentials(provider, accounts, "TaskRole", "app-session")
-    assert set(files) == {"PRIMARY.json"}
-
-
-@pytest.mark.parametrize(
-    "accounts, session_name",
-    [
-        ({}, "app-session"),
-        ({"PRIMARY": "111122223333", "../bad": "444455556666"}, "app-session"),
-        ({"PRIMARY": "111122223333"}, "bad-name"),
-    ],
-)
-def test_mint_credentials_validates_before_any_cloud_call(accounts, session_name):
-    provider = MagicMock()
-    with pytest.raises((CredentialError, ValueError)):
-        mint_credentials(provider, accounts, "TaskRole", session_name)
-    provider.get_chained_session_for_account.assert_not_called()
-
-
-def test_mint_credentials_rejects_insufficient_lifetime_after_all_snapshots(monkeypatch):
-    provider = MagicMock()
-    expiry = datetime.now(timezone.utc) + timedelta(seconds=30)
-    provider.get_chained_session_for_account.return_value = _session_with_credentials(
-        _refreshable_credentials("SHORT", expiry)
-    )
-    # Keep the real frozen object without refreshing this deliberately short session.
-    creds = provider.get_chained_session_for_account.return_value.get_credentials()
-    assert isinstance(creds, RefreshableCredentials)
-    creds._advisory_refresh_timeout = 0
-    with pytest.raises(CredentialError, match="minimum refresh sleep"):
-        mint_credentials(provider, {"PRIMARY": "111122223333"}, "TaskRole", "app-session")
-
-
-def test_mint_credentials_does_not_return_partial_files_after_failure():
-    provider = MagicMock()
-    expiry = datetime.now(timezone.utc) + timedelta(hours=1)
-    provider.get_chained_session_for_account.side_effect = [
-        _session_with_credentials(_refreshable_credentials("GOOD", expiry)),
-        RuntimeError("second account unavailable"),
-    ]
-    with pytest.raises(RuntimeError, match="second account unavailable"):
-        mint_credentials(
-            provider,
-            {"PRIMARY": "111122223333", "SECONDARY": "444455556666"},
-            "TaskRole",
-            "app-session",
-        )
+    await started.wait()
+    task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    sleep.assert_awaited_once()
+    assert mint.await_count == (cancel_during == "mint")
+    log.warning.assert_not_called()
