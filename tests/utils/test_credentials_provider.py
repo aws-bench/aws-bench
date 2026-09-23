@@ -98,42 +98,6 @@ def test_sts_property_creates_fresh_client_each_time():
     assert sts2 is mock_sts_2
 
 
-# ── assume_role ──
-
-
-def test_assume_role_returns_credentials():
-    """Returns credentials dict from STS assume_role response."""
-    mock_session = MagicMock()
-    mock_sts = mock_session.client.return_value
-    mock_sts.assume_role.return_value = {
-        "Credentials": {
-            "AccessKeyId": "AKIA_TEST",
-            "SecretAccessKey": "SECRET_TEST",
-            "SessionToken": "TOKEN_TEST",
-        }
-    }
-    provider = CredentialProvider(session=mock_session)
-    creds = provider.assume_role("111111111111", "TestRole", "app-test-session")
-
-    assert creds["AWS_ACCESS_KEY_ID"] == "AKIA_TEST"
-    assert creds["AWS_SECRET_ACCESS_KEY"] == "SECRET_TEST"
-    assert creds["AWS_SESSION_TOKEN"] == "TOKEN_TEST"
-
-
-def test_assume_role_truncates_session_name_to_64_chars():
-    """Truncates session name to 64 characters for AWS limit."""
-    mock_session = MagicMock()
-    mock_sts = mock_session.client.return_value
-    mock_sts.assume_role.return_value = {
-        "Credentials": {"AccessKeyId": "AK", "SecretAccessKey": "SK", "SessionToken": "ST"}
-    }
-    provider = CredentialProvider(session=mock_session)
-    provider.assume_role("111111111111", "TestRole", "app-" + "a" * 100)
-
-    call_kwargs = mock_sts.assume_role.call_args[1]
-    assert len(call_kwargs["RoleSessionName"]) == 64
-
-
 # ── _create_refreshable_session ──
 
 
@@ -253,136 +217,6 @@ def test_get_session_for_account_returns_session(mock_create_session):
     mock_create_session.assert_called_once_with(
         mock_session, "arn:aws:iam::111111111111:role/TestRole", "app-sess", "us-east-1"
     )
-
-
-# ── chain_assume_role ──
-
-
-@patch("aws_bench.utils.credentials_provider.boto3.Session")
-def test_chain_assume_role_without_role_returns_org_creds(mock_session_cls):
-    """Without role_name, returns org access role credentials (single hop)."""
-    mock_session = MagicMock()
-    mock_sts = mock_session.client.return_value
-    mock_sts.assume_role.return_value = {
-        "Credentials": {
-            "AccessKeyId": "ORG_AK",
-            "SecretAccessKey": "ORG_SK",
-            "SessionToken": "ORG_ST",
-        }
-    }
-    provider = CredentialProvider(session=mock_session)
-    creds = provider.chain_assume_role(account_id="111111111111", session_name="app-sess")
-
-    assert creds["AWS_ACCESS_KEY_ID"] == "ORG_AK"
-    mock_sts.assume_role.assert_called_once()  # only hop 1
-
-
-@patch("aws_bench.utils.credentials_provider.boto3.Session")
-def test_chain_assume_role_with_org_role_skips_second_hop(mock_session_cls):
-    """Passing ORG_ACCESS_ROLE explicitly still does a single hop."""
-    from aws_bench.account_management.constants import ORG_ACCESS_ROLE
-
-    mock_session = MagicMock()
-    mock_sts = mock_session.client.return_value
-    mock_sts.assume_role.return_value = {
-        "Credentials": {
-            "AccessKeyId": "ORG_AK",
-            "SecretAccessKey": "ORG_SK",
-            "SessionToken": "ORG_ST",
-        }
-    }
-    provider = CredentialProvider(session=mock_session)
-    creds = provider.chain_assume_role(
-        account_id="111111111111", session_name="app-sess", role_name=ORG_ACCESS_ROLE
-    )
-
-    assert creds["AWS_ACCESS_KEY_ID"] == "ORG_AK"
-    mock_sts.assume_role.assert_called_once()  # only hop 1
-    assert mock_sts.assume_role.call_args.kwargs["RoleSessionName"] == "app-sess"
-
-
-@patch("aws_bench.utils.credentials_provider.boto3.Session")
-def test_chain_assume_role_with_role_performs_two_hops(mock_session_cls):
-    """With role_name, chains through org role then assumes the target role."""
-    mock_session = MagicMock()
-    mock_sts = mock_session.client.return_value
-    mock_sts.assume_role.return_value = {
-        "Credentials": {
-            "AccessKeyId": "ORG_AK",
-            "SecretAccessKey": "ORG_SK",
-            "SessionToken": "ORG_ST",
-        }
-    }
-
-    mock_member_sts = MagicMock()
-    mock_member_sts.assume_role.return_value = {
-        "Credentials": {
-            "AccessKeyId": "TASK_AK",
-            "SecretAccessKey": "TASK_SK",
-            "SessionToken": "TASK_ST",
-        }
-    }
-    mock_session_cls.return_value.client.return_value = mock_member_sts
-
-    provider = CredentialProvider(session=mock_session)
-    creds = provider.chain_assume_role(
-        account_id="111111111111", session_name="app-sess", role_name="TaskRole"
-    )
-
-    assert creds["AWS_ACCESS_KEY_ID"] == "TASK_AK"
-    # Hop 1: org role via the provider's own STS
-    mock_sts.assume_role.assert_called_once()
-    # Hop 2: target role via the member session STS
-    mock_member_sts.assume_role.assert_called_once()
-    assert "TaskRole" in mock_member_sts.assume_role.call_args[1]["RoleArn"]
-
-
-@patch("aws_bench.utils.credentials_provider.boto3.Session")
-def test_chain_assume_role_first_hop_failure(mock_session_cls):
-    """First hop failure is propagated with error logging."""
-    from botocore.exceptions import ClientError
-
-    mock_session = MagicMock()
-    mock_sts = mock_session.client.return_value
-    error = ClientError({"Error": {"Code": "AccessDenied", "Message": "denied"}}, "AssumeRole")
-    mock_sts.assume_role.side_effect = error
-
-    provider = CredentialProvider(session=mock_session)
-
-    with pytest.raises(ClientError):
-        provider.chain_assume_role(
-            account_id="111111111111", session_name="app-sess", role_name="TaskRole"
-        )
-
-
-@patch("aws_bench.utils.credentials_provider.boto3.Session")
-def test_chain_assume_role_second_hop_failure(mock_session_cls):
-    """Second hop failure is propagated with error logging."""
-    from botocore.exceptions import ClientError
-
-    mock_session = MagicMock()
-    mock_sts = mock_session.client.return_value
-    # First hop succeeds
-    mock_sts.assume_role.return_value = {
-        "Credentials": {
-            "AccessKeyId": "ORG_AK",
-            "SecretAccessKey": "ORG_SK",
-            "SessionToken": "ORG_ST",
-        }
-    }
-
-    # Second hop fails
-    mock_member_sts = MagicMock()
-    error = ClientError({"Error": {"Code": "AccessDenied", "Message": "denied"}}, "AssumeRole")
-    mock_member_sts.assume_role.side_effect = error
-    mock_session_cls.return_value.client.return_value = mock_member_sts
-
-    provider = CredentialProvider(session=mock_session)
-
-    with pytest.raises(ClientError):
-        provider.chain_assume_role(
-            account_id="111111111111", session_name="app-sess", role_name="TaskRole"
-        )
 
 
 # ── create_regional_session ──
@@ -814,18 +648,14 @@ def test_enforce_session_name_truncates_to_sts_limit():
     assert result.startswith("app-")
 
 
-def test_assume_role_enforces_session_name_convention():
-    """The public assume_role path rejects a non-conforming name before calling STS.
-
-    Guards the choke point: a future caller passing a bad RoleSessionName fails
-    fast rather than writing an unattributable CloudTrail entry.
-    """
+def test_create_refreshable_session_enforces_session_name_convention():
+    """Reject a non-conforming session name before calling STS."""
     mock_session = MagicMock()
-    provider = CredentialProvider(session=mock_session)
     with pytest.raises(ValueError, match="must start with 'app-'"):
-        provider.assume_role("123456789012", "SomeRole", "bad-session-name")
-    # STS must never be invoked with an invalid session name.
-    mock_session.client.return_value.assume_role.assert_not_called()
+        _create_refreshable_session(
+            mock_session, "arn:aws:iam::123456789012:role/SomeRole", "bad-session-name"
+        )
+    mock_session.client.assert_not_called()
 
 
 # ── get_chained_session_for_account ──

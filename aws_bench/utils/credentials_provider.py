@@ -198,15 +198,6 @@ async def run_credential_refresh_loop(
             sleep_for = CRED_REFRESH_RETRY_SEC
 
 
-def assumed_credentials_dict_to_credentials_env(creds: dict[str, str]) -> dict[str, str]:
-    """Convert "sts.assume_role"-type credentials to env vars."""
-    return {
-        "AWS_ACCESS_KEY_ID": creds["AccessKeyId"],
-        "AWS_SECRET_ACCESS_KEY": creds["SecretAccessKey"],
-        "AWS_SESSION_TOKEN": creds["SessionToken"],
-    }
-
-
 def _create_refreshable_session(
     parent_session: boto3.Session,
     role_arn: str,
@@ -324,34 +315,6 @@ class CredentialProvider:
             raise CredentialError("Failed to resolve caller account ID")
         return account_id
 
-    def assume_role(
-        self,
-        account_id: str,
-        role_name: str,
-        session_name: str,
-        duration_seconds: int = 3600,
-    ) -> dict[str, str]:
-        """Assume a role in a member account and returns credentials.
-
-        Args:
-            account_id: The target AWS account ID.
-            role_name: IAM role name to assume.
-            session_name: Session name for CloudTrail auditing.
-            duration_seconds: How long the credentials are valid.
-
-        Returns:
-            Dict with AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_SESSION_TOKEN.
-        """
-        role_arn = f"arn:aws:iam::{account_id}:role/{role_name}"
-        logger.debug(f"Assuming role {role_arn} (session={session_name}).")
-
-        response = self._sts.assume_role(
-            RoleArn=role_arn,
-            RoleSessionName=enforce_session_name(session_name),
-            DurationSeconds=duration_seconds,
-        )
-        return assumed_credentials_dict_to_credentials_env(response["Credentials"])
-
     def _preexisting_role(self, account_id: str, role_name: str | None) -> str:
         """Resolve the direct role used for an externally owned account.
 
@@ -387,104 +350,6 @@ class CredentialProvider:
         arn = str(identity.get("Arn", ""))
         marker = f"arn:aws:sts::{account_id}:assumed-role/{role_name}/"
         return arn.startswith(marker)
-
-    def chain_assume_role(
-        self,
-        account_id: str,
-        session_name: str,
-        role_name: str | None = None,
-        duration_seconds: int = 3600,
-    ) -> dict[str, str]:
-        """Assume into a member account, always via the org access role.
-
-        Hop 1 always assumes ORG_ACCESS_ROLE in the target account; this hop
-        is never skipped. If ``role_name`` is given and differs from
-        ORG_ACCESS_ROLE, hop 2 chains from that session into ``role_name``.
-        Otherwise the hop-1 credentials are returned directly.
-
-        Args:
-            account_id: The target AWS account ID.
-            role_name: IAM role name for the optional second hop. When unset
-                or equal to ORG_ACCESS_ROLE, only the first hop runs.
-            session_name: Session name for CloudTrail auditing.
-            duration_seconds: How long the credentials are valid.
-
-        Returns:
-            Dict with AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_SESSION_TOKEN.
-        """
-        parent_session = self._session
-        preexisting = active_account_config()
-        if preexisting is not None:
-            config, _ = preexisting
-            target_role = self._preexisting_role(account_id, role_name)
-            # Already running as the target role — self-assume would fail, so reuse it.
-            if self._ambient_is_target_role(account_id, target_role):
-                return session_to_env_credentials(self._session)
-            if target_role != config.runner_role and not self._ambient_is_target_role(
-                account_id, config.runner_role
-            ):
-                runner_creds = self.assume_role(
-                    account_id,
-                    config.runner_role,
-                    build_session_name("session", account_id[-6:]),
-                    duration_seconds=duration_seconds,
-                )
-                parent_session = env_credentials_dict_to_session(runner_creds)
-            if parent_session is not self._session:
-                role_arn = f"arn:aws:iam::{account_id}:role/{target_role}"
-                response = build_client(parent_session, "sts").assume_role(
-                    RoleArn=role_arn,
-                    RoleSessionName=enforce_session_name(session_name),
-                    DurationSeconds=duration_seconds,
-                )
-                return assumed_credentials_dict_to_credentials_env(response["Credentials"])
-            return self.assume_role(
-                account_id,
-                target_role,
-                session_name,
-                duration_seconds=duration_seconds,
-            )
-
-        # Hop 1: always go through the org access role
-        hop1_session_name = (
-            session_name
-            if (not role_name or role_name == ORG_ACCESS_ROLE)
-            else build_session_name("session", account_id[-6:])
-        )
-        try:
-            org_creds = self.assume_role(
-                account_id,
-                ORG_ACCESS_ROLE,
-                hop1_session_name,
-                duration_seconds=duration_seconds,
-            )
-        except Exception as e:
-            logger.error(f"First hop: Failed to assume {ORG_ACCESS_ROLE} in {account_id}: {e}")
-            raise e
-
-        # Single-hop case: caller wants the org-access session itself, no chained role.
-        if not role_name or role_name == ORG_ACCESS_ROLE:
-            if not role_name:
-                logger.debug(f"Assuming {ORG_ACCESS_ROLE} as no role was specified for second hop.")
-            return org_creds
-
-        # Hop 2: from the member account session, assume the target role
-        member_sts = build_client(env_credentials_dict_to_session(org_creds), "sts")
-
-        role_arn = f"arn:aws:iam::{account_id}:role/{role_name}"
-        logger.debug(f"Chained assume: {role_arn} (session={session_name}).")
-
-        try:
-            response = member_sts.assume_role(
-                RoleArn=role_arn,
-                RoleSessionName=enforce_session_name(session_name),
-                DurationSeconds=duration_seconds,
-            )
-        except Exception as e:
-            logger.error(f"Second hop: Failed to assume {role_arn} in {account_id}: {e}")
-            raise e
-
-        return assumed_credentials_dict_to_credentials_env(response["Credentials"])
 
     def wait_for_role(
         self,
