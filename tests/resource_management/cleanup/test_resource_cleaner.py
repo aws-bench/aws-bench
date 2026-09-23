@@ -662,6 +662,8 @@ def test_is_service_managed_studio_stack_matches_name_and_arn():
     assert not is_service_managed_studio_stack(
         "arn:aws:cloudformation:us-east-1:123456789012:stack/my-app/uuid"
     )
+
+
 # -- nodegroup-first dependency barrier --
 
 
