@@ -30,12 +30,12 @@ from harbor.models.agent.context import AgentContext
 
 _DEFAULT_AWS_REGION = "us-east-2"
 
-# --- aws-mcp (Agent Toolkit) proxy hardening -------------------------------
+# --- aws-mcp proxy hardening ------------------------------------------------
 #
-# The aws-mcp server is launched by the Agent Toolkit's MCP config as
-# ``uvx mcp-proxy-for-aws-cli@latest <endpoint> --skip-auth ...``. Left as
-# emitted by the base path (``command``/``args`` only), two harness bugs keep
-# Codex from ever using the toolkit:
+# The aws-mcp server is launched over stdio as
+# ``uvx mcp-proxy-for-aws-cli@latest <endpoint> --skip-auth ...``. Emitted by
+# the base path (``command``/``args`` only), two issues keep Codex from
+# reliably starting and using it:
 #
 #   1. Codex silently drops an *optional* MCP server whose startup exceeds a
 #      small default grace. ``uvx`` cold start for the proxy is 2-4s, so the
@@ -45,16 +45,14 @@ _DEFAULT_AWS_REGION = "us-east-2"
 #      drop, and a generous per-server ``startup_timeout_sec`` gives the cold
 #      start room to finish.
 #   2. Codex starts MCP servers with a minimal environment, so the proxy's
-#      boto3 does not inherit the shell's target-account creds/profile and
-#      falls back to IMDS -> the runner instance role -> ``AccessDenied``.
-#      ``env_vars`` forwards the AWS account/profile settings into the
-#      subprocess so ``run_script`` acts against the task's target account.
+#      boto3 does not inherit the shell's account creds/profile and falls back
+#      to IMDS -> the instance role -> ``AccessDenied``. ``env_vars`` forwards
+#      the AWS account/profile settings into the subprocess so the server acts
+#      against the intended account.
 #
-# The proxy package is additionally pinned to an exact version (rather than the
-# drifting ``@latest``) so a re-run reproduces the exact toolkit the original
-# codex ATK lanes ran. ``1.7.0`` is the version ``@latest`` resolved to for
-# every codex ATK lane on framework pin 8748fd26 (all ran 2026-09-15, after
-# 1.7.0's 11:20 UTC release, and 1.7.0 remains the newest published release).
+# The proxy package is additionally pinned to an exact version rather than the
+# drifting ``@latest`` so startup is reproducible and cannot silently adopt a
+# newer proxy release.
 _AWS_MCP_PROXY_PACKAGE = "mcp-proxy-for-aws-cli"
 _AWS_MCP_PROXY_PIN = f"{_AWS_MCP_PROXY_PACKAGE}==1.7.0"
 _MCP_OPTIONAL_STARTUP_GRACE_MS = 0
@@ -171,7 +169,7 @@ class Codex(_HarborCodex):
         """Pin the ``mcp-proxy-for-aws-cli`` package spec in ``args`` to an exact version.
 
         The aws-mcp server's args reference the proxy package, but the version
-        drifts because the Agent Toolkit's MCP config uses ``@latest``. This
+        drifts because the launching MCP config uses ``@latest``. This
         rewrites that spec to :data:`_AWS_MCP_PROXY_PIN`, matching the package
         whether it is unpinned (``mcp-proxy-for-aws-cli``), tagged
         (``...@latest``), or already ``==`` pinned. Only the package spec token
@@ -213,7 +211,7 @@ class Codex(_HarborCodex):
 
         This override renders ``command`` and ``args`` as separate keys and
         escapes every emitted value as a TOML basic string. It additionally
-        hardens the Agent Toolkit's aws-mcp proxy server so Codex actually keeps
+        hardens the uvx aws-mcp proxy server so Codex actually keeps
         and uses it (see the module-level notes on the two harness bugs):
 
         * ``mcp_optional_startup_grace_ms = 0`` is emitted once as a top-level
