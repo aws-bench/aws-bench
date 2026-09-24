@@ -393,9 +393,14 @@ class ResourceCleaner:
 
         Only stacks CCAPI already failed on are retried, and CDK bootstrap/toolkit
         infrastructure stacks (``CDKToolkit``, ``cdk-hnb659fds-*``) are never
-        touched. Callers pass only out-of-baseline resources (reset diffs against
-        the baseline snapshot), so a baseline stack never reaches this path.
-        Returns ``failures`` with any successfully deleted stack removed.
+        touched. A stack that lands in ``DELETE_FAILED`` is retried once with
+        ``RetainResources`` for the stuck logical IDs (e.g. a Studio stack's
+        ``ApplicationCloudWatchLoggingOption`` orphaned by an earlier app-first
+        delete — virtual once the application is gone; anything real a retained
+        resource leaves behind is re-detected by the re-verify). Callers pass only
+        out-of-baseline resources (reset diffs against the baseline snapshot), so a
+        baseline stack never reaches this path. Returns ``failures`` with any
+        successfully deleted stack removed.
         """
         stacks = [
             resource
@@ -411,13 +416,31 @@ class ResourceCleaner:
             stack_name = resource.identifier
             try:
                 client.delete_stack(StackName=stack_name)
-                waiter.wait(
-                    StackName=stack_name,
-                    WaiterConfig={
-                        "Delay": _STACK_DELETE_WAITER_DELAY,
-                        "MaxAttempts": _STACK_DELETE_WAITER_MAX_ATTEMPTS,
-                    },
-                )
+                try:
+                    waiter.wait(
+                        StackName=stack_name,
+                        WaiterConfig={
+                            "Delay": _STACK_DELETE_WAITER_DELAY,
+                            "MaxAttempts": _STACK_DELETE_WAITER_MAX_ATTEMPTS,
+                        },
+                    )
+                except WaiterError:
+                    retained = self._stack_delete_failed_logical_ids(client, stack_name)
+                    if not retained:
+                        raise
+                    logger.warning(
+                        "Stack '%s' hit DELETE_FAILED on %s; retrying with RetainResources",
+                        truncate_for_log(stack_name, LOG_TRUNCATE_SHORT),
+                        retained,
+                    )
+                    client.delete_stack(StackName=stack_name, RetainResources=retained)
+                    waiter.wait(
+                        StackName=stack_name,
+                        WaiterConfig={
+                            "Delay": _STACK_DELETE_WAITER_DELAY,
+                            "MaxAttempts": _STACK_DELETE_WAITER_MAX_ATTEMPTS,
+                        },
+                    )
             except (ClientError, WaiterError, BotoCoreError) as e:
                 logger.warning(
                     "Native DeleteStack fallback failed for stack '%s': %s",
@@ -428,6 +451,20 @@ class ResourceCleaner:
             logger.debug("Native DeleteStack fallback deleted stack '%s'", stack_name)
             del failures[resource]
         return failures
+
+    @staticmethod
+    def _stack_delete_failed_logical_ids(client, stack_name: str) -> list[str]:
+        """Logical IDs of the stack's resources currently in DELETE_FAILED."""
+        try:
+            resp = client.describe_stack_resources(StackName=stack_name)
+        except (ClientError, BotoCoreError) as e:
+            logger.debug("Could not read stack resources for '%s': %s", stack_name, e)
+            return []
+        return [
+            r["LogicalResourceId"]
+            for r in resp.get("StackResources", [])
+            if r.get("ResourceStatus") == DELETE_FAILED and r.get("LogicalResourceId")
+        ]
 
     @staticmethod
     def _log_failures(failures: dict[Resource, DeletionFailureEvent]) -> None:
