@@ -30,6 +30,44 @@ from harbor.models.agent.context import AgentContext
 
 _DEFAULT_AWS_REGION = "us-east-2"
 
+# --- aws-mcp (Agent Toolkit) proxy hardening -------------------------------
+#
+# The aws-mcp server is launched by the Agent Toolkit's MCP config as
+# ``uvx mcp-proxy-for-aws-cli@latest <endpoint> --skip-auth ...``. Left as
+# emitted by the base path (``command``/``args`` only), two harness bugs keep
+# Codex from ever using the toolkit:
+#
+#   1. Codex silently drops an *optional* MCP server whose startup exceeds a
+#      small default grace. ``uvx`` cold start for the proxy is 2-4s, so the
+#      server is frequently dropped before it registers and the tools never
+#      appear. ``mcp_optional_startup_grace_ms = 0`` (a top-level key, which
+#      MUST sit above every ``[mcp_servers.*]`` table) disables that early
+#      drop, and a generous per-server ``startup_timeout_sec`` gives the cold
+#      start room to finish.
+#   2. Codex starts MCP servers with a minimal environment, so the proxy's
+#      boto3 does not inherit the shell's target-account creds/profile and
+#      falls back to IMDS -> the runner instance role -> ``AccessDenied``.
+#      ``env_vars`` forwards the AWS account/profile settings into the
+#      subprocess so ``run_script`` acts against the task's target account.
+#
+# The proxy package is additionally pinned to an exact version (rather than the
+# drifting ``@latest``) so a re-run reproduces the exact toolkit the original
+# codex ATK lanes ran. ``1.7.0`` is the version ``@latest`` resolved to for
+# every codex ATK lane on framework pin 8748fd26 (all ran 2026-09-15, after
+# 1.7.0's 11:20 UTC release, and 1.7.0 remains the newest published release).
+_AWS_MCP_PROXY_PACKAGE = "mcp-proxy-for-aws-cli"
+_AWS_MCP_PROXY_PIN = f"{_AWS_MCP_PROXY_PACKAGE}==1.7.0"
+_MCP_OPTIONAL_STARTUP_GRACE_MS = 0
+_AWS_MCP_STARTUP_TIMEOUT_SEC = 120
+_AWS_MCP_ENV_VARS = (
+    "AWS_PROFILE",
+    "AWS_DEFAULT_PROFILE",
+    "AWS_REGION",
+    "AWS_DEFAULT_REGION",
+    "AWS_CONFIG_FILE",
+    "AWS_SHARED_CREDENTIALS_FILE",
+)
+
 # TOML basic strings must escape these two characters; every other printable
 # character is emitted verbatim. Control characters get their own escapes below.
 _TOML_SIMPLE_ESCAPES = {
@@ -128,6 +166,38 @@ class Codex(_HarborCodex):
             env={"CODEX_HOME": remote_codex_home},
         )
 
+    @staticmethod
+    def _pin_aws_mcp_proxy(args: list[str]) -> tuple[list[str], bool]:
+        """Pin the ``mcp-proxy-for-aws-cli`` package spec in ``args`` to an exact version.
+
+        The aws-mcp server's args reference the proxy package, but the version
+        drifts because the Agent Toolkit's MCP config uses ``@latest``. This
+        rewrites that spec to :data:`_AWS_MCP_PROXY_PIN`, matching the package
+        whether it is unpinned (``mcp-proxy-for-aws-cli``), tagged
+        (``...@latest``), or already ``==`` pinned. Only the package spec token
+        is rewritten; the endpoint URL and every flag are left untouched.
+
+        Args:
+            args: The stdio server's argument vector.
+
+        Returns:
+            ``(rewritten_args, found)`` where ``found`` is ``True`` iff a proxy
+            spec was present (i.e. this is the uvx aws-mcp proxy server).
+        """
+        rewritten: list[str] = []
+        found = False
+        for arg in args:
+            if (
+                arg == _AWS_MCP_PROXY_PACKAGE
+                or arg.startswith(f"{_AWS_MCP_PROXY_PACKAGE}@")
+                or arg.startswith(f"{_AWS_MCP_PROXY_PACKAGE}==")
+            ):
+                rewritten.append(_AWS_MCP_PROXY_PIN)
+                found = True
+            else:
+                rewritten.append(arg)
+        return rewritten, found
+
     def _build_register_mcp_servers_command(self) -> str | None:
         r"""Write MCP server config to ``$CODEX_HOME/config.toml`` with correct keys.
 
@@ -142,9 +212,19 @@ class Codex(_HarborCodex):
         value containing ``"`` or ``\\``.
 
         This override renders ``command`` and ``args`` as separate keys and
-        escapes every emitted value as a TOML basic string. ``MCPServerConfig``
-        exposes only ``name``/``transport``/``url``/``command``/``args`` — no env
-        or timeout field — so there is nothing further to render.
+        escapes every emitted value as a TOML basic string. It additionally
+        hardens the Agent Toolkit's aws-mcp proxy server so Codex actually keeps
+        and uses it (see the module-level notes on the two harness bugs):
+
+        * ``mcp_optional_startup_grace_ms = 0`` is emitted once as a top-level
+          key, *above* every ``[mcp_servers.*]`` table, so Codex does not drop a
+          server that is slow to start (uvx cold start is 2-4s).
+        * For the uvx aws-mcp proxy server (detected by its
+          ``mcp-proxy-for-aws-cli`` arg), the proxy is pinned to an exact
+          version, and ``startup_timeout_sec`` + ``env_vars`` are emitted so the
+          cold start has time to finish and the subprocess inherits the AWS
+          account/profile settings (``MCPServerConfig`` itself carries no
+          timeout/env field, so these are emitted here rather than modeled).
 
         Returns:
             A shell command appending the config, or ``None`` when no MCP servers
@@ -153,12 +233,20 @@ class Codex(_HarborCodex):
         if not self.mcp_servers:
             return None
         lines: list[str] = []
+        # Global key: must precede every [mcp_servers.*] table header below.
+        lines.append(f"mcp_optional_startup_grace_ms = {_MCP_OPTIONAL_STARTUP_GRACE_MS}")
+        lines.append("")
         for server in self.mcp_servers:
             lines.append(f"[mcp_servers.{server.name}]")
             if server.transport == "stdio":
                 lines.append(f"command = {_toml_basic_string(server.command or '')}")
-                rendered_args = ", ".join(_toml_basic_string(arg) for arg in server.args)
+                args, is_aws_mcp_proxy = self._pin_aws_mcp_proxy(list(server.args))
+                rendered_args = ", ".join(_toml_basic_string(arg) for arg in args)
                 lines.append(f"args = [{rendered_args}]")
+                if is_aws_mcp_proxy:
+                    lines.append(f"startup_timeout_sec = {_AWS_MCP_STARTUP_TIMEOUT_SEC}")
+                    rendered_env = ", ".join(_toml_basic_string(v) for v in _AWS_MCP_ENV_VARS)
+                    lines.append(f"env_vars = [{rendered_env}]")
             else:
                 lines.append(f"url = {_toml_basic_string(server.url or '')}")
             lines.append("")
