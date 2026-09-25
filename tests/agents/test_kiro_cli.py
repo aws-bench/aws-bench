@@ -168,6 +168,8 @@ class TestKiroCliRun:
         mcp_command = mcp_call.kwargs.get("command", "")
         assert "mcp.json" in mcp_command
         assert "test-server" in mcp_command
+        assert '"waitForReady": true' in mcp_command
+        assert "kiro-cli settings mcp.noInteractiveTimeout 120000" in mcp_command
 
     @pytest.mark.asyncio
     async def test_run_with_skills_dir(self, logs_dir: Path):
@@ -200,7 +202,9 @@ class TestKiroCliBuildMcpJson:
         server.args = ["index.js"]
 
         result = KiroCli._build_mcp_json([server])
-        assert result == {"my-server": {"command": "node", "args": ["index.js"]}}
+        assert result == {
+            "my-server": {"command": "node", "args": ["index.js"], "waitForReady": True}
+        }
 
     def test_builds_http_server(self):
         server = MagicMock()
@@ -209,7 +213,22 @@ class TestKiroCliBuildMcpJson:
         server.url = "http://localhost:3000"
 
         result = KiroCli._build_mcp_json([server])
-        assert result == {"remote": {"url": "http://localhost:3000"}}
+        assert result == {"remote": {"url": "http://localhost:3000", "waitForReady": True}}
+
+    def test_every_server_waits_for_ready(self):
+        stdio = MagicMock()
+        stdio.name = "local"
+        stdio.transport = "stdio"
+        stdio.command = "uvx"
+        stdio.args = ["example-mcp-server"]
+        http = MagicMock()
+        http.name = "remote"
+        http.transport = "streamable-http"
+        http.url = "http://localhost:3000"
+
+        result = KiroCli._build_mcp_json([stdio, http])
+        assert result is not None
+        assert all(entry["waitForReady"] is True for entry in result.values())
 
 
 class TestAgentEngineFlag:

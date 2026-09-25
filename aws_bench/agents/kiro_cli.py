@@ -54,6 +54,8 @@ _CONTAINER_SESSIONS_DIR = "~/.kiro/sessions"
 # kiro-cli installs into $HOME/.local/bin which is not on PATH for non-login
 # shells spawned by environment.exec.
 _PATH_PREFIX = 'export PATH="$HOME/.local/bin:$PATH"; '
+# How long (ms) v1 waits for MCP servers at startup; the ~30 s default is too short for cold uvx.
+_MCP_NO_INTERACTIVE_TIMEOUT_MS = 120_000
 
 
 class KiroCli(BaseInstalledAgent):
@@ -114,6 +116,8 @@ class KiroCli(BaseInstalledAgent):
                 }
             else:
                 entry = {"url": server.url}
+            # v3 otherwise starts the first turn before slow servers are connected
+            entry["waitForReady"] = True
             mcp_servers[server.name] = entry
         return mcp_servers
 
@@ -184,6 +188,8 @@ class KiroCli(BaseInstalledAgent):
                 environment,
                 command=(
                     f"mkdir -p ~/.kiro/settings && echo {escaped_mcp} > ~/.kiro/settings/mcp.json"
+                    f" && {_PATH_PREFIX}kiro-cli settings mcp.noInteractiveTimeout"
+                    f" {_MCP_NO_INTERACTIVE_TIMEOUT_MS}"
                 ),
                 env=env or None,
             )
