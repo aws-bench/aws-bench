@@ -62,7 +62,7 @@ A run does **not** tear anything down. When `aws-bench run` finishes, aws-bench 
 
 | Phase | Command | What happens | Typical duration |
 |-------|---------|--------------|------------------|
-| **Init** | `aws-bench env init` | Creates the Organization, OU, and test accounts; submits service-quota requests | ≤ 5 min (up to ~60 min if you opt to wait for quota approvals) |
+| **Init** | `aws-bench env init` | Creates the Organization, OU, and test accounts; enables declared regions and submits service-quota requests | Usually ≤ 5 min with regions already enabled; opt-in and quota approvals take longer |
 | **Setup** | `aws-bench env setup` | Builds scenario containers and deploys CDK stacks into the test accounts | 10–30 min |
 | **Run** | `aws-bench run` | Executes agent trials, runs verifiers, collects rewards | 30 min to ~6 h, depending on the size and complexity of the selected dataset |
 | **Cleanup** | `aws-bench env cleanup` | Removes deployed resources (keeps the accounts) | 5–180 min, depending on the resources deployed |
@@ -142,7 +142,7 @@ uv run aws-bench env cleanup --env-name awsbench-env -d aws-bench-quickstart
 
 If step 4 produces per-trial rewards (see [Checking results](#checking-results)), your environment is configured correctly.
 
-> **Note:** `env init` can take a while the first time because service-quota increases may need approval. `--wait-for-quotas` blocks until they're ready; without it, check status later with `aws-bench env show`.
+> **Note:** `env init` enables declared opt-in regions in managed accounts and waits up to 30 minutes per region before checking regional access. AWS enablement can take hours; rerun `env init` after a timeout to resume. The region SCP remains attached and permits opt-in only for declared regions. Pre-existing accounts must have their regions enabled externally. Service-quota increases may also need approval: `--wait-for-quotas` blocks until they're ready; without it, check status later with `aws-bench env show`.
 
 ### Example agent and model IDs
 

@@ -55,7 +55,7 @@ from aws_bench.utils.credentials_provider import (
     build_session_name,
     create_regional_session,
 )
-from aws_bench.utils.retry import is_fresh_account_transient
+from aws_bench.utils.retry import is_region_access_transient
 
 logger = get_logger(__name__)
 
@@ -264,7 +264,7 @@ class SnapshotManager:
 
     # Sequential per account+region, so it can afford a long convergence budget.
     @tenacity.retry(
-        retry=tenacity.retry_if_exception(is_fresh_account_transient),
+        retry=tenacity.retry_if_exception(is_region_access_transient),
         wait=tenacity.wait_exponential(multiplier=2, min=10, max=60) + tenacity.wait_random(0, 5),
         stop=tenacity.stop_after_delay(180),
         reraise=True,
@@ -272,8 +272,8 @@ class SnapshotManager:
     def _list_active_stacks(self, cfn: Any) -> list[dict[str, Any]]:
         """List active CloudFormation stacks (exclude deleted and nested stacks).
 
-        The snapshot's first AWS call, so a fresh account's unconverged subscription
-        surfaces here (see is_fresh_account_transient); the decorator retries it.
+        The snapshot's first AWS call, so subscription, regional authentication,
+        and SCP propagation failures surface here; the decorator retries them.
         """
         logger.debug("Listing CloudFormation stacks")
         stacks = []

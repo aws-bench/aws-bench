@@ -438,7 +438,7 @@ class OrganizationsClient:
         """Create a per-scenario SCP and attach it to each account.
 
         Idempotent — reuses existing policy by name, updates content if
-        regions changed, and skips accounts that already have it attached.
+        policy content changed, and skips accounts that already have it attached.
         """
         scp_name = f"{self.REGION_RESTRICTION_SCP_PREFIX}-{scenario_name}"
         self._enable_scp_policy_type()
@@ -454,7 +454,7 @@ class OrganizationsClient:
             current = self._client.describe_policy(PolicyId=policy_id)
             if json.loads(current["Policy"]["Content"]) != json.loads(desired_content):
                 self._client.update_policy(PolicyId=policy_id, Content=desired_content)
-                logger.info(f"Updated SCP '{scp_name}' with new regions")
+                logger.info(f"Updated SCP '{scp_name}' policy content")
 
         for account_id in account_ids:
             if self._is_policy_attached(policy_id, account_id):
@@ -477,6 +477,9 @@ class OrganizationsClient:
                         "iam:*",
                         "sts:*",
                         "organizations:*",
+                        # Region opt-in uses the global Account Management endpoint
+                        "account:GetRegionOptStatus",
+                        "account:EnableRegion",
                         # Edge / network (global, fixed region endpoints)
                         "route53:*",
                         "route53domains:*",
@@ -499,7 +502,19 @@ class OrganizationsClient:
                             "aws:RequestedRegion": sorted(allowed_regions),
                         }
                     },
-                }
+                },
+                {
+                    "Sid": "DenyOutOfScopeRegionOptIn",
+                    "Effect": "Deny",
+                    "Action": "account:EnableRegion",
+                    "Resource": "*",
+                    # The global endpoint's RequestedRegion is not the opt-in target.
+                    "Condition": {
+                        "StringNotEquals": {
+                            "account:TargetRegion": sorted(allowed_regions),
+                        }
+                    },
+                },
             ],
         }
         return json.dumps(policy_doc)

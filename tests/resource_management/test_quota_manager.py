@@ -7,7 +7,7 @@ from typing import cast
 from unittest.mock import MagicMock, patch
 
 import pytest
-from botocore.exceptions import ClientError
+from botocore.exceptions import ClientError, EndpointConnectionError
 
 from aws_bench.resource_management.exceptions import ConfigurationError, DeploymentError
 from aws_bench.resource_management.models import (
@@ -179,7 +179,16 @@ def test_status_matches_api_outcome(scenario, expected_status):
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("error_code", ["AccessDenied", "ThrottlingException", "ServiceException"])
+@pytest.mark.parametrize(
+    "error_code",
+    [
+        "AccessDenied",
+        "AccessDeniedException",
+        "UnauthorizedOperation",
+        "ThrottlingException",
+        "ServiceException",
+    ],
+)
 def test_unexpected_error_raises_deployment_error_with_quota_code(error_code):
     """Unexpected ClientError raises DeploymentError containing the quota code."""
     request = QuotaIncreaseRequest("vpc", "L-F678F1CE", 10.0)
@@ -195,6 +204,7 @@ def test_unexpected_error_raises_deployment_error_with_quota_code(error_code):
     msg = str(exc_info.value)
     assert request.quota_code in msg
     assert error_code in msg
+    mock_client.request_service_quota_increase.assert_called_once()
 
 
 # ---------------------------------------------------------------------------
@@ -202,12 +212,19 @@ def test_unexpected_error_raises_deployment_error_with_quota_code(error_code):
 # ---------------------------------------------------------------------------
 
 
-def test_region_disabled_retries_then_succeeds():
-    """RegionDisabledException on first attempt retries and succeeds."""
+@pytest.mark.parametrize(
+    "error",
+    [
+        _make_client_error("RegionDisabledException"),
+        _make_client_error("AccessDeniedException", "explicit deny in a service control policy"),
+    ],
+)
+def test_region_disabled_retries_then_succeeds(error: ClientError) -> None:
+    """Explicit regional access rejection on first attempt retries and succeeds."""
     request = QuotaIncreaseRequest("vpc", "L-F678F1CE", 10.0)
     mock_client = MagicMock()
     mock_client.request_service_quota_increase.side_effect = [
-        _make_client_error("RegionDisabledException"),
+        error,
         {"RequestedQuota": {"Id": "mock-id"}},
     ]
     manager = _build_manager_with_mock_client(mock_client)
@@ -217,25 +234,29 @@ def test_region_disabled_retries_then_succeeds():
 
     assert result.status == QuotaStatus.REQUESTED
     mock_sleep.assert_called_once_with(10)
+    assert mock_client.request_service_quota_increase.call_count == 2
 
 
-def test_region_disabled_exhausts_retries_raises_deployment_error():
-    """RegionDisabledException on all attempts raises DeploymentError."""
+@pytest.mark.parametrize(
+    "error",
+    [
+        _make_client_error("RegionDisabledException"),
+        _make_client_error("AccessDeniedException", "explicit deny in a service control policy"),
+    ],
+)
+def test_region_disabled_exhausts_retries_raises_deployment_error(error: ClientError) -> None:
+    """Persistent regional access rejection exhausts the existing retry limit."""
     request = QuotaIncreaseRequest("vpc", "L-F678F1CE", 10.0)
     mock_client = MagicMock()
-    mock_client.request_service_quota_increase.side_effect = [
-        _make_client_error("RegionDisabledException"),
-        _make_client_error("RegionDisabledException"),
-        _make_client_error("RegionDisabledException"),
-        _make_client_error("RegionDisabledException"),
-    ]
+    mock_client.request_service_quota_increase.side_effect = error
     manager = _build_manager_with_mock_client(mock_client)
 
-    with patch("aws_bench.resource_management.quota_manager.time.sleep"):
+    with patch("aws_bench.resource_management.quota_manager.time.sleep") as mock_sleep:
         with pytest.raises(DeploymentError, match="Exhausted retries"):
             manager._request_increase(mock_client, request, _TEST_LOG, max_retries=3)
 
     assert mock_client.request_service_quota_increase.call_count == 4
+    assert mock_sleep.call_count == 3
 
 
 # ---------------------------------------------------------------------------
@@ -535,3 +556,18 @@ def test_diagnose_org_account_quota_maps_history_status():
     mock_client.list_requested_service_quota_change_history_by_quota.assert_called_once_with(
         ServiceCode=ORG_QUOTA_SERVICE_CODE, QuotaCode=ORG_ACCOUNT_QUOTA_CODE
     )
+
+
+def test_request_increase_does_not_retry_uncertain_network_failure() -> None:
+    client = MagicMock()
+    error = EndpointConnectionError(endpoint_url="https://servicequotas.example.invalid")
+    client.request_service_quota_increase.side_effect = error
+    manager = _build_manager_with_mock_client(client)
+    with patch("aws_bench.resource_management.quota_manager.time.sleep") as sleep:
+        with pytest.raises(EndpointConnectionError) as caught:
+            manager._request_increase(
+                client, QuotaIncreaseRequest("vpc", "L-F678F1CE", 10.0), _TEST_LOG
+            )
+    assert caught.value is error
+    client.request_service_quota_increase.assert_called_once()
+    sleep.assert_not_called()

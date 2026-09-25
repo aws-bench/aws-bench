@@ -15,7 +15,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from botocore.exceptions import ClientError
 
-from aws_bench.account_management.exceptions import AccountCreationError
+from aws_bench.account_management.exceptions import AccountCreationError, AccountManagementError
 from aws_bench.resource_management.exceptions import SnapshotRegionMismatchError
 from aws_bench.resource_management.models import (
     QuotaConfiguration,
@@ -124,6 +124,7 @@ def mocks():
     """Return mocked AccountManager / QuotaManager / CredentialProvider triples."""
     am = MagicMock()
     am.ensure_scenario_accounts = _ensure_returning("111111111111")
+    am.ensure_regions_enabled = AsyncMock()
     qm = MagicMock()
     qm.request_quotas = MagicMock(return_value=[])
     cp = MagicMock()
@@ -138,6 +139,13 @@ def _stub_baseline_validation():
         "aws_bench.scenario.provisioning.SnapshotManager.validate_pre_setup_snapshot"
     ) as validate:
         yield validate
+
+
+@pytest.fixture(autouse=True)
+def _stub_region_readiness():
+    """Keep regional access probes offline."""
+    with patch("aws_bench.scenario.provisioning.wait_for_region_access") as ready:
+        yield ready
 
 
 @pytest.fixture(autouse=True)
@@ -276,7 +284,9 @@ def test_provision_scenarios_happy_path(mocks, tmp_path):
     qm.request_quotas.assert_called_once()
 
 
-def test_preexisting_mode_validates_without_provisioning(mocks, tmp_path, _stub_deploy):
+def test_preexisting_mode_validates_without_provisioning(
+    mocks, tmp_path, _stub_deploy, _stub_region_readiness
+):
     """External accounts use read-only readiness checks during env init."""
     am, qm, cp = mocks
     am.is_preexisting = True
@@ -321,6 +331,9 @@ def test_preexisting_mode_validates_without_provisioning(mocks, tmp_path, _stub_
     _stub_deploy.assert_not_called()
     cp.wait_for_role.assert_not_called()
     validate_role.assert_called_once_with(cp, "111111111111")
+    _stub_region_readiness.assert_called_once_with(
+        cp.get_session_for_account.return_value, ["us-east-1"]
+    )
     qm.request_quotas.assert_not_called()
     qm.verify_quotas.assert_called_once()
 
@@ -695,7 +708,7 @@ def test_provision_end_event_succeeded_false_on_snapshot_failure(mocks, tmp_path
 
 
 def test_provision_baseline_mismatch_stops_before_scp(
-    mocks, tmp_path, _stub_baseline_validation, _stub_capture, caplog
+    mocks, tmp_path, _stub_baseline_validation, _stub_capture, caplog, _stub_region_readiness
 ):
     """A mismatched baseline fails the account with its own log label before the SCP step."""
     am, qm, cp = mocks
@@ -715,6 +728,8 @@ def test_provision_baseline_mismatch_stops_before_scp(
         )
     assert result.accounts[0].error is error
     assert "Baseline region check failed" in caplog.text
+    am.ensure_regions_enabled.assert_not_awaited()
+    _stub_region_readiness.assert_not_called()
     am.ensure_region_restriction_scp.assert_not_called()
     cp.wait_for_role.assert_not_called()
     qm.request_quotas.assert_not_called()
@@ -722,13 +737,16 @@ def test_provision_baseline_mismatch_stops_before_scp(
 
 
 def test_provision_reconciles_scp_before_quotas_and_snapshot(
-    mocks, tmp_path, _stub_baseline_validation, _stub_capture
+    mocks, tmp_path, _stub_baseline_validation, _stub_capture, _stub_region_readiness
 ):
-    """Provisioning validates the baseline, reconciles the SCP, submits quotas, then captures."""
+    """Readiness follows SCP reconciliation and precedes quotas and baseline capture."""
     am, qm, cp = mocks
     operations = MagicMock()
     operations.attach_mock(_stub_baseline_validation, "baseline")
     operations.attach_mock(am.ensure_region_restriction_scp, "scp")
+    operations.attach_mock(cp.wait_for_role, "role")
+    operations.attach_mock(am.ensure_regions_enabled, "enable")
+    operations.attach_mock(_stub_region_readiness, "regions")
     operations.attach_mock(qm.request_quotas, "quota")
     operations.attach_mock(_stub_capture, "snapshot")
     regions = ["us-east-1", "us-west-2"]
@@ -760,7 +778,17 @@ def test_provision_reconciles_scp_before_quotas_and_snapshot(
     )
 
     assert result.all_succeeded
-    assert [call[0] for call in operations.mock_calls] == ["baseline", "scp", "quota", "snapshot"]
+    assert [call[0] for call in operations.mock_calls] == [
+        "baseline",
+        "scp",
+        "role",
+        "enable",
+        "regions",
+        "quota",
+        "snapshot",
+    ]
+    am.ensure_regions_enabled.assert_awaited_once_with("111111111111", regions, cp)
+    _stub_region_readiness.assert_called_once_with(cp.get_session_for_account.return_value, regions)
     _stub_baseline_validation.assert_called_once_with(
         "sc", "111111111111", regions, allow_missing=True
     )
@@ -768,6 +796,56 @@ def test_provision_reconciles_scp_before_quotas_and_snapshot(
     _stub_capture.assert_called_once_with("111111111111", "sc", regions, cred_provider=cp)
     assert result.accounts[0].snapshot_result is not None
     assert result.accounts[0].provisioned is True
+
+
+@pytest.mark.parametrize("operation", ["enable", "probe"])
+def test_provision_region_failure_stops_before_quotas_and_snapshot(
+    mocks, tmp_path, _stub_region_readiness, _stub_capture, caplog, operation
+):
+    am, qm, cp = mocks
+    error = AccountManagementError("region readiness timed out")
+    failing = am.ensure_regions_enabled if operation == "enable" else _stub_region_readiness
+    failing.side_effect = error
+    events: list[ProvisionHookEvent] = []
+
+    async def on_event(event: ProvisionHookEvent) -> None:
+        events.append(event)
+
+    sc = _make_scenario_with_quota(
+        tmp_path,
+        "sc",
+        regions=("eu-south-2",),
+        quotas=[
+            {
+                "account_tag": "PRIMARY",
+                "region": "eu-south-2",
+                "service_code": "lambda",
+                "quota_code": "L-1",
+                "desired_value": 10.0,
+            }
+        ],
+    )
+    with caplog.at_level(logging.ERROR):
+        result = asyncio.run(
+            provision_scenarios(
+                [sc],
+                "ou",
+                n_concurrent=1,
+                wait_for_quotas=False,
+                account_manager=am,
+                quota_manager=qm,
+                cred_provider=cp,
+                on_event=on_event,
+            )
+        )
+    assert result.accounts[0].error is error
+    assert not result.all_succeeded
+    assert "Region readiness failed" in caplog.text
+    qm.request_quotas.assert_not_called()
+    _stub_capture.assert_not_called()
+    end = next(event for event in events if event.event is ProvisionEvent.END)
+    assert end.succeeded is False
+    assert end.error == str(error)
 
 
 def test_provision_snapshot_failure_fails_account(mocks, tmp_path, _stub_capture):

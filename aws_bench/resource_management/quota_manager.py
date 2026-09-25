@@ -31,6 +31,7 @@ from aws_bench.utils.credentials_provider import (
     create_regional_session,
 )
 from aws_bench.utils.regions import get_enabled_regions
+from aws_bench.utils.retry import is_scp_access_denied
 
 logger = get_logger(__name__)
 
@@ -145,12 +146,12 @@ class QuotaManager:
                         status=QuotaStatus.ALREADY_MET,
                     )
 
-                # RegionDisabledException here is a race: quotas requested too
-                # soon after account creation, before STS activates. Retry.
-                if error_code == "RegionDisabledException":
+                # This loop retries only explicit rejections while regional STS or SCP
+                # access converges, not uncertain writes or ordinary IAM denials.
+                if error_code == "RegionDisabledException" or is_scp_access_denied(exc):
                     if attempt < max_retries:
                         log.warning(
-                            "STS is possibly not yet active for %s, retrying in %ds (%d/%d)",
+                            "Regional access is not yet ready for %s, retrying in %ds (%d/%d)",
                             request.quota_code,
                             retry_delay,
                             attempt + 1,

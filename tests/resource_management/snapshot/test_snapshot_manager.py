@@ -10,6 +10,7 @@ import pytest
 import tenacity
 from botocore.exceptions import ClientError
 from moto import mock_aws
+from pytest_mock import MockerFixture
 
 from aws_bench.resource_management.exceptions import (
     DriftDetectionError,
@@ -981,16 +982,34 @@ def _cfn_with_paginate(mocker, *, paginate_side_effect):
     return mock_cfn, paginator
 
 
-def test_list_active_stacks_retries_then_succeeds_on_optin_required(_instant_stacks_retry, mocker):
-    """A fresh-account OptInRequired on the first calls clears and the listing succeeds."""
+@pytest.mark.parametrize(
+    "error",
+    [
+        _client_error("OptInRequired"),
+        _client_error("AuthFailure"),
+        ClientError(
+            {
+                "Error": {
+                    "Code": "AccessDenied",
+                    "Message": "explicit deny in a service control policy",
+                }
+            },
+            "ListStacks",
+        ),
+    ],
+)
+def test_list_active_stacks_retries_then_succeeds_on_regional_access_error(
+    _instant_stacks_retry: None, mocker: MockerFixture, error: ClientError
+) -> None:
+    """Regional access propagation errors clear and the listing succeeds."""
     manager = create_test_manager()
 
-    # First two ListStacks calls fail with OptInRequired, third returns no stacks.
+    # First two ListStacks calls fail, third returns no stacks.
     mock_cfn, paginator = _cfn_with_paginate(
         mocker,
         paginate_side_effect=[
-            _client_error("OptInRequired"),
-            _client_error("OptInRequired"),
+            error,
+            error,
             [{"StackSummaries": []}],
         ],
     )
@@ -1017,11 +1036,28 @@ def test_list_active_stacks_does_not_retry_non_transient_error(_instant_stacks_r
     assert paginator.paginate.call_count == 1
 
 
-def test_list_active_stacks_reraises_original_error_after_budget(mocker):
+@pytest.mark.parametrize(
+    "error",
+    [
+        _client_error("OptInRequired"),
+        ClientError(
+            {
+                "Error": {
+                    "Code": "AccessDenied",
+                    "Message": "explicit deny in a service control policy",
+                }
+            },
+            "ListStacks",
+        ),
+    ],
+)
+def test_list_active_stacks_reraises_original_error_after_budget(
+    mocker: MockerFixture, error: ClientError
+) -> None:
     """When the transient error never clears, the budget stops retry and reraises.
 
     Overrides stop with stop_after_attempt so the budget is deterministic, and
-    asserts the ORIGINAL OptInRequired ClientError surfaces (reraise=True), not a
+    asserts the ORIGINAL ClientError surfaces (reraise=True), not a
     tenacity RetryError — so snapshot_account records the real cause.
     """
     manager = create_test_manager()
@@ -1031,14 +1067,12 @@ def test_list_active_stacks_reraises_original_error_after_budget(mocker):
     mocker.patch.object(controller, "wait", tenacity.wait_none())
     mocker.patch.object(controller, "stop", tenacity.stop_after_attempt(3))
 
-    mock_cfn, paginator = _cfn_with_paginate(
-        mocker, paginate_side_effect=_client_error("OptInRequired")
-    )
+    mock_cfn, paginator = _cfn_with_paginate(mocker, paginate_side_effect=error)
 
     with pytest.raises(ClientError) as exc_info:
         manager._list_active_stacks(mock_cfn)
 
-    assert exc_info.value.response["Error"]["Code"] == "OptInRequired"
+    assert exc_info.value is error
     assert paginator.paginate.call_count == 3
 
 

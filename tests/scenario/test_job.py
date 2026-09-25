@@ -40,6 +40,13 @@ from aws_bench.scenario.scenario import Scenario
 
 
 @pytest.fixture(autouse=True)
+def mock_region_access():
+    """Never probe AWS from a DEPLOY lifecycle test unless explicitly stubbed."""
+    with patch("aws_bench.scenario.trial.wait_for_region_access") as probe:
+        yield probe
+
+
+@pytest.fixture(autouse=True)
 def mock_resource_manager():
     """Mock ResourceManager methods to avoid AWS API calls during tests."""
     with (

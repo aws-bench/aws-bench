@@ -3,18 +3,23 @@
 from __future__ import annotations
 
 import asyncio
+import time
 
+from botocore.config import Config
+from botocore.exceptions import ClientError, ConnectionError, HTTPClientError
 from tenacity import retry, retry_if_exception, stop_after_attempt, wait_random_exponential
 
 from aws_bench.account_management.constants import (
     CONTAMINATED_TAG_KEY,
     CONTAMINATION_TAG_MAX_ATTEMPTS,
     EMAIL_COLLISION_MAX_ATTEMPTS,
+    ORG_ACCESS_ROLE,
     SCENARIO_ACCOUNT_TAG_KEY,
     SCENARIO_SHA_TAG_KEY,
 )
 from aws_bench.account_management.exceptions import (
     AccountCreationError,
+    AccountManagementError,
     AccountResolutionError,
     DuplicateScenarioAccountError,
     TestEnvironmentNotFoundError,
@@ -32,6 +37,9 @@ from aws_bench.account_management.preexisting import (
 )
 from aws_bench.account_management.utils import generate_account_email
 from aws_bench.logging.logger import get_logger
+from aws_bench.utils.concurrent import build_client
+from aws_bench.utils.credentials_provider import CredentialProvider, build_session_name
+from aws_bench.utils.retry import retrying_region_read
 
 logger = get_logger(__name__)
 
@@ -372,6 +380,79 @@ class AccountManager:
             )
             return
         self._org.ensure_region_restriction_scp(scenario_name, allowed_regions, account_ids)
+
+    async def ensure_regions_enabled(
+        self, account_id: str, regions: list[str], cred_provider: CredentialProvider
+    ) -> None:
+        """Enable declared managed-account regions, waiting up to thirty minutes per region.
+
+        Call after SCP reconciliation and role readiness. Resume existing enablement;
+        reconcile uncertain writes through reads, never by resubmitting. External IaC
+        owns pre-existing accounts' region configuration.
+        """
+        if self._preexisting is not None:
+            self._validate_allowlisted_accounts([account_id])
+            return
+        session = cred_provider.get_session_for_account(
+            account_id, ORG_ACCESS_ROLE, build_session_name("session")
+        )
+        client = build_client(
+            session,
+            "account",
+            region_name="us-east-1",
+            config=Config(
+                retries={"mode": "standard", "total_max_attempts": 3},
+                connect_timeout=5,
+                read_timeout=10,
+            ),
+        )
+        for region in dict.fromkeys(regions):
+            deadline = time.monotonic() + 1800
+            requested = False
+            while time.monotonic() < deadline:
+                result = await asyncio.to_thread(
+                    retrying_region_read, lambda: client.get_region_opt_status(RegionName=region)
+                )
+                status = result["RegionOptStatus"]
+                if status in {"ENABLED", "ENABLED_BY_DEFAULT"}:
+                    break
+                if status not in {"DISABLED", "ENABLING"}:
+                    raise AccountManagementError(
+                        f"Account {account_id} region {region}: cannot enable from {status}"
+                    )
+                if status == "ENABLING":
+                    requested = True
+                elif not requested:
+                    requested = True
+                    writer = build_client(
+                        session,
+                        "account",
+                        region_name="us-east-1",
+                        config=Config(
+                            retries={"total_max_attempts": 1}, connect_timeout=5, read_timeout=10
+                        ),
+                    )
+                    logger.info("Enabling region %s in account %s", region, account_id)
+                    try:
+                        await asyncio.to_thread(writer.enable_region, RegionName=region)
+                    except ClientError as exc:
+                        if exc.response["Error"]["Code"] != "ConflictException":
+                            raise
+                        logger.info(
+                            "Region enablement already in progress for %s/%s", account_id, region
+                        )
+                    except (ConnectionError, HTTPClientError):
+                        logger.warning(
+                            "EnableRegion outcome unknown for %s/%s; checking status",
+                            account_id,
+                            region,
+                        )
+                await asyncio.sleep(min(10, max(0, deadline - time.monotonic())))
+            else:
+                raise AccountManagementError(
+                    f"Account {account_id} region {region}: enablement timed out; "
+                    "rerun env init to resume (AWS enablement can take hours)"
+                )
 
     @retry(
         wait=wait_random_exponential(multiplier=1, min=2, max=30),

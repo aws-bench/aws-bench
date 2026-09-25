@@ -11,11 +11,12 @@ import asyncio
 import json
 import logging
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, call, patch
 
 import pytest
 from pydantic_core import PydanticSerializationError
 
+from aws_bench.account_management.constants import ORG_ACCESS_ROLE
 from aws_bench.resource_management.cleanup.models import (
     AccountCleanupResult,
     CleanupSummary,
@@ -32,6 +33,7 @@ from aws_bench.scenario.locator import ScenarioConfig
 from aws_bench.scenario.results import ScenarioHookEvent
 from aws_bench.scenario.scenario import Scenario
 from aws_bench.scenario.trial import MANAGEMENT_ROLE_ENV_VAR, ScenarioTrial
+from aws_bench.utils.credentials_provider import build_session_name
 
 VALID_TOML = """\
 schema_version = "1.0"
@@ -91,6 +93,13 @@ def fake_creds():
     session.get_credentials.return_value = creds
     cp.session = session
     return cp
+
+
+@pytest.fixture(autouse=True)
+def mock_region_access():
+    """Never probe AWS from a DEPLOY lifecycle test unless explicitly stubbed."""
+    with patch("aws_bench.scenario.trial.wait_for_region_access") as probe:
+        yield probe
 
 
 @pytest.fixture(autouse=True)
@@ -1484,7 +1493,7 @@ def test_scp_failure_aborts_deploy_before_script(
 
 @pytest.mark.parametrize("phase", [p for p in ScenarioPhase if p is not ScenarioPhase.DEPLOY])
 def test_non_deploy_phases_do_not_touch_region_scp(
-    tmp_path, fake_container, fake_creds, mock_account_manager, phase
+    tmp_path, fake_container, fake_creds, mock_account_manager, mock_region_access, phase
 ):
     """Every phase except DEPLOY runs its script without touching the SCP."""
     trial = _build_trial(tmp_path, fake_container, fake_creds)
@@ -1493,6 +1502,162 @@ def test_non_deploy_phases_do_not_touch_region_scp(
 
     fake_container.run_phase.assert_awaited_once()
     mock_account_manager.ensure_region_restriction_scp.assert_not_called()
+    mock_region_access.assert_not_called()
+
+
+def test_deploy_waits_for_every_account_after_baseline_and_scp(
+    tmp_path, fake_container, fake_creds, mock_account_manager, mock_region_access
+) -> None:
+    """All accounts must be authorized before any cleanup or deploy mutation."""
+    trial = _build_trial(tmp_path, fake_container, fake_creds)
+    trial.config.account_mapping["SECONDARY"] = "222222222222"
+    trial._scenario.manifest.scenario.regions = ["eu-south-2", "ap-east-1"]
+    regions = trial._scenario.manifest.scenario.regions
+    sessions = [MagicMock(name="primary_session"), MagicMock(name="secondary_session")]
+    fake_creds.get_session_for_account.side_effect = sessions
+    order = MagicMock()
+    order.attach_mock(mock_account_manager.ensure_region_restriction_scp, "scp")
+    order.attach_mock(fake_creds.get_session_for_account, "session")
+    order.attach_mock(mock_region_access, "probe")
+    order.attach_mock(fake_container.run_phase, "deploy")
+    with (
+        patch.object(trial, "_validate_init_snapshot", new_callable=AsyncMock) as baseline,
+        patch.object(trial, "_clean_stale_changesets", new_callable=AsyncMock) as stale,
+        patch.object(trial, "_delete_terminal_stacks", new_callable=AsyncMock) as terminal,
+    ):
+        order.attach_mock(baseline, "baseline")
+        order.attach_mock(stale, "stale")
+        order.attach_mock(terminal, "terminal")
+        result = asyncio.run(trial.run(ScenarioPhase.DEPLOY))
+
+    assert result.success
+    assert [c[0] for c in order.mock_calls] == [
+        "baseline",
+        "scp",
+        "session",
+        "probe",
+        "session",
+        "probe",
+        "stale",
+        "terminal",
+        "deploy",
+    ]
+    mock_account_manager.ensure_region_restriction_scp.assert_called_once_with(
+        "sc", regions, ["111111111111", "222222222222"]
+    )
+    assert fake_creds.get_session_for_account.call_args_list == [
+        call(account_id, ORG_ACCESS_ROLE, build_session_name("session"))
+        for account_id in trial.config.account_mapping.values()
+    ]
+    assert mock_region_access.call_args_list == [call(session, regions) for session in sessions]
+    assert all(c.args[1] is not regions for c in mock_region_access.call_args_list)
+
+
+@pytest.mark.parametrize("failure_stage", ["baseline", "scp", "session", "probe"])
+def test_deploy_readiness_failures_block_subsequent_steps(
+    tmp_path, fake_container, fake_creds, mock_account_manager, mock_region_access, failure_stage
+) -> None:
+    """Fail closed before stale changesets, stack deletion, script, or snapshot."""
+    trial = _build_trial(tmp_path, fake_container, fake_creds)
+    with (
+        patch.object(trial, "_validate_init_snapshot", new_callable=AsyncMock) as baseline,
+        patch.object(trial, "_clean_stale_changesets", new_callable=AsyncMock) as stale,
+        patch.object(trial, "_delete_terminal_stacks", new_callable=AsyncMock) as terminal,
+        patch.object(trial, "_run_snapshot", new_callable=AsyncMock) as snapshot,
+    ):
+        gates = {
+            "baseline": baseline,
+            "scp": mock_account_manager.ensure_region_restriction_scp,
+            "session": fake_creds.get_session_for_account,
+            "probe": mock_region_access,
+        }
+        gates[failure_stage].side_effect = RuntimeError(f"{failure_stage} failed")
+        result = asyncio.run(trial.run(ScenarioPhase.DEPLOY))
+        past_failure = False
+        for stage, gate in gates.items():
+            if past_failure:
+                gate.assert_not_called()
+            else:
+                gate.assert_called_once()
+            if stage == failure_stage:
+                past_failure = True
+        stale.assert_not_called()
+        terminal.assert_not_called()
+        snapshot.assert_not_called()
+
+    assert not result.success
+    assert result.exception_info is not None
+    assert result.exception_info.exception_message == f"{failure_stage} failed"
+    fake_container.run_phase.assert_not_called()
+
+
+@pytest.mark.parametrize("probe_fails", [False, True])
+def test_preexisting_deploy_only_probes_regions_with_runner_credentials(
+    tmp_path, fake_container, fake_creds, mock_region_access, probe_fails
+) -> None:
+    """External accounts are checked without opt-in calls or Organizations mutation."""
+    from aws_bench.account_management.manager import AccountManager
+    from aws_bench.account_management.preexisting import PreexistingEnvironmentConfig
+    from aws_bench.utils.credentials_provider import CredentialProvider
+    from aws_bench.utils.regions import wait_for_region_access
+
+    trial = _build_trial(tmp_path, fake_container, fake_creds)
+    trial._scenario.manifest.scenario.regions = ["eu-south-2"]
+    config = PreexistingEnvironmentConfig(
+        name="test-env",
+        accounts={"sc": trial.config.account_mapping},
+        runner_role="ExternalRunner",
+        cfn_role="ExternalCfn",
+    )
+    active = (config, tmp_path / "accounts.yaml")
+    session = MagicMock(name="runner_session")
+    cfn = MagicMock()
+    cfn.list_stacks.return_value = {"StackSummaries": [], "NextToken": "ignored"}
+    if probe_fails:
+        cfn.list_stacks.side_effect = RuntimeError("region blocked")
+    mock_region_access.side_effect = wait_for_region_access
+    provider = CredentialProvider(session=fake_creds.session)
+    trial._cred_provider = provider
+    with (
+        patch("aws_bench.account_management.manager.active_account_config", return_value=active),
+        patch("aws_bench.account_management.manager.OrganizationsClient") as org,
+        patch("aws_bench.account_management.manager.PreexistingStateStore") as state,
+        patch("aws_bench.utils.credentials_provider.active_account_config", return_value=active),
+        patch.object(provider, "_ambient_is_target_role", return_value=False),
+        patch(
+            "aws_bench.utils.credentials_provider._create_refreshable_session", return_value=session
+        ) as assume,
+        patch("aws_bench.utils.regions.build_client", return_value=cfn) as build_client,
+        patch.object(trial, "_clean_stale_changesets", new_callable=AsyncMock) as stale,
+        patch.object(trial, "_delete_terminal_stacks", new_callable=AsyncMock) as terminal,
+    ):
+        state.return_value.contaminated.return_value = []
+        trial._account_manager = AccountManager()
+        result = asyncio.run(trial.run(ScenarioPhase.DEPLOY))
+
+    assert result.success is not probe_fails
+    assume.assert_called_once_with(
+        fake_creds.session,
+        "arn:aws:iam::111111111111:role/ExternalRunner",
+        build_session_name("session"),
+        "us-east-1",
+    )
+    mock_region_access.assert_called_once_with(session, ["eu-south-2"])
+    build_client.assert_called_once()
+    assert build_client.call_args.args == (session, "cloudformation")
+    assert build_client.call_args.kwargs["region_name"] == "eu-south-2"
+    assert cfn.mock_calls == [call.list_stacks()]
+    assert org.return_value.mock_calls == []
+    session.client.assert_not_called()
+    fake_creds.session.client.assert_not_called()
+    if probe_fails:
+        stale.assert_not_called()
+        terminal.assert_not_called()
+        fake_container.run_phase.assert_not_called()
+    else:
+        stale.assert_awaited_once()
+        terminal.assert_awaited_once()
+        fake_container.run_phase.assert_awaited_once()
 
 
 # -- contamination gate on DEPLOY (env setup) -----------------------------
@@ -1594,7 +1759,12 @@ def test_deploy_deletes_review_in_progress_stacks(tmp_path, fake_container, fake
 
 def test_changeset_cleanup_failure_does_not_block_deploy(tmp_path, fake_container, fake_creds):
     """Changeset cleanup is best-effort; failures don't prevent the deploy."""
-    fake_creds.get_session_for_account.side_effect = RuntimeError("creds boom")
+    # Readiness gets valid credentials; only the subsequent best-effort cleanup fails.
+    fake_creds.get_session_for_account.side_effect = [
+        MagicMock(),
+        RuntimeError("creds boom"),
+        RuntimeError("creds boom"),
+    ]
 
     trial = _build_trial(tmp_path, fake_container, fake_creds)
     result = asyncio.run(trial.run(ScenarioPhase.DEPLOY))
@@ -1623,9 +1793,13 @@ def test_changeset_cleanup_credential_failure_continues_to_next_account(
     mock_session = MagicMock()
     mock_session.client.return_value = mock_cfn
 
-    # First call fails, second succeeds
+    # Both readiness sessions succeed; the first changeset cleanup session fails.
     fake_creds.get_session_for_account.side_effect = [
+        mock_session,
+        mock_session,
         RuntimeError("creds boom"),
+        mock_session,
+        mock_session,
         mock_session,
     ]
 
@@ -1643,8 +1817,8 @@ def test_changeset_cleanup_credential_failure_continues_to_next_account(
     result = asyncio.run(trial.run(ScenarioPhase.DEPLOY))
 
     assert result.success
-    # 2 calls for changeset cleanup (one per account) + 2 for post-deploy snapshot deletion
-    assert fake_creds.get_session_for_account.call_count == 4
+    # Two accounts each for readiness, changeset cleanup, and terminal stack cleanup.
+    assert fake_creds.get_session_for_account.call_count == 6
     mock_cfn.delete_change_set.assert_called_once()
 
 

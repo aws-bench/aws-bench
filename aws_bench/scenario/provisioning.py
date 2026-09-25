@@ -4,7 +4,7 @@ Provisions accounts and submits quota increases for a set of scenarios:
 
   Provisioning — bounded by ``n_concurrent``. For each
     ``(scenario, account_tag)`` pair, ensure an account exists, reconcile
-    its region SCP, wait for the org-access role, and submit each scenario's
+    its region SCP, wait for the org-access role and regional readiness, and submit each scenario's
     ``[[quotas]]`` without waiting for approval.
 
   Account-limit reaction — if account creation fails because the AWS
@@ -68,6 +68,7 @@ from aws_bench.scenario.exceptions import (
 from aws_bench.scenario.job import ScenarioJob
 from aws_bench.scenario.scenario import Scenario
 from aws_bench.utils.credentials_provider import CredentialProvider, build_session_name
+from aws_bench.utils.regions import wait_for_region_access
 
 logger = get_logger(__name__)
 
@@ -648,7 +649,7 @@ async def _provision_account_lifecycle(
     result: ProvisionedAccount,
     on_event: HookCallback | None,
 ) -> ProvisionedAccount:
-    """Phase 2: Region SCP + role wait + quotas + baseline capture for a provisioned account.
+    """Reconcile the SCP, await role/region readiness, then submit quotas and capture a baseline.
 
     Expects ``result.account_id`` to be set (Phase 1 succeeded).
     Emits ROLE_START, QUOTAS_START, SNAPSHOT_START, and END events.
@@ -706,6 +707,19 @@ async def _provision_account_lifecycle(
                 await asyncio.to_thread(cred_provider.wait_for_role, account_id, ORG_ACCESS_ROLE)
             except Exception as exc:  # noqa: BLE001
                 return fail(f"Role {ORG_ACCESS_ROLE} wait", exc)
+
+        try:
+            await account_manager.ensure_regions_enabled(
+                account_id, list(scenario.scenario.regions), cred_provider
+            )
+            session = cred_provider.get_session_for_account(
+                account_id, ORG_ACCESS_ROLE, build_session_name("session")
+            )
+            await asyncio.to_thread(
+                wait_for_region_access, session, list(scenario.scenario.regions)
+            )
+        except Exception as exc:  # noqa: BLE001
+            return fail("Region readiness", exc)
 
         try:
             role_operation = _validate_cfn_ops_role if preexisting else _ensure_cfn_ops_role
