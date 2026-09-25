@@ -210,3 +210,71 @@ class TestKiroCliBuildMcpJson:
 
         result = KiroCli._build_mcp_json([server])
         assert result == {"remote": {"url": "http://localhost:3000"}}
+
+
+class TestAgentEngineFlag:
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("engine", ["v1", "v2", "v3"])
+    async def test_run_with_agent_engine(self, logs_dir: Path, engine: str):
+        agent = KiroCli(logs_dir=logs_dir, agent_engine=engine)
+        environment = MagicMock()
+        environment.exec = AsyncMock(return_value=MagicMock(return_code=0, stdout="", stderr=""))
+        with patch.dict("os.environ", {"KIRO_API_KEY": "ksk_test"}, clear=True):
+            await agent.run("Do the task", environment, MagicMock())
+        run_cmd = [
+            c.kwargs.get("command", "")
+            for c in environment.exec.call_args_list
+            if "kiro-cli chat" in c.kwargs.get("command", "")
+        ][0]
+        assert f"--agent-engine {engine}" in run_cmd
+
+    def test_rejects_unknown_engine(self, logs_dir: Path):
+        with pytest.raises(ValueError):
+            KiroCli(logs_dir=logs_dir, agent_engine="v9")
+
+
+class TestAgentEngineDefault:
+    def _run_cmd(self, environment) -> str:
+        return [
+            c.kwargs.get("command", "")
+            for c in environment.exec.call_args_list
+            if "kiro-cli chat" in c.kwargs.get("command", "")
+        ][0]
+
+    @pytest.mark.asyncio
+    async def test_defaults_to_v3_and_warns(self, logs_dir: Path):
+        logger = MagicMock()
+        agent = KiroCli(logs_dir=logs_dir, logger=logger)
+        environment = MagicMock()
+        environment.exec = AsyncMock(return_value=MagicMock(return_code=0, stdout="", stderr=""))
+        with patch.dict("os.environ", {"KIRO_API_KEY": "ksk_test"}, clear=True):
+            await agent.run("Do the task", environment, MagicMock())
+        assert "--agent-engine v3" in self._run_cmd(environment)
+        warning = " ".join(str(a) for a in logger.getChild.return_value.warning.call_args[0])
+        assert "v3" in warning and "agent_engine" in warning
+
+    @pytest.mark.asyncio
+    async def test_explicit_engine_does_not_warn(self, logs_dir: Path):
+        logger = MagicMock()
+        agent = KiroCli(logs_dir=logs_dir, logger=logger, agent_engine="v1")
+        environment = MagicMock()
+        environment.exec = AsyncMock(return_value=MagicMock(return_code=0, stdout="", stderr=""))
+        with patch.dict("os.environ", {"KIRO_API_KEY": "ksk_test"}, clear=True):
+            await agent.run("Do the task", environment, MagicMock())
+        assert "--agent-engine v1" in self._run_cmd(environment)
+        logger.getChild.return_value.warning.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_env_fallback_does_not_warn(self, logs_dir: Path):
+        logger = MagicMock()
+        with patch.dict(
+            "os.environ", {"KIRO_API_KEY": "ksk_test", "KIRO_CLI_AGENT_ENGINE": "v2"}, clear=True
+        ):
+            agent = KiroCli(logs_dir=logs_dir, logger=logger)
+            environment = MagicMock()
+            environment.exec = AsyncMock(
+                return_value=MagicMock(return_code=0, stdout="", stderr="")
+            )
+            await agent.run("Do the task", environment, MagicMock())
+        assert "--agent-engine v2" in self._run_cmd(environment)
+        logger.getChild.return_value.warning.assert_not_called()

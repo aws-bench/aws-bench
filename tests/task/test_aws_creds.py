@@ -40,34 +40,33 @@ def test_resolve_env_with_creds_creds_win_on_conflict():
     assert env["AWS_ACCESS_KEY_ID"] == "from-creds"
 
 
-def test_assume_role_for_script_uses_named_role(mocker):
+def test_session_for_script_uses_named_role(mocker):
     cp = mocker.patch.object(aws_creds, "CredentialProvider", autospec=True)
-    # assume_role_for_script goes through the CredentialProvider.get() singleton.
-    chain = cp.get.return_value.chain_assume_role
-    chain.return_value = {"AWS_ACCESS_KEY_ID": "AKIA"}
+    chain = cp.get.return_value.get_chained_session_for_account
+    chain.return_value = "session"
 
-    creds = aws_creds.assume_role_for_script(
+    session = aws_creds.session_for_script(
         account_id="123456789012",
         role_name="MyAgentRole",
         role_type=RoleType.AGENT,
         task_name="org/t",
         job_id=None,
     )
-    assert creds == {"AWS_ACCESS_KEY_ID": "AKIA"}
+    assert session == "session"
     chain.assert_called_once()
     kwargs = chain.call_args.kwargs
     assert kwargs["account_id"] == "123456789012"
     assert kwargs["role_name"] == "MyAgentRole"
+    assert kwargs["session_name"] == "app-session"
 
 
-def test_assume_role_for_script_falls_back_to_org_access_role(mocker):
+def test_session_for_script_falls_back_to_org_access_role(mocker):
     """A missing role_name falls back to the org access role."""
     cp = mocker.patch.object(aws_creds, "CredentialProvider", autospec=True)
-    chain = cp.get.return_value.chain_assume_role
-    chain.return_value = {}
+    chain = cp.get.return_value.get_chained_session_for_account
     from aws_bench.account_management.constants import ORG_ACCESS_ROLE
 
-    aws_creds.assume_role_for_script(
+    aws_creds.session_for_script(
         account_id="123456789012",
         role_name=None,
         role_type=RoleType.PRE_INVOKE,

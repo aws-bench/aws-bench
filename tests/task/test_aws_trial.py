@@ -10,6 +10,9 @@ are faked down to what the overrides touch.
 from __future__ import annotations
 
 import asyncio
+import json
+import os
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -42,16 +45,38 @@ def no_contamination(mocker):
 
 @pytest.fixture
 def fake_creds(mocker):
-    """Stub the cred helper so no STS calls happen; creds are a fixed dict."""
-    return mocker.patch.object(
-        aws_trial,
-        "assume_role_for_script",
-        return_value={
-            "AWS_ACCESS_KEY_ID": "AKIA",
-            "AWS_SECRET_ACCESS_KEY": "secret",
-            "AWS_SESSION_TOKEN": "token",
-        },
+    """Use a session with fake keys and an expiry; never call STS."""
+    credentials = MagicMock()
+    credentials.get_frozen_credentials.return_value = SimpleNamespace(
+        access_key="AKIA", secret_key="secret", token="token"
     )
+    credentials._expiry_time = datetime(2099, 1, 1, tzinfo=timezone.utc)
+    session = MagicMock()
+    session.get_credentials.return_value = credentials
+    return mocker.patch.object(aws_trial, "session_for_script", return_value=session)
+
+
+@pytest.fixture
+def shell_environment(tmp_path):
+    """Execute the credential commands in an isolated local home."""
+    if os.name != "posix":
+        pytest.skip("Credential shell commands require POSIX")
+
+    async def execute(*, command, **kwargs):
+        process = await asyncio.create_subprocess_exec(
+            "sh",
+            "-c",
+            command,
+            env={"PATH": os.environ["PATH"], "HOME": str(tmp_path)},
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await process.communicate()
+        return SimpleNamespace(
+            return_code=process.returncode, stdout=stdout.decode(), stderr=stderr.decode()
+        )
+
+    return SimpleNamespace(exec=AsyncMock(side_effect=execute))
 
 
 def _scenario_ref(**roles):
@@ -277,18 +302,30 @@ async def test_run_agent_phase_no_solution_env_for_non_oracle(tmp_path, fake_cre
 
 
 @pytest.mark.asyncio
-async def test_run_agent_phase_writes_creds_file_and_empties_raw_creds(
-    tmp_path, fake_creds, mocker
+async def test_run_agent_phase_writes_process_credentials_and_empties_raw_creds(
+    tmp_path, fake_creds, mocker, shell_environment
 ):
-    """Agent gets a creds file in-container; raw cred vars are emptied during the run."""
+    """The agent sees private process credentials and no raw credential env."""
     trial = _make_trial(tmp_path)
+    trial.agent_environment = shell_environment
     trial._aws_placeholders = {}
 
     seen: dict[str, str] = {}
 
     async def fake_super_phase(self, *, instruction, **kw):
-        # The injected env is live only during the agent run; capture it here.
         seen.update(self.agent._extra_env)
+        directory = tmp_path / ".aws/creds"
+        payload = json.loads((directory / "PRIMARY.json").read_text())
+        assert payload == {
+            "Version": 1,
+            "AccessKeyId": "AKIA",
+            "SecretAccessKey": "secret",
+            "SessionToken": "token",
+            "Expiration": "2099-01-01T00:00:00+00:00",
+        }
+        assert directory.stat().st_mode & 0o777 == 0o700
+        assert (directory / "PRIMARY.json").stat().st_mode & 0o777 == 0o600
+        assert (tmp_path / ".aws/config").stat().st_mode & 0o777 == 0o600
 
     mocker.patch.object(Trial, "_run_agent_phase", fake_super_phase)
     await trial._run_agent_phase(target=MagicMock(), instruction="x", timeout_sec=None, user=None)
@@ -296,9 +333,6 @@ async def test_run_agent_phase_writes_creds_file_and_empties_raw_creds(
     # Raw creds are emptied so a host-forwarded set cannot outrank the file.
     assert seen["AWS_ACCESS_KEY_ID"] == ""
     assert seen["AWS_SESSION_TOKEN"] == ""
-    # The credentials file is written into the container (secrets land on disk).
-    write_cmds = [c.kwargs.get("command", "") for c in _exec_calls(trial)]
-    assert any("/.aws/credentials" in cmd and "AKIA" in cmd for cmd in write_cmds)
 
 
 @pytest.mark.asyncio
@@ -353,9 +387,12 @@ async def test_run_agent_phase_restores_extra_env_after_run(tmp_path, fake_creds
 
 
 @pytest.mark.asyncio
-async def test_run_agent_phase_removes_creds_file_after_run(tmp_path, fake_creds, mocker):
-    """The creds file is removed after the agent run so a later stage cannot read it."""
+async def test_run_agent_phase_removes_credential_files_after_run(
+    tmp_path, fake_creds, mocker, shell_environment
+):
+    """The phase removes its credential directory and config."""
     trial = _make_trial(tmp_path)
+    trial.agent_environment = shell_environment
     trial._aws_placeholders = {}
 
     async def fake_super_phase(self, *, instruction, **kw):
@@ -363,8 +400,8 @@ async def test_run_agent_phase_removes_creds_file_after_run(tmp_path, fake_creds
 
     mocker.patch.object(Trial, "_run_agent_phase", fake_super_phase)
     await trial._run_agent_phase(target=MagicMock(), instruction="x", timeout_sec=None, user=None)
-    cmds = [c.kwargs.get("command", "") for c in _exec_calls(trial)]
-    assert any(cmd.startswith("rm -f") and "/.aws/credentials" in cmd for cmd in cmds)
+    assert not (tmp_path / ".aws/creds").exists()
+    assert not (tmp_path / ".aws/config").exists()
 
 
 @pytest.mark.asyncio
@@ -389,7 +426,7 @@ async def test_staged_credentials_raises_when_write_fails(tmp_path, fake_creds):
         return_value=MagicMock(return_code=1, stdout="", stderr="disk full")
     )
 
-    with pytest.raises(RuntimeError, match="write credentials file"):
+    with pytest.raises(RuntimeError, match="write credential files"):
         async with trial._staged_credentials(RoleType.AGENT):
             pass
 
@@ -404,7 +441,7 @@ async def test_staged_credentials_cleanup_failure_does_not_mask_body_error(tmp_p
     async def exec_write_ok_then_rm_fails(*, command, user=None, **kw):
         call_count["n"] += 1
         # First call (write) succeeds; the cleanup rm raises.
-        if command.startswith("rm -f"):
+        if command.startswith("rm -rf"):
             raise RuntimeError("container gone")
         return MagicMock(return_code=0, stdout="", stderr="")
 
@@ -416,6 +453,120 @@ async def test_staged_credentials_cleanup_failure_does_not_mask_body_error(tmp_p
 
     # The cleanup ran (and failed) but the body's error surfaced, not the rm error.
     trial.logger.warning.assert_called()  # type: ignore[attr-defined]
+
+
+@pytest.mark.asyncio
+async def test_config_write_failure_removes_partial_credentials(
+    tmp_path, fake_creds, shell_environment
+):
+    trial = _make_trial(tmp_path)
+    trial.agent_environment = shell_environment
+    (tmp_path / ".aws/config").mkdir(parents=True)
+    with pytest.raises(RuntimeError, match="write AWS config") as error:
+        async with trial._staged_credentials(RoleType.AGENT):
+            pytest.fail("A failed config write must prevent phase entry")
+    assert ".aws/config" in str(error.value)
+    assert not (tmp_path / ".aws/creds").exists()
+
+
+@pytest.mark.asyncio
+async def test_refresh_updates_a_long_lived_sdk_session(
+    tmp_path, fake_creds, shell_environment, mocker, monkeypatch
+):
+    from botocore.session import Session
+
+    trial = _make_trial(tmp_path)
+    trial.agent_environment = shell_environment
+    credentials = fake_creds.return_value.get_credentials.return_value
+    # Inside the SDK's advisory window, the same client re-reads the process output.
+    credentials._expiry_time = datetime.now(timezone.utc) + timedelta(minutes=10)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    refresh = asyncio.Event()
+    refreshed = asyncio.Event()
+
+    async def loop(mint, expires_at, log):
+        await refresh.wait()
+        await mint()
+        refreshed.set()
+        await asyncio.Event().wait()
+
+    mocker.patch.object(aws_trial, "run_credential_refresh_loop", loop)
+    async with trial._staged_credentials(RoleType.AGENT):
+        session = Session(profile="PRIMARY")
+        session.set_config_variable("config_file", str(tmp_path / ".aws/config"))
+        session.set_config_variable("credentials_file", str(tmp_path / ".aws/credentials"))
+        sdk_credentials = session.get_credentials()
+        assert sdk_credentials is not None
+        assert sdk_credentials.get_frozen_credentials().access_key == "AKIA"
+        credentials.get_frozen_credentials.return_value.access_key = "REFRESHED"
+        refresh.set()
+        await asyncio.wait_for(refreshed.wait(), timeout=2)
+        assert sdk_credentials.get_frozen_credentials().access_key == "REFRESHED"
+
+
+@pytest.mark.asyncio
+async def test_phase_exit_waits_for_upload_before_cleanup(
+    tmp_path, fake_creds, shell_environment, mocker
+):
+    """A transport write that survives cancellation must finish before cleanup."""
+    trial = _make_trial(tmp_path)
+    trial.agent_environment = shell_environment
+    execute = shell_environment.exec.side_effect
+    begin_refresh, upload_started, release_upload = (
+        asyncio.Event(),
+        asyncio.Event(),
+        asyncio.Event(),
+    )
+    phase_entered, end_phase = asyncio.Event(), asyncio.Event()
+    remote_writes = []
+
+    async def delayed_write(command):
+        upload_started.set()
+        await release_upload.wait()
+        return await execute(command=command)
+
+    async def transport(*, command, **kwargs):
+        if begin_refresh.is_set() and not remote_writes:
+            remote_writes.append(asyncio.create_task(delayed_write(command)))
+            return await asyncio.shield(remote_writes[0])
+        return await execute(command=command)
+
+    async def loop(mint, expires_at, log):
+        await begin_refresh.wait()
+        await mint()
+
+    async def phase():
+        async with trial._staged_credentials(RoleType.AGENT):
+            phase_entered.set()
+            await end_phase.wait()
+
+    shell_environment.exec.side_effect = transport
+    mocker.patch.object(aws_trial, "run_credential_refresh_loop", loop)
+    task = asyncio.create_task(phase())
+    try:
+        await asyncio.wait_for(phase_entered.wait(), timeout=2)
+        begin_refresh.set()
+        await asyncio.wait_for(upload_started.wait(), timeout=2)
+        end_phase.set()
+        await asyncio.sleep(0.02)
+        assert not task.done()
+        release_upload.set()
+        await task
+        assert remote_writes[0].done()
+        assert not (tmp_path / ".aws/creds").exists()
+    finally:
+        release_upload.set()
+        task.cancel()
+        await asyncio.gather(task, *remote_writes, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_verifier_credentials_use_verifier_user(tmp_path, fake_creds, mocker):
+    trial = _make_trial(tmp_path)
+    trial.task.config.agent.user = "agent"  # type: ignore[attr-defined]
+    mocker.patch.object(Trial, "_run_shared_verifier", AsyncMock())
+    await trial._run_shared_verifier(user="verifier")
+    assert {call.kwargs["user"] for call in _exec_calls(trial)} == {"verifier"}
 
 
 # --- verifier creds at the precedence the verifier reads ------------------
