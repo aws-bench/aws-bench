@@ -607,6 +607,29 @@ def test_ensure_regions_enabled_retries_scp_read_before_enable(manager, region_c
     client.enable_region.assert_called_once()
 
 
+def test_ensure_regions_enabled_retries_scp_rejected_write(manager, region_client):
+    provider, client = region_client
+    client.get_region_opt_status.side_effect = [
+        {"RegionOptStatus": state} for state in ["DISABLED", "ENABLING", "ENABLED"]
+    ]
+    client.enable_region.side_effect = [
+        ClientError(
+            {
+                "Error": {
+                    "Code": "AccessDeniedException",
+                    "Message": "explicit deny in a service control policy",
+                }
+            },
+            "EnableRegion",
+        ),
+        None,
+    ]
+    asyncio.run(manager.ensure_regions_enabled("111", ["eu-south-2"], provider))
+    assert client.enable_region.call_count == 2
+    client.enable_region.assert_called_with(RegionName="eu-south-2")
+    assert client.get_region_opt_status.call_count == 3
+
+
 def test_ensure_regions_enabled_preserves_cancellation(manager, region_client, monkeypatch):
     provider, client = region_client
     client.get_region_opt_status.return_value = {"RegionOptStatus": "ENABLING"}

@@ -1,16 +1,12 @@
-"""Tests for the shared git-fetch retry policy (``retrying_git_fetch``).
+"""Test shared retry policies without real backoff waits."""
 
-The backoff is neutralized by the autouse ``_no_git_fetch_backoff`` fixture (in
-the tests' conftest) so these assert retry *behavior* without sleeping through
-the real 5-60s exponential waits.
-"""
-
+import asyncio
 import subprocess
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 import tenacity
-from botocore.exceptions import BotoCoreError, ClientError
+from botocore.exceptions import BotoCoreError, ClientError, ReadTimeoutError
 
 from aws_bench.utils.retry import (
     is_fresh_account_transient,
@@ -18,6 +14,7 @@ from aws_bench.utils.retry import (
     is_scp_access_denied,
     retrying_git_fetch,
     retrying_region_read,
+    retrying_scp_rejected_write,
 )
 
 
@@ -199,3 +196,46 @@ def test_region_read_does_not_retry_other_errors(error: BaseException) -> None:
         retrying_region_read(operation)
     assert caught.value is error
     operation.assert_called_once_with()
+
+
+@pytest.mark.asyncio
+async def test_scp_rejected_write_exhausts_time_budget(monkeypatch: pytest.MonkeyPatch) -> None:
+    clock = [0.0]
+
+    async def advance_clock(seconds: float) -> None:
+        clock[0] += seconds
+
+    controller = retrying_scp_rejected_write.retry  # type: ignore[attr-defined]
+    monkeypatch.setattr("tenacity.time.monotonic", lambda: clock[0])
+    monkeypatch.setattr(controller, "sleep", advance_clock)
+    monkeypatch.setattr(controller, "wait", tenacity.wait_fixed(30))
+    error = ClientError(
+        {"Error": {"Code": "AccessDenied", "Message": "explicit deny in a service control policy"}},
+        "EnableRegion",
+    )
+    operation = AsyncMock(side_effect=error)
+    with pytest.raises(ClientError) as caught:
+        await retrying_scp_rejected_write(operation)
+    assert caught.value is error
+    assert clock[0] == 180
+    assert operation.await_count == 7
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "error",
+    [
+        _client_error("AccessDenied"),
+        _client_error("AuthFailure"),
+        _client_error("OptInRequired"),
+        _client_error("ConflictException"),
+        ReadTimeoutError(endpoint_url="https://account.us-east-1.amazonaws.com"),
+        asyncio.CancelledError(),
+    ],
+)
+async def test_scp_rejected_write_does_not_retry_other_errors(error: BaseException) -> None:
+    operation = AsyncMock(side_effect=error)
+    with pytest.raises(type(error)) as caught:
+        await retrying_scp_rejected_write(operation)
+    assert caught.value is error
+    operation.assert_awaited_once_with()

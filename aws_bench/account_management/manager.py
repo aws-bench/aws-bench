@@ -39,7 +39,7 @@ from aws_bench.account_management.utils import generate_account_email
 from aws_bench.logging.logger import get_logger
 from aws_bench.utils.concurrent import build_client
 from aws_bench.utils.credentials_provider import CredentialProvider, build_session_name
-from aws_bench.utils.retry import retrying_region_read
+from aws_bench.utils.retry import retrying_region_read, retrying_scp_rejected_write
 
 logger = get_logger(__name__)
 
@@ -434,7 +434,9 @@ class AccountManager:
                     )
                     logger.info("Enabling region %s in account %s", region, account_id)
                     try:
-                        await asyncio.to_thread(writer.enable_region, RegionName=region)
+                        await retrying_scp_rejected_write(
+                            lambda: asyncio.to_thread(writer.enable_region, RegionName=region)
+                        )
                     except ClientError as exc:
                         if exc.response["Error"]["Code"] != "ConflictException":
                             raise

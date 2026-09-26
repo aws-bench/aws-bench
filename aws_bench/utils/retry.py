@@ -66,6 +66,17 @@ def retrying_region_read(operation: Callable[[], _T]) -> _T:
 
 
 @tenacity.retry(
+    stop=tenacity.stop_after_delay(180),
+    wait=tenacity.wait_exponential(min=5, max=30) + tenacity.wait_random(0, 5),
+    retry=tenacity.retry_if_exception(is_scp_access_denied),
+    reraise=True,
+)
+async def retrying_scp_rejected_write(operation: Callable[[], Awaitable[_T]]) -> _T:
+    """Retry explicitly SCP-rejected writes, never uncertain outcomes."""
+    return await operation()
+
+
+@tenacity.retry(
     stop=tenacity.stop_after_attempt(5),
     wait=tenacity.wait_exponential(min=5, max=60) + tenacity.wait_random(0, 10),
     retry=tenacity.retry_if_exception_type(subprocess.CalledProcessError),
