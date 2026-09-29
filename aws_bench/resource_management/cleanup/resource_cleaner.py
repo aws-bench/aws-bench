@@ -42,9 +42,13 @@ LOG_SAMPLE_SIZE = 3
 
 # Native CloudFormation DeleteStack fallback (see _delete_failed_cfn_stacks).
 _CFN_STACK_TYPE = "AWS::CloudFormation::Stack"
-# Bounded wait for the fallback delete: ~3 minutes (18 attempts * 10s).
+# Bounded wait for the fallback delete: 30 minutes (180 attempts * 10s), aligned
+# with StackDeleter's STACK_DELETE_TIMEOUT. The previous ~3-minute bound (18 * 10s)
+# was far too short for large stacks still in DELETE_IN_PROGRESS, prematurely
+# declaring the fallback failed and failing the reset on a stack that was in fact
+# deleting normally.
 _STACK_DELETE_WAITER_DELAY = 10
-_STACK_DELETE_WAITER_MAX_ATTEMPTS = 18
+_STACK_DELETE_WAITER_MAX_ATTEMPTS = 180
 # Resource types whose custom deletion must finish before any general prepare
 # handler runs. An EKS-managed Auto Scaling group is prepared by suspending its
 # ReplaceUnhealthy process; if that happens while the owning nodegroup is still
