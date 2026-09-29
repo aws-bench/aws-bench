@@ -67,6 +67,8 @@ _MCP_SERVER_ENV_VARS = (
     "AWS_CONFIG_FILE",
     "AWS_SHARED_CREDENTIALS_FILE",
 )
+# KAS names every MCP tool ``tool_call``.
+_KAS_GENERIC_TOOL_NAMES = frozenset({"", "tool_call", "unknown"})
 
 
 class KiroCli(BaseInstalledAgent):
@@ -375,8 +377,7 @@ class KiroCli(BaseInstalledAgent):
             elif kind == "assistant" and p.get("operationType") == "Say":
                 flat.append(_agent(str(p.get("content", "")), ts))
             elif kind == "tool_call":
-                call = (p.get("toolCallId", ""), p.get("toolName", "unknown"), p.get("args") or {})
-                flat.append(_agent("", ts, [call]))
+                flat.append(_agent("", ts, [_kas_tool_call(p)]))
             elif kind == "tool_result":
                 flat.append(
                     _result(
@@ -409,10 +410,10 @@ class KiroCli(BaseInstalledAgent):
                 flat.append(_user(text, self._ms_to_iso(ts * 1000) if ts else None))
             elif kind == "AssistantMessage":
                 calls = [
-                    (
-                        c["data"].get("toolUseId", ""),
-                        c["data"].get("name", "unknown"),
-                        c["data"].get("input", {}),
+                    ToolCall(
+                        tool_call_id=c["data"].get("toolUseId", ""),
+                        function_name=c["data"].get("name", "unknown"),
+                        arguments=c["data"].get("input", {}),
                     )
                     for c in content
                     if c.get("kind") == "toolUse" and isinstance(c.get("data"), dict)
@@ -510,7 +511,11 @@ class KiroCli(BaseInstalledAgent):
             if "ToolUse" in assistant:
                 tu = assistant["ToolUse"]
                 calls = [
-                    (t.get("id", ""), t.get("name", "unknown"), t.get("args", {}))
+                    ToolCall(
+                        tool_call_id=t.get("id", ""),
+                        function_name=t.get("name", "unknown"),
+                        arguments=t.get("args", {}),
+                    )
                     for t in tu.get("tool_uses", [])
                 ]
                 flat.append(_agent(tu.get("content", ""), ts, calls))
@@ -543,10 +548,7 @@ class KiroCli(BaseInstalledAgent):
                     )
                 )
             elif e["kind"] == "agent":
-                calls = [
-                    ToolCall(tool_call_id=cid, function_name=name, arguments=args)
-                    for cid, name, args in e["calls"]
-                ]
+                calls: list[ToolCall] = e["calls"]
                 n_calls += len(calls)
                 observed = [results[c.tool_call_id] for c in calls if c.tool_call_id in results]
                 steps.append(
@@ -601,9 +603,7 @@ def _user(text: str, ts: str | None) -> dict[str, Any]:
     return {"kind": "user", "text": text, "ts": ts}
 
 
-def _agent(
-    text: str, ts: str | None, calls: list[tuple[str, str, Any]] | None = None
-) -> dict[str, Any]:
+def _agent(text: str, ts: str | None, calls: list[ToolCall] | None = None) -> dict[str, Any]:
     return {"kind": "agent", "text": text, "ts": ts, "calls": calls or []}
 
 
@@ -620,6 +620,55 @@ def _usage(
         "prompt_tokens": prompt_tokens,
         "completion_tokens": completion_tokens,
     }
+
+
+def _kas_tool_call(payload: dict[str, Any]) -> ToolCall:
+    """Parse a KAS ``tool_call`` payload.
+
+    MCP tools are named ``tool_call``; the real name is in ``title`` (``@<server>/<tool>``)
+    or ``actionType`` (``mcp_<server>_<tool>``). ``extra`` records the MCP server and, for
+    ``disclose_context``, the disclosed skill.
+    """
+    kiro_meta = (payload.get("_meta") or {}).get("kiro") or {}
+    name = str(payload.get("toolName") or "")
+    server = kiro_meta.get("serverName")
+    extra: dict[str, Any] = {}
+
+    if name in _KAS_GENERIC_TOOL_NAMES:
+        title = str(payload.get("title") or "")
+        action = str(payload.get("actionType") or "")
+        mcp_prefix = f"mcp_{server.replace('-', '_')}_" if server else None
+        if title.startswith("@") and "/" in title:
+            title_server, _, tool = title[1:].partition("/")
+            name, server = tool, server or title_server
+        elif mcp_prefix and action.startswith(mcp_prefix):
+            name = action[len(mcp_prefix) :]
+        elif action:
+            name = action
+        else:
+            name = "unknown"
+    if server:
+        extra["mcp_server"] = str(server)
+
+    disclosed = kiro_meta.get("disclosedContext")
+    if name == "disclose_context" and isinstance(disclosed, dict):
+        extra["disclosed_context"] = disclosed
+
+    args = payload.get("args")
+    if isinstance(args, str):
+        try:
+            args = json.loads(args)
+        except json.JSONDecodeError:
+            args = {"raw": args}
+    if not isinstance(args, dict):
+        args = {} if args is None else {"value": args}
+
+    return ToolCall(
+        tool_call_id=str(payload.get("toolCallId") or ""),
+        function_name=name,
+        arguments=args,
+        extra=extra or None,
+    )
 
 
 def _join_parts(parts: Any) -> str:
