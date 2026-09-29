@@ -1,5 +1,7 @@
 """Tests for the Kiro CLI agent."""
 
+import json
+import shlex
 from pathlib import Path
 from typing import cast
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -171,6 +173,74 @@ class TestKiroCliRun:
         assert '"waitForReady": true' in mcp_command
         assert "kiro-cli settings mcp.noInteractiveTimeout 120000" in mcp_command
 
+    @staticmethod
+    def _written_mcp_json(calls) -> dict:
+        command = next(
+            c.kwargs.get("command", "") for c in calls if "mcp.json" in c.kwargs.get("command", "")
+        )
+        tokens = shlex.split(command)
+        return json.loads(tokens[tokens.index("echo") + 1])
+
+    @pytest.mark.asyncio
+    async def test_run_forwards_aws_selectors_to_stdio_mcp_servers(self, logs_dir: Path):
+        agent = KiroCli(
+            logs_dir=logs_dir,
+            extra_env={
+                "AWS_PROFILE": "PRIMARY",
+                "AWS_DEFAULT_PROFILE": "PRIMARY",
+                "AWS_REGION": "us-east-1",
+                "AWS_DEFAULT_REGION": "us-east-1",
+                "AWS_ACCESS_KEY_ID": "",
+                "AWS_SECRET_ACCESS_KEY": "",
+                "AWS_SESSION_TOKEN": "",
+                "MCP_TIMEOUT": "30000",
+            },
+        )
+        stdio = MagicMock()
+        stdio.name = "local"
+        stdio.transport = "stdio"
+        stdio.command = "uvx"
+        stdio.args = ["example-mcp-server"]
+        http = MagicMock()
+        http.name = "remote"
+        http.transport = "streamable-http"
+        http.url = "https://example.com/mcp"
+        agent.mcp_servers = cast(list, [stdio, http])
+
+        environment = MagicMock()
+        environment.exec = AsyncMock(return_value=MagicMock(return_code=0, stdout="", stderr=""))
+
+        host_env = {"KIRO_API_KEY": "ksk_test", "AWS_PROFILE": "runner-host"}
+        with patch.dict("os.environ", host_env, clear=True):
+            await agent.run("Do the task", environment, MagicMock())
+
+        servers = self._written_mcp_json(environment.exec.call_args_list)["mcpServers"]
+        assert servers["local"]["env"] == {
+            "AWS_PROFILE": "PRIMARY",
+            "AWS_DEFAULT_PROFILE": "PRIMARY",
+            "AWS_REGION": "us-east-1",
+            "AWS_DEFAULT_REGION": "us-east-1",
+        }
+        assert "env" not in servers["remote"]
+
+    @pytest.mark.asyncio
+    async def test_run_without_aws_env_writes_no_server_env(self, agent: KiroCli):
+        server = MagicMock()
+        server.name = "test-server"
+        server.transport = "stdio"
+        server.command = "node"
+        server.args = ["server.js"]
+        agent.mcp_servers = cast(list, [server])
+
+        environment = MagicMock()
+        environment.exec = AsyncMock(return_value=MagicMock(return_code=0, stdout="", stderr=""))
+
+        with patch.dict("os.environ", {"KIRO_API_KEY": "ksk_test"}, clear=True):
+            await agent.run("Do the task", environment, MagicMock())
+
+        servers = self._written_mcp_json(environment.exec.call_args_list)["mcpServers"]
+        assert "env" not in servers["test-server"]
+
     @pytest.mark.asyncio
     async def test_run_with_skills_dir(self, logs_dir: Path):
         agent = KiroCli(logs_dir=logs_dir, skills_dir="/harbor/skills")
@@ -206,6 +276,39 @@ class TestKiroCliBuildMcpJson:
             "my-server": {"command": "node", "args": ["index.js"], "waitForReady": True}
         }
 
+    def test_stdio_env_is_written_for_stdio_servers_only(self):
+        stdio = MagicMock()
+        stdio.name = "local"
+        stdio.transport = "stdio"
+        stdio.command = "uvx"
+        stdio.args = ["example-mcp-server"]
+        http = MagicMock()
+        http.name = "remote"
+        http.transport = "streamable-http"
+        http.url = "https://example.com/mcp"
+
+        result = KiroCli._build_mcp_json([stdio, http], {"AWS_PROFILE": "PRIMARY"})
+        assert result == {
+            "local": {
+                "command": "uvx",
+                "args": ["example-mcp-server"],
+                "env": {"AWS_PROFILE": "PRIMARY"},
+                "waitForReady": True,
+            },
+            "remote": {"url": "https://example.com/mcp", "waitForReady": True},
+        }
+
+    def test_empty_stdio_env_writes_no_env_key(self):
+        server = MagicMock()
+        server.name = "my-server"
+        server.transport = "stdio"
+        server.command = "node"
+        server.args = ["index.js"]
+
+        result = KiroCli._build_mcp_json([server], {})
+        assert result is not None
+        assert "env" not in result["my-server"]
+
     def test_builds_http_server(self):
         server = MagicMock()
         server.name = "remote"
@@ -229,6 +332,32 @@ class TestKiroCliBuildMcpJson:
         result = KiroCli._build_mcp_json([stdio, http])
         assert result is not None
         assert all(entry["waitForReady"] is True for entry in result.values())
+
+
+class TestKiroCliMcpServerEnv:
+    def test_keeps_only_non_empty_selectors(self, logs_dir: Path):
+        agent = KiroCli(
+            logs_dir=logs_dir,
+            extra_env={
+                "AWS_PROFILE": "PRIMARY",
+                "AWS_REGION": "us-west-2",
+                "AWS_DEFAULT_PROFILE": "",
+                "AWS_SESSION_TOKEN": "",
+                "AWS_ACCESS_KEY_ID": "AKIA-not-forwarded",
+                "UNRELATED": "x",
+            },
+        )
+        assert agent._mcp_server_env({"KIRO_API_KEY": "ksk_test"}) == {
+            "AWS_PROFILE": "PRIMARY",
+            "AWS_REGION": "us-west-2",
+        }
+
+    def test_extra_env_wins_over_exec_env(self, logs_dir: Path):
+        agent = KiroCli(logs_dir=logs_dir, extra_env={"AWS_REGION": "eu-west-1"})
+        assert agent._mcp_server_env({"AWS_REGION": "us-east-1", "AWS_PROFILE": "p"}) == {
+            "AWS_PROFILE": "p",
+            "AWS_REGION": "eu-west-1",
+        }
 
 
 class TestAgentEngineFlag:
