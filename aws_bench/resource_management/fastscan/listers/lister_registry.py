@@ -65,6 +65,7 @@ SUPERSEDED_BY_CUSTOM_LISTER: frozenset[tuple[str, str]] = frozenset(
         # the CustomLister runs the caller-scoped API instead.
         ("ec2", "DescribeManagedPrefixLists"),  # → AWS::EC2::PrefixList
         ("ec2", "DescribeVpcEndpointServiceConfigurations"),  # → AWS::EC2::VPCEndpointService
+        ("gamelift", "list_locations"),  # → AWS::GameLift::Location
         ("lexv2-models", "ListBots"),  # → AWS::Lex::Bot
         ("mq", "ListBrokers"),  # → AWS::AmazonMQ::Broker
         ("mq", "ListConfigurations"),  # → AWS::AmazonMQ::Configuration

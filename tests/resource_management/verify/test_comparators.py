@@ -125,6 +125,40 @@ def test_filter_aws_managed_resources_removes_default_iot_domain_configurations(
     }
 
 
+def test_filter_aws_managed_resources_removes_aws_managed_gamelift_locations():
+    """AWS-managed GameLift locations (Region / Local Zone names) are filtered out.
+
+    ``gamelift:ListLocations`` returns the AWS-owned locations GameLift supports. They are
+    absent from the scenario snapshot and cannot be deleted, so an account that lists them
+    would otherwise fail every reset/verify with "N new resources". Custom locations
+    (customer-created, ``custom-`` prefix) are kept.
+    """
+    resources = {
+        "AWS::GameLift::Location": [
+            {"Identifier": "us-east-1"},
+            {"Identifier": "us-east-1-atl-2"},
+            {"Identifier": "ap-south-2"},
+            {"Identifier": "custom-my-location"},
+        ],
+    }
+
+    filtered = filter_aws_managed_resources(resources)
+
+    assert {r["Identifier"] for r in filtered["AWS::GameLift::Location"]} == {"custom-my-location"}
+
+
+def test_filter_aws_managed_resources_drops_gamelift_type_when_only_aws_locations():
+    """A type whose entries are all AWS-managed disappears from the result entirely."""
+    resources = {
+        "AWS::GameLift::Location": [
+            {"Identifier": "us-west-2"},
+            {"Identifier": "us-west-2-lax-1"},
+        ],
+    }
+
+    assert "AWS::GameLift::Location" not in filter_aws_managed_resources(resources)
+
+
 def test_filter_aws_managed_resources_removes_service_managed_secrets():
     """Service-managed secrets ("<service>!") are filtered; customer secrets kept.
 
