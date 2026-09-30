@@ -4,8 +4,8 @@ Provisions accounts and submits quota increases for a set of scenarios:
 
   Provisioning — bounded by ``n_concurrent``. For each
     ``(scenario, account_tag)`` pair, ensure an account exists, reconcile
-    its region SCP, wait for the org-access role, enable its regions, and
-    submit each scenario's ``[[quotas]]`` without waiting for approval.
+    its region SCP, wait for the org-access role and regional readiness, and submit each scenario's
+    ``[[quotas]]`` without waiting for approval.
 
   Account-limit reaction — if account creation fails because the AWS
     Organizations "maximum number of accounts" limit is hit, file a Service
@@ -68,6 +68,7 @@ from aws_bench.scenario.exceptions import (
 from aws_bench.scenario.job import ScenarioJob
 from aws_bench.scenario.scenario import Scenario
 from aws_bench.utils.credentials_provider import CredentialProvider, build_session_name
+from aws_bench.utils.regions import wait_for_region_access
 
 logger = get_logger(__name__)
 
@@ -459,7 +460,8 @@ async def _provision_all(
     """Provision every (scenario, account_tag) pair in two phases.
 
     Phase 1 — Account creation, bounded by ``min(n_concurrent, _ACCOUNT_CREATION_MAX_CONCURRENT)``.
-    Phase 2 — ``_provision_account_lifecycle`` per account, bounded by ``n_concurrent``.
+    Phase 2 — Region SCP + role wait + quota submission + baseline capture,
+    bounded by ``n_concurrent``.
     """
     # Phase 1: Create accounts with hard cap of 3 concurrent.
     logger.info(
@@ -484,6 +486,7 @@ async def _provision_all(
         creation_tasks = [tg.create_task(_create_one(sc, tag)) for sc, tag in pairs]
     creation_results = [t.result() for t in creation_tasks]
 
+    # Phase 2: For successful accounts, run role wait + quota + snapshot.
     lifecycle_sem = asyncio.Semaphore(n_concurrent)
 
     # Build index from (scenario_name, account_tag) -> (ScenarioManifest, result)
@@ -646,8 +649,9 @@ async def _provision_account_lifecycle(
     result: ProvisionedAccount,
     on_event: HookCallback | None,
 ) -> ProvisionedAccount:
-    """Phase 2: region SCP, role wait, region enablement, quotas, baseline capture.
+    """Reconcile the SCP, await role/region readiness, then submit quotas and capture a baseline.
 
+    Expects ``result.account_id`` to be set (Phase 1 succeeded).
     Emits ROLE_START, QUOTAS_START, SNAPSHOT_START, and END events.
     """
     assert result.account_id is not None, "Phase 2 requires a Phase 1 account_id"
@@ -706,7 +710,13 @@ async def _provision_account_lifecycle(
 
         try:
             await account_manager.ensure_regions_enabled(
-                account_id, list(scenario.scenario.regions)
+                account_id, list(scenario.scenario.regions), cred_provider
+            )
+            session = cred_provider.get_session_for_account(
+                account_id, ORG_ACCESS_ROLE, build_session_name("session")
+            )
+            await asyncio.to_thread(
+                wait_for_region_access, session, list(scenario.scenario.regions)
             )
         except Exception as exc:  # noqa: BLE001
             return fail("Region readiness", exc)

@@ -38,10 +38,6 @@ CONTAMINATION_TAG_MAX_ATTEMPTS = 3
 # Account creation polling
 POLL_TIMEOUT_SEC = 300
 
-# Region opt-in wait during env init. Enablement can outlast it; rerunning env init resumes.
-REGION_OPT_IN_TIMEOUT_SEC = 1800
-REGION_OPT_IN_POLL_INTERVAL_SEC = 10
-
 # Retries for account creation on EMAIL_ALREADY_EXISTS. Each attempt regenerates
 # the email (only per-second timestamp entropy), so waits must exceed a second.
 EMAIL_COLLISION_MAX_ATTEMPTS = 5

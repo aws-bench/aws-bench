@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -465,6 +466,7 @@ def test_ensure_scp_retries_on_policy_type_not_enabled(org_client):
 
 
 def test_ensure_region_restriction_scp_creates_and_attaches_to_accounts(org_client):
+    """Creates per-scenario SCP and attaches to each account."""
     client, mock_boto = org_client
     mock_boto.get_paginator.return_value.paginate.return_value = [{"Policies": []}]
     mock_boto.create_policy.return_value = {"Policy": {"PolicySummary": {"Id": "p-reg123"}}}
@@ -494,6 +496,7 @@ def test_ensure_region_restriction_scp_creates_and_attaches_to_accounts(org_clie
     assert mock_boto.attach_policy.call_count == 2
     mock_boto.attach_policy.assert_any_call(PolicyId="p-reg123", TargetId="111")
     mock_boto.attach_policy.assert_any_call(PolicyId="p-reg123", TargetId="222")
+    mock_boto.detach_policy.assert_not_called()
 
 
 def test_ensure_region_restriction_scp_reuses_existing_policy(org_client):
@@ -602,6 +605,57 @@ def test_ensure_region_restriction_scp_updates_when_regions_change(org_client):
     mock_boto.update_policy.assert_called_once_with(PolicyId="p-exist", Content=expected_content)
 
 
+@pytest.mark.parametrize("has_account_exceptions", [False, True])
+def test_ensure_region_restriction_scp_upgrades_old_policy_with_same_regions(
+    org_client: tuple[OrganizationsClient, MagicMock],
+    has_account_exceptions: bool,
+) -> None:
+    """Upgrade attached legacy policies in place without relaxing allowed regions."""
+    client, mock_boto = org_client
+    desired_content = client._build_region_restriction_policy(["eu-south-2"])
+    old_policy = json.loads(desired_content)
+    old_policy["Statement"] = old_policy["Statement"][:1]
+    old_statement = old_policy["Statement"][0]
+    if not has_account_exceptions:
+        old_statement["NotAction"] = [
+            action for action in old_statement["NotAction"] if not action.startswith("account:")
+        ]
+    mock_boto.get_paginator.return_value.paginate.return_value = [
+        {"Policies": [{"Name": "awsbench-region-restrict-my-scenario", "Id": "p-exist"}]}
+    ]
+    mock_boto.describe_policy.return_value = {"Policy": {"Content": json.dumps(old_policy)}}
+    mock_boto.list_targets_for_policy.return_value = {
+        "Targets": [{"TargetId": "111", "Type": "ACCOUNT"}]
+    }
+
+    with patch.object(client, "_enable_scp_policy_type"):
+        client.ensure_region_restriction_scp("my-scenario", ["eu-south-2"], ["111"])
+
+    mock_boto.update_policy.assert_called_once_with(PolicyId="p-exist", Content=desired_content)
+    updated_policy = json.loads(mock_boto.update_policy.call_args.kwargs["Content"])
+    updated_statement = updated_policy["Statement"][0]
+    added_exceptions = set(updated_statement["NotAction"]) - set(old_statement["NotAction"])
+    assert added_exceptions == (
+        set() if has_account_exceptions else {"account:GetRegionOptStatus", "account:EnableRegion"}
+    )
+    assert updated_policy["Statement"][1] == {
+        "Sid": "DenyOutOfScopeRegionOptIn",
+        "Effect": "Deny",
+        "Action": "account:EnableRegion",
+        "Resource": "*",
+        "Condition": {"StringNotEquals": {"account:TargetRegion": ["eu-south-2"]}},
+    }
+    updated_statement["NotAction"] = old_statement["NotAction"]
+    updated_policy["Statement"] = updated_policy["Statement"][:1]
+    assert updated_policy == old_policy
+    assert updated_statement["Condition"] == {
+        "StringNotEquals": {"aws:RequestedRegion": ["eu-south-2"]}
+    }
+    mock_boto.create_policy.assert_not_called()
+    mock_boto.attach_policy.assert_not_called()
+    mock_boto.detach_policy.assert_not_called()
+
+
 def test_ensure_region_restriction_scp_no_update_when_regions_reordered(org_client):
     """Reordering the same region set must not trigger a redundant update_policy."""
     client, mock_boto = org_client
@@ -639,9 +693,30 @@ def test_ensure_region_restriction_scp_no_update_when_regions_reordered(org_clie
     mock_boto.update_policy.assert_not_called()
 
 
-def test_build_region_restriction_policy_structure(org_client):
-    import json
+def test_build_region_restriction_policy_exempts_only_required_account_actions(
+    org_client: tuple[OrganizationsClient, MagicMock],
+) -> None:
+    """Allow global region initialization calls without opening other account APIs."""
+    client, _ = org_client
+    policy = json.loads(client._build_region_restriction_policy(["eu-south-2"]))
 
+    assert len(policy["Statement"]) == 2
+    statement = policy["Statement"][0]
+    exceptions = statement["NotAction"]
+    assert {action for action in exceptions if action.startswith("account:")} == {
+        "account:GetRegionOptStatus",
+        "account:EnableRegion",
+    }
+    assert "account:*" not in exceptions
+    assert "account:DisableRegion" not in exceptions
+    assert "*" not in exceptions
+    assert statement["Effect"] == "Deny"
+    assert statement["Resource"] == "*"
+    assert statement["Condition"] == {"StringNotEquals": {"aws:RequestedRegion": ["eu-south-2"]}}
+
+
+def test_build_region_restriction_policy_structure(org_client):
+    """Produces valid JSON with correct policy structure."""
     client, _ = org_client
     regions = ["us-west-2", "us-east-1"]
     result = client._build_region_restriction_policy(regions)
@@ -655,64 +730,15 @@ def test_build_region_restriction_policy_structure(org_client):
     assert "NotAction" in stmt
     assert isinstance(stmt["NotAction"], list)
     assert stmt["Resource"] == "*"
+    # Regions are canonicalized (sorted) regardless of input order.
     assert stmt["Condition"]["StringNotEquals"]["aws:RequestedRegion"] == ["us-east-1", "us-west-2"]
+
+    # Target-region guard is independent of the global Account endpoint region.
     assert policy["Statement"][1] == {
-        "Sid": "DenyAccountSettingChanges",
+        "Sid": "DenyOutOfScopeRegionOptIn",
         "Effect": "Deny",
-        "Action": [
-            "account:EnableRegion",
-            "account:DisableRegion",
-            "account:Put*",
-            "account:Delete*",
-        ],
+        "Action": "account:EnableRegion",
         "Resource": "*",
+        "Condition": {"StringNotEquals": {"account:TargetRegion": ["us-east-1", "us-west-2"]}},
     }
-
-
-# ── Region opt-in ──
-
-
-@pytest.fixture()
-def org_client_per_service():
-    """Create an OrganizationsClient with one mocked boto3 client per service."""
-    with patch("aws_bench.account_management.organizations.CredentialProvider") as mock_cred_cls:
-        clients = {"organizations": MagicMock(), "account": MagicMock()}
-        session = mock_cred_cls.get.return_value.session
-        session.client.side_effect = lambda service, **_: clients[service]
-        yield OrganizationsClient(), clients
-
-
-def test_enable_account_management_access_enables_trusted_access(org_client_per_service):
-    """Enables Organizations trusted access for the Account Management service principal."""
-    client, clients = org_client_per_service
-
-    client.enable_account_management_access()
-
-    clients["organizations"].enable_aws_service_access.assert_called_once_with(
-        ServicePrincipal="account.amazonaws.com"
-    )
-
-
-def test_get_region_opt_status_reads_member_account(org_client_per_service):
-    """Reads the member account's status by AccountId and returns RegionOptStatus."""
-    client, clients = org_client_per_service
-    clients["account"].get_region_opt_status.return_value = {
-        "RegionName": "eu-south-2",
-        "RegionOptStatus": "DISABLED",
-    }
-
-    assert client.get_region_opt_status("222222222222", "eu-south-2") == "DISABLED"
-    clients["account"].get_region_opt_status.assert_called_once_with(
-        AccountId="222222222222", RegionName="eu-south-2"
-    )
-
-
-def test_enable_region_targets_member_account(org_client_per_service):
-    """Requests opt-in for the member account by AccountId."""
-    client, clients = org_client_per_service
-
-    client.enable_region("222222222222", "eu-south-2")
-
-    clients["account"].enable_region.assert_called_once_with(
-        AccountId="222222222222", RegionName="eu-south-2"
-    )
+    assert all("Principal" not in statement for statement in policy["Statement"])

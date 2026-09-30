@@ -142,7 +142,7 @@ uv run aws-bench env cleanup --env-name awsbench-env -d aws-bench-quickstart
 
 If step 4 produces per-trial rewards (see [Checking results](#checking-results)), your environment is configured correctly.
 
-> **Note:** `env init` opts managed accounts into their declared opt-in regions from the management account and waits up to 30 minutes; AWS enablement can take hours, so after a timeout rerun `env init` to resume. Pre-existing accounts must have their regions enabled already. Service-quota increases may also need approval: `--wait-for-quotas` blocks until they're ready; without it, check status later with `aws-bench env show`.
+> **Note:** `env init` enables declared opt-in regions in managed accounts and waits up to 30 minutes per region before checking regional access. AWS enablement can take hours; rerun `env init` after a timeout to resume. The region SCP remains attached and permits opt-in only for declared regions. Pre-existing accounts must have their regions enabled externally. Service-quota increases may also need approval: `--wait-for-quotas` blocks until they're ready; without it, check status later with `aws-bench env show`.
 
 ### Example agent and model IDs
 
