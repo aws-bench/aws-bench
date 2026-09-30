@@ -1486,7 +1486,6 @@ def test_scp_failure_aborts_deploy_before_script(
 def test_non_deploy_phases_do_not_touch_region_scp(
     tmp_path, fake_container, fake_creds, mock_account_manager, phase
 ):
-    """Every phase except DEPLOY runs its script without touching the SCP."""
     trial = _build_trial(tmp_path, fake_container, fake_creds)
 
     asyncio.run(trial._run_phase_in_container(phase))
@@ -1593,13 +1592,11 @@ def test_deploy_deletes_review_in_progress_stacks(tmp_path, fake_container, fake
 
 
 def test_changeset_cleanup_failure_does_not_block_deploy(tmp_path, fake_container, fake_creds):
-    """Changeset cleanup is best-effort; failures don't prevent the deploy."""
     fake_creds.get_session_for_account.side_effect = RuntimeError("creds boom")
 
     trial = _build_trial(tmp_path, fake_container, fake_creds)
     result = asyncio.run(trial.run(ScenarioPhase.DEPLOY))
 
-    # Deploy still ran and succeeded despite cleanup failure
     assert result.success
     fake_container.run_phase.assert_called_once()
 
@@ -1615,7 +1612,6 @@ def test_non_deploy_phase_skips_changeset_cleanup(tmp_path, fake_container, fake
 def test_changeset_cleanup_credential_failure_continues_to_next_account(
     tmp_path, fake_container, fake_creds
 ):
-    """If get_session_for_account fails for one account, others still get cleaned."""
     mock_cfn = MagicMock()
     mock_cfn.get_paginator.return_value.paginate.return_value = [
         {"StackSummaries": [{"StackName": "s", "StackStatus": "CREATE_COMPLETE"}]}
@@ -1629,7 +1625,6 @@ def test_changeset_cleanup_credential_failure_continues_to_next_account(
         mock_session,
     ]
 
-    # Two accounts in the mapping
     sd = _make_scenario_dir(tmp_path)
     config = _make_trial_config(sd, tmp_path / "out")
     config.account_mapping = {"PRIMARY": "111111111111", "SECONDARY": "222222222222"}

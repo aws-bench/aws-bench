@@ -338,14 +338,9 @@ class ScenarioTrial:
     ) -> None:
         """Build/start the container (if needed), apply guardrails, run the phase script.
 
-        Idempotent on start: the post-reset deploy redeploy reuses this and may
-        already have a running container (from a reset.sh) or none (a reset with no
-        reset.sh) — start only when not already running, since ``container.start``
-        refuses a double start.
-
-        ``check_contamination`` gates the DEPLOY contamination refusal. The reset's
-        own redeploy passes ``False``: it recovers a contaminated account, so it must
-        not block on the flag it is about to clear.
+        Reuses a running container, since ``container.start`` refuses a double start.
+        ``check_contamination=False`` skips the DEPLOY contamination refusal, for a
+        redeploy that recovers a contaminated account.
         """
         await self._invoke_hooks(ScenarioEvent.ENVIRONMENT_START, phase=phase)
         if not self._container.is_started:
