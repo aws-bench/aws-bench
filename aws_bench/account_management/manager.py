@@ -11,6 +11,7 @@ from tenacity import retry, retry_if_exception, stop_after_attempt, wait_random_
 from aws_bench.account_management.constants import (
     CONTAMINATED_TAG_KEY,
     CONTAMINATION_TAG_MAX_ATTEMPTS,
+    DEFAULT_ENABLED_REGIONS,
     EMAIL_COLLISION_MAX_ATTEMPTS,
     REGION_OPT_IN_POLL_INTERVAL_SEC,
     REGION_OPT_IN_TIMEOUT_SEC,
@@ -72,6 +73,8 @@ class AccountManager:
     def __init__(self) -> None:
         """Initialize the account manager."""
         self._org = OrganizationsClient()
+        self._account_management_lock = asyncio.Lock()
+        self._account_management_enabled = False
         active = active_account_config()
         self._preexisting: PreexistingEnvironmentConfig | None = active[0] if active else None
         self._preexisting_path = active[1] if active else None
@@ -96,7 +99,6 @@ class AccountManager:
     def init_organization(self, ou_name: str) -> str:
         """One-time setup: enable Organizations and create the testing-environment OU.
 
-        Also enables AWS Account Management trusted access, which region opt-in needs.
         Idempotent — safe to call multiple times. Returns the OU id.
         """
         if self._preexisting is not None:
@@ -118,7 +120,6 @@ class AccountManager:
             return "preexisting"
 
         self._org.create_organization()
-        self._org.enable_account_management_access()
         org_info = self._org.get_org_info()
 
         existing = self._org.find_ou_by_name(org_info.root_id, ou_name)
@@ -377,9 +378,10 @@ class AccountManager:
         self._org.ensure_region_restriction_scp(scenario_name, allowed_regions, account_ids)
 
     async def ensure_regions_enabled(self, account_id: str, regions: list[str]) -> None:
-        """Opt a managed account into ``regions`` and wait until all are enabled.
+        """Opt a managed account into its declared opt-in regions and wait until all are enabled.
 
-        Pre-existing accounts are only checked against the allowlist.
+        Default regions need no call. Pre-existing accounts are only checked against the
+        allowlist.
 
         Raises:
             AccountManagementError: A region cannot be enabled from its current state, or
@@ -388,7 +390,10 @@ class AccountManager:
         if self._preexisting is not None:
             self._validate_allowlisted_accounts([account_id])
             return
-        pending = list(regions)
+        pending = [region for region in regions if region not in DEFAULT_ENABLED_REGIONS]
+        if not pending:
+            return
+        await self._enable_account_management_access()
         requested: set[str] = set()
         deadline = time.monotonic() + REGION_OPT_IN_TIMEOUT_SEC
         while True:
@@ -426,6 +431,13 @@ class AccountManager:
                     "rerun env init to resume"
                 )
             await asyncio.sleep(REGION_OPT_IN_POLL_INTERVAL_SEC)
+
+    async def _enable_account_management_access(self) -> None:
+        """Enable trusted access for Account Management once per manager; opt-in calls need it."""
+        async with self._account_management_lock:
+            if not self._account_management_enabled:
+                await asyncio.to_thread(self._org.enable_account_management_access)
+                self._account_management_enabled = True
 
     @retry(
         wait=wait_random_exponential(multiplier=1, min=2, max=30),

@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import itertools
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, call, patch
 
 import pytest
 from botocore.exceptions import ClientError
@@ -89,24 +89,12 @@ def test_init_organization_attaches_scp_to_new_ou(manager):
     manager._org.ensure_org_role_protection_scp.assert_called_once_with("ou-new")
 
 
-def test_init_organization_enables_account_management_after_creating_org(manager):
-    """Trusted access for Account Management needs the organization to exist first."""
+def test_init_organization_does_not_enable_account_management(manager):
+    """Trusted access is enabled lazily by ensure_regions_enabled, only for opt-in regions."""
     manager._org.get_org_info.return_value = _make_org_info()
     manager._org.find_ou_by_name.return_value = "ou-existing"
 
     manager.init_organization("test-env")
-
-    assert [c[0] for c in manager._org.mock_calls[:2]] == [
-        "create_organization",
-        "enable_account_management_access",
-    ]
-
-
-def test_init_organization_skips_account_management_in_preexisting_mode(manager):
-    manager._preexisting = MagicMock()
-    manager._preexisting.name = "test-env"
-
-    assert manager.init_organization("test-env") == "preexisting"
 
     manager._org.enable_account_management_access.assert_not_called()
 
@@ -524,12 +512,46 @@ def _stub_region_statuses(manager, statuses: dict[str, list[str]]) -> None:
 
 
 def test_ensure_regions_enabled_skips_enabled_regions(manager, slept):
-    _stub_region_statuses(manager, {"us-east-1": ["ENABLED_BY_DEFAULT"], "eu-south-2": ["ENABLED"]})
+    _stub_region_statuses(manager, {"eu-south-2": ["ENABLED"]})
 
     asyncio.run(manager.ensure_regions_enabled("111", ["us-east-1", "eu-south-2"]))
 
     manager._org.enable_region.assert_not_called()
+    assert [c.args[1] for c in manager._org.get_region_opt_status.call_args_list] == ["eu-south-2"]
     assert slept == []
+
+
+def test_ensure_regions_enabled_makes_no_calls_for_default_regions(manager):
+    asyncio.run(manager.ensure_regions_enabled("111", ["us-east-1", "eu-west-1"]))
+
+    assert manager._org.mock_calls == []
+
+
+def test_ensure_regions_enabled_shares_one_trusted_access_call(manager, monkeypatch):
+    """Concurrent accounts share one trusted-access call, made before any Account API read."""
+    _stub_region_statuses(manager, {"eu-south-2": ["ENABLED"]})
+
+    async def to_thread_after_a_turn(func, /, *args):
+        """Let the other account run before ``func`` returns, as a real thread hand-off does."""
+        turn = asyncio.get_running_loop().create_future()
+        turn.get_loop().call_soon(turn.set_result, None)
+        await turn
+        return func(*args)
+
+    monkeypatch.setattr(
+        "aws_bench.account_management.manager.asyncio.to_thread", to_thread_after_a_turn
+    )
+
+    async def both() -> None:
+        await asyncio.gather(
+            manager.ensure_regions_enabled("111", ["eu-south-2"]),
+            manager.ensure_regions_enabled("222", ["eu-south-2"]),
+        )
+
+    asyncio.run(both())
+
+    assert manager._org.enable_account_management_access.call_count == 1
+    assert manager._org.mock_calls[0] == call.enable_account_management_access()
 
 
 def test_ensure_regions_enabled_requests_once_and_polls_regions_together(manager, slept):

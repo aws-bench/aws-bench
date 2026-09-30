@@ -42,6 +42,29 @@ POLL_TIMEOUT_SEC = 300
 REGION_OPT_IN_TIMEOUT_SEC = 1800
 REGION_OPT_IN_POLL_INTERVAL_SEC = 10
 
+# Regions AWS enables in every account. Every later region is opt-in and starts DISABLED.
+DEFAULT_ENABLED_REGIONS = frozenset(
+    {
+        "ap-northeast-1",
+        "ap-northeast-2",
+        "ap-northeast-3",
+        "ap-south-1",
+        "ap-southeast-1",
+        "ap-southeast-2",
+        "ca-central-1",
+        "eu-central-1",
+        "eu-north-1",
+        "eu-west-1",
+        "eu-west-2",
+        "eu-west-3",
+        "sa-east-1",
+        "us-east-1",
+        "us-east-2",
+        "us-west-1",
+        "us-west-2",
+    }
+)
+
 # Retries for account creation on EMAIL_ALREADY_EXISTS. Each attempt regenerates
 # the email (only per-second timestamp entropy), so waits must exceed a second.
 EMAIL_COLLISION_MAX_ATTEMPTS = 5
