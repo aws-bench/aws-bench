@@ -33,6 +33,7 @@ from aws_bench.resource_management.cleanup.models import (
     is_infra_identifier,
     to_ccapi_resources,
 )
+from aws_bench.resource_management.utils.cloudformation import disable_termination_protection
 from aws_bench.utils.concurrent import build_client, interruptible_executor
 
 logger = get_logger(__name__)
@@ -391,6 +392,11 @@ class ResourceCleaner:
         its own dependency order, catching the residual the per-resource handlers
         leave behind.
 
+        Agents also create stacks with ``EnableTerminationProtection`` on, and
+        CloudFormation refuses ``DeleteStack`` on those with a ``ValidationError``.
+        Protection is turned off first, as ``StackDeleter`` does for ``env cleanup``,
+        so a protected stack no longer survives the reset and contaminates the account.
+
         Only stacks CCAPI already failed on are retried, and CDK bootstrap/toolkit
         infrastructure stacks (``CDKToolkit``, ``cdk-hnb659fds-*``) are never
         touched. Callers pass only out-of-baseline resources (reset diffs against
@@ -410,6 +416,7 @@ class ResourceCleaner:
         for resource in stacks:
             stack_name = resource.identifier
             try:
+                disable_termination_protection(client, stack_name)
                 client.delete_stack(StackName=stack_name)
                 waiter.wait(
                     StackName=stack_name,
@@ -419,10 +426,9 @@ class ResourceCleaner:
                     },
                 )
             except (ClientError, WaiterError, BotoCoreError) as e:
+                # Logged in full: truncating the error hid why DeleteStack was refused.
                 logger.warning(
-                    "Native DeleteStack fallback failed for stack '%s': %s",
-                    truncate_for_log(stack_name, LOG_TRUNCATE_SHORT),
-                    truncate_for_log(str(e), LOG_TRUNCATE_LONG),
+                    "Native DeleteStack fallback failed for stack '%s': %s", stack_name, e
                 )
                 continue
             logger.debug("Native DeleteStack fallback deleted stack '%s'", stack_name)
