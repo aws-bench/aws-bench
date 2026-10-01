@@ -18,7 +18,10 @@ from aws_bench.resource_management.ccapi.models import (
     ScanResult,
 )
 from aws_bench.resource_management.cleanup.manager import CleanupManager
-from aws_bench.resource_management.cleanup.models import StackResource
+from aws_bench.resource_management.cleanup.models import (
+    StackResource,
+    is_service_managed_studio_stack,
+)
 from aws_bench.resource_management.cleanup.resource_cleaner import ResourceCleaner
 from aws_bench.resource_management.deferred import deferred_scope, mark_deferred
 from aws_bench.resource_management.reset.models import (
@@ -45,6 +48,11 @@ logger = get_logger(__name__)
 # Max drifted stacks restored concurrently per region — small because each is a
 # heavy CFN mutation, kept under drift detection's read-only in-flight cap.
 _DRIFT_RESTORE_CONCURRENCY = 4
+
+# CloudFormation stack CFN type. A new (agent-created) stack under this key in
+# ``new_resources`` is torn down whole (stacks-first pass) so CloudFormation
+# cascades its children, rather than deleting the children individually.
+CFN_STACK_TYPE = "AWS::CloudFormation::Stack"
 
 
 class ResetManager:
@@ -314,6 +322,14 @@ class ResetManager:
                 return [], {}
 
             self._check_recoverable(verify_result)
+            # Stacks-first: delete new (agent-created) CloudFormation stacks WHOLE and
+            # wait for the cascade, so CloudFormation removes their children in
+            # dependency order. This must run BEFORE the individual sweep, which
+            # would otherwise delete a stack's children out from under it (leaving
+            # the stack wedged in DELETE_IN_PROGRESS/DELETE_FAILED). The stack
+            # entries are excluded from _delete_new_resources' sweep; the sweep then
+            # finds cascade-removed children already gone.
+            new_stack_outcome = await self._delete_new_stacks(verify_result, region_restorer)
             global_resources = await self._delete_new_resources(
                 verify_result, region_session, region
             )
@@ -328,7 +344,11 @@ class ResetManager:
                 already_handled=set(status_outcome.deleted_stacks),
             )
 
-            deleted_stacks = status_outcome.deleted_stacks + drift_outcome.deleted_stacks
+            deleted_stacks = (
+                new_stack_outcome.deleted_stacks
+                + status_outcome.deleted_stacks
+                + drift_outcome.deleted_stacks
+            )
 
             if deleted_stacks:
                 # Deleted stacks are intentionally absent (setup recreates them), so skip the
@@ -346,7 +366,10 @@ class ResetManager:
                 )
                 census = self._census_orphans(orphan_result) if orphan_result is not None else {}
                 unresolved = self._merge_orphan_maps(
-                    census, status_outcome.abandoned, drift_outcome.abandoned
+                    census,
+                    new_stack_outcome.abandoned,
+                    status_outcome.abandoned,
+                    drift_outcome.abandoned,
                 )
                 if unresolved:
                     reason = "Stacks deleted for re-setup, but reset left the region unresolved"
@@ -400,6 +423,63 @@ class ResetManager:
                 suggestion="Run 'aws-bench env cleanup' and 'aws-bench env setup'",
             )
 
+    async def _delete_new_stacks(
+        self, verify_result: VerifyResult, restorer: StackRestorer
+    ) -> StackResetOutcome:
+        """Delete new (agent-created) CloudFormation stacks whole, before the sweep.
+
+        New stacks appear in ``new_resources`` under ``AWS::CloudFormation::Stack``
+        (new by construction — diffed against the baseline, so these are
+        agent-created, not baseline stacks). Deleting the stack and waiting for the
+        cascade lets CloudFormation remove its children in dependency order; the
+        subsequent individual sweep then finds those children already gone. Routed
+        through the reset's existing ``StackRestorer._delete_for_resetup`` seam
+        (waits for terminal deletion, force-deletes / retains on ``DELETE_FAILED``),
+        and recorded so ``_reset_region`` triggers its redeploy.
+
+        Service-managed inverse-teardown stacks (``environment-*-flink-studio``,
+        owned by a KDA v2 Studio application) are EXCLUDED from the whole-stack
+        delete: a direct ``DeleteStack`` on them goes terminal ``DELETE_FAILED``
+        because AWS only removes them when the owning application is deleted. They
+        are left for their owning resource's teardown and the reset's orphan
+        re-check, never force-deleted here.
+
+        Raises:
+            ResetFailure: If any new stack could not be deleted.
+        """
+        new_stacks = (verify_result.new_resources or {}).get(CFN_STACK_TYPE) or []
+        stack_names = [
+            s["Identifier"]
+            for s in new_stacks
+            if s.get("Identifier") and not is_service_managed_studio_stack(s["Identifier"])
+        ]
+        if not stack_names:
+            return StackResetOutcome()
+
+        logger.debug("Stacks-first: deleting %d new stack(s) whole", len(stack_names))
+        deleted_stacks: list[str] = []
+        failed_stacks: list[str] = []
+        abandoned: dict[str, list[dict]] = {}
+        for stack_name in stack_names:
+            raise_if_shutdown()
+            deletion = await restorer._delete_for_resetup(stack_name)
+            if deletion.outcome is RestoreOutcome.DELETED_NEEDS_REDEPLOY:
+                deleted_stacks.append(stack_name)
+                abandoned = self._merge_orphan_maps(abandoned, deletion.abandoned)
+                logger.debug("Stacks-first: deleted new stack '%s'", stack_name)
+            else:
+                failed_stacks.append(stack_name)
+                logger.error("Stacks-first: failed to delete new stack '%s'", stack_name)
+
+        if failed_stacks:
+            raise ResetFailure(
+                reason=f"Failed to delete {len(failed_stacks)} new stack(s)",
+                details={"failed_stacks": failed_stacks},
+                suggestion="Run 'aws-bench env cleanup' for full reset",
+            )
+
+        return StackResetOutcome(deleted_stacks=deleted_stacks, abandoned=abandoned)
+
     async def _delete_new_resources(
         self, verify_result: VerifyResult, session: boto3.Session, region: str
     ) -> dict[str, list[dict]]:
@@ -430,6 +510,11 @@ class ResetManager:
         regional: dict[str, list[dict]] = {}
         global_resources: dict[str, list[dict]] = {}
         for rtype, resources in verify_result.new_resources.items():
+            if rtype == CFN_STACK_TYPE:
+                # New CloudFormation stacks are torn down whole by the stacks-first
+                # pass (_delete_new_stacks) so CloudFormation cascades their children
+                # in dependency order; never delete a stack individually here.
+                continue
             if rtype in GLOBAL_RESOURCE_TYPES:
                 global_resources[rtype] = resources
                 # Suppress the region's final verify on globals we defer to the
