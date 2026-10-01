@@ -142,13 +142,6 @@ def _stub_baseline_validation():
 
 
 @pytest.fixture(autouse=True)
-def _stub_region_readiness():
-    """Keep regional access probes offline."""
-    with patch("aws_bench.scenario.provisioning.wait_for_region_access") as ready:
-        yield ready
-
-
-@pytest.fixture(autouse=True)
 def _stub_capture():
     """Stub the PRE_SETUP capture so provisioning tests never touch S3/AWS.
 
@@ -284,10 +277,7 @@ def test_provision_scenarios_happy_path(mocks, tmp_path):
     qm.request_quotas.assert_called_once()
 
 
-def test_preexisting_mode_validates_without_provisioning(
-    mocks, tmp_path, _stub_deploy, _stub_region_readiness
-):
-    """External accounts use read-only readiness checks during env init."""
+def test_preexisting_mode_validates_without_provisioning(mocks, tmp_path, _stub_deploy):
     am, qm, cp = mocks
     am.is_preexisting = True
     am.runner_role = "AWSBenchRunner"
@@ -331,9 +321,6 @@ def test_preexisting_mode_validates_without_provisioning(
     _stub_deploy.assert_not_called()
     cp.wait_for_role.assert_not_called()
     validate_role.assert_called_once_with(cp, "111111111111")
-    _stub_region_readiness.assert_called_once_with(
-        cp.get_session_for_account.return_value, ["us-east-1"]
-    )
     qm.request_quotas.assert_not_called()
     qm.verify_quotas.assert_called_once()
 
@@ -708,9 +695,8 @@ def test_provision_end_event_succeeded_false_on_snapshot_failure(mocks, tmp_path
 
 
 def test_provision_baseline_mismatch_stops_before_scp(
-    mocks, tmp_path, _stub_baseline_validation, _stub_capture, caplog, _stub_region_readiness
+    mocks, tmp_path, _stub_baseline_validation, _stub_capture, caplog
 ):
-    """A mismatched baseline fails the account with its own log label before the SCP step."""
     am, qm, cp = mocks
     error = SnapshotRegionMismatchError("sc", "111111111111", ["us-west-2"], ["us-east-1"])
     _stub_baseline_validation.side_effect = error
@@ -729,7 +715,6 @@ def test_provision_baseline_mismatch_stops_before_scp(
     assert result.accounts[0].error is error
     assert "Baseline region check failed" in caplog.text
     am.ensure_regions_enabled.assert_not_awaited()
-    _stub_region_readiness.assert_not_called()
     am.ensure_region_restriction_scp.assert_not_called()
     cp.wait_for_role.assert_not_called()
     qm.request_quotas.assert_not_called()
@@ -737,16 +722,15 @@ def test_provision_baseline_mismatch_stops_before_scp(
 
 
 def test_provision_reconciles_scp_before_quotas_and_snapshot(
-    mocks, tmp_path, _stub_baseline_validation, _stub_capture, _stub_region_readiness
+    mocks, tmp_path, _stub_baseline_validation, _stub_capture
 ):
-    """Readiness follows SCP reconciliation and precedes quotas and baseline capture."""
+    """Provisioning runs the baseline, SCP, role, region, quota, and capture steps in order."""
     am, qm, cp = mocks
     operations = MagicMock()
     operations.attach_mock(_stub_baseline_validation, "baseline")
     operations.attach_mock(am.ensure_region_restriction_scp, "scp")
     operations.attach_mock(cp.wait_for_role, "role")
     operations.attach_mock(am.ensure_regions_enabled, "enable")
-    operations.attach_mock(_stub_region_readiness, "regions")
     operations.attach_mock(qm.request_quotas, "quota")
     operations.attach_mock(_stub_capture, "snapshot")
     regions = ["us-east-1", "us-west-2"]
@@ -783,12 +767,10 @@ def test_provision_reconciles_scp_before_quotas_and_snapshot(
         "scp",
         "role",
         "enable",
-        "regions",
         "quota",
         "snapshot",
     ]
-    am.ensure_regions_enabled.assert_awaited_once_with("111111111111", regions, cp)
-    _stub_region_readiness.assert_called_once_with(cp.get_session_for_account.return_value, regions)
+    am.ensure_regions_enabled.assert_awaited_once_with("111111111111", regions)
     _stub_baseline_validation.assert_called_once_with(
         "sc", "111111111111", regions, allow_missing=True
     )
@@ -798,14 +780,12 @@ def test_provision_reconciles_scp_before_quotas_and_snapshot(
     assert result.accounts[0].provisioned is True
 
 
-@pytest.mark.parametrize("operation", ["enable", "probe"])
 def test_provision_region_failure_stops_before_quotas_and_snapshot(
-    mocks, tmp_path, _stub_region_readiness, _stub_capture, caplog, operation
+    mocks, tmp_path, _stub_capture, caplog
 ):
     am, qm, cp = mocks
-    error = AccountManagementError("region readiness timed out")
-    failing = am.ensure_regions_enabled if operation == "enable" else _stub_region_readiness
-    failing.side_effect = error
+    error = AccountManagementError("regions not enabled")
+    am.ensure_regions_enabled.side_effect = error
     events: list[ProvisionHookEvent] = []
 
     async def on_event(event: ProvisionHookEvent) -> None:
