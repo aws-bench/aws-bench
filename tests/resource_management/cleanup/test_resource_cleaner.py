@@ -571,9 +571,8 @@ _STUDIO_STACK_NAME = "environment-abc123-flink-studio"
 def test_cfn_fallback_deletes_studio_named_stack_uniformly():
     """Studio-named stacks get the same delete path as any out-of-baseline stack.
 
-    Ordering is handled upstream (the KDA handler deletes a stack-managed app via
-    its STACK), so the fallback no longer special-cases Studio names — managing
-    stacks carry agent-chosen names anyway, so a name filter is unreliable.
+    The fallback does not special-case Studio names: managing stacks carry
+    agent-chosen names, so a name filter is unreliable.
     """
     region = "us-east-1"
     cfn = boto3.client("cloudformation", region_name=region)
@@ -626,6 +625,73 @@ def test_cfn_fallback_retries_delete_failed_stack_with_retain_resources():
     assert cfn.delete_stack.call_count == 2
     retry_kwargs = cfn.delete_stack.call_args_list[1].kwargs
     assert retry_kwargs["RetainResources"] == ["StudioLoggingOption"]
+
+
+def test_pipeline_app_first_then_stack_fallback_retains_only_failed_ids():
+    """End-to-end order for an agent-stack Studio app in one cleanup call.
+
+    The KDA custom handler deletes the application first; CCAPI then fails the
+    stack (its logging option needs the deleted app); the native fallback retries
+    with RetainResources limited to the DELETE_FAILED logical id, never
+    FORCE_DELETE_STACK, so CloudFormation still deletes the stack's other
+    resources (role, log group, Glue database).
+    """
+    from botocore.exceptions import WaiterError
+
+    app_type = "AWS::KinesisAnalyticsV2::Application"
+    app_name = "environment-2h384hj-studio-notebook"
+    stack_arn = (
+        "arn:aws:cloudformation:us-east-1:123456789012:stack/"
+        "environment-2h384hj-flink-studio-notebook/5a193610"
+    )
+    order: list[str] = []
+
+    def _app_handler(resource, _session):
+        order.append("app")
+        return HandlerResult(resource.identifier, resource.type, "delete", HandlerStatus.SUCCESS)
+
+    def _ccapi_delete(remaining):
+        order.append("ccapi")
+        assert [r.type for r in remaining] == [_CFN_TYPE]  # the app never reaches CCAPI
+        return {Resource(_CFN_TYPE, stack_arn): DeletionFailureEvent("DELETE_FAILED")}
+
+    cfn = MagicMock()
+    cfn.delete_stack.side_effect = lambda **kw: order.append("delete_stack")
+    cfn.get_waiter.return_value.wait.side_effect = [
+        WaiterError(name="StackDeleteComplete", reason="terminal failure", last_response={}),
+        None,
+    ]
+    cfn.describe_stack_resources.return_value = {
+        "StackResources": [
+            {"LogicalResourceId": "StudioLoggingOption", "ResourceStatus": "DELETE_FAILED"},
+            {"LogicalResourceId": "StudioExecutionRole", "ResourceStatus": "CREATE_COMPLETE"},
+            {"LogicalResourceId": "StudioLogGroup", "ResourceStatus": "CREATE_COMPLETE"},
+        ]
+    }
+    session = MagicMock()
+    session.client.return_value = cfn
+    cleaner = ResourceCleaner(session, "us-east-1")
+    resources = [
+        StackResource(app_name, app_name, app_type, ""),
+        StackResource(stack_arn, stack_arn, _CFN_TYPE, ""),
+    ]
+
+    with (
+        patch(
+            "aws_bench.resource_management.cleanup.resource_cleaner.CUSTOM_DELETION_REGISTRY",
+            {app_type: _app_handler},
+        ),
+        patch(_CCM_PATH) as mock_ccm_cls,
+    ):
+        mock_ccm_cls.return_value.delete_resources.side_effect = _ccapi_delete
+        result = asyncio.run(cleaner.cleanup(resources, custom_delete=True, ccapi_fallback=True))
+
+    assert result == {}
+    assert order == ["app", "ccapi", "delete_stack", "delete_stack"]
+    first, retry = (c.kwargs for c in cfn.delete_stack.call_args_list)
+    assert first == {"StackName": stack_arn}
+    assert retry == {"StackName": stack_arn, "RetainResources": ["StudioLoggingOption"]}
+    assert "DeletionMode" not in retry
 
 
 def test_cfn_fallback_delete_failed_without_blockers_stays_failed():

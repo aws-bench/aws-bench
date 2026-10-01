@@ -394,10 +394,15 @@ class ResourceCleaner:
         Only stacks CCAPI already failed on are retried, and CDK bootstrap/toolkit
         infrastructure stacks (``CDKToolkit``, ``cdk-hnb659fds-*``) are never
         touched. A stack that lands in ``DELETE_FAILED`` is retried once with
-        ``RetainResources`` for the stuck logical IDs (e.g. a Studio stack's
-        ``ApplicationCloudWatchLoggingOption`` orphaned by an earlier app-first
-        delete — virtual once the application is gone; anything real a retained
-        resource leaves behind is re-detected by the re-verify). Callers pass only
+        ``RetainResources`` for the logical IDs that actually failed. The typical
+        case is a Studio stack whose ``ApplicationCloudWatchLoggingOption`` cannot
+        be deleted because the KDA handler already removed its parent application;
+        that child is virtual once the application is gone. ``RetainResources``
+        is used rather than ``DeletionMode="FORCE_DELETE_STACK"`` because force
+        delete also retains every resource CloudFormation had not yet reached
+        (for a Studio stack: the IAM role, log group/stream and Glue database),
+        and this path has no post-delete sweep to remove them. Anything a retained
+        resource leaves behind is re-detected by the re-verify. Callers pass only
         out-of-baseline resources (reset diffs against the baseline snapshot), so a
         baseline stack never reaches this path. Returns ``failures`` with any
         successfully deleted stack removed.

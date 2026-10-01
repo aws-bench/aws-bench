@@ -298,7 +298,6 @@ def test_v2_stackless_waits_until_app_absent_from_both_listings(_sleep: MagicMoc
     v2 = _v2_list_client(name, present_polls=2)
     v1 = _v1_list_client(name, present_polls=2)
     cfn = MagicMock()
-    cfn.describe_stack_resources.return_value = {"StackResources": []}  # unmanaged
     session = _multi3_session(v2, v1, cfn)
 
     result = _delete_v2(_resource(_V2_TYPE, name), session)
@@ -412,121 +411,26 @@ def test_teardown_backs_off_between_polls(sleep_mock: MagicMock):
     assert delays[-1] == 60  # reaches the cap over the window
 
 
-# -- Ordering: a STACK-MANAGED app is deleted via its stack, never app-first --
-
-_MANAGED_APP = "environment-2h384hj-studio-notebook"
-_MANAGING_STACK_ID = (
-    "arn:aws:cloudformation:us-east-1:123456789012:stack/"
-    "environment-2h384hj-flink-studio-notebook/5a193610"
-)
-
-
-def _membership_cfn(stack_id: str = _MANAGING_STACK_ID) -> MagicMock:
-    """A CloudFormation mock reporting the app as a member of a managing stack."""
-    cfn = MagicMock()
-    cfn.describe_stack_resources.return_value = {
-        "StackResources": [
-            {
-                "StackId": stack_id,
-                "ResourceType": "AWS::KinesisAnalyticsV2::Application",
-                "PhysicalResourceId": _MANAGED_APP,
-            }
-        ]
-    }
-    return cfn
+# -- A stack-member app is deleted natively; the stack is left to the generic fallback --
 
 
 @patch(_SLEEP)
-def test_stack_managed_app_deletes_the_stack_never_the_application(_sleep: MagicMock):
-    """The load-bearing ordering: delete the STACK (cascade), never DeleteApplication.
+def test_handler_never_deletes_or_inspects_a_managing_stack(_sleep: MagicMock):
+    """The handler deletes the application itself and leaves any agent stack alone.
 
-    Deleting the app first orphans the stack's ApplicationCloudWatchLoggingOption
-    (its delete needs the parent app and raises ResourceNotFoundException),
-    sending the stack to DELETE_FAILED.
+    A stack whose ApplicationCloudWatchLoggingOption then fails (parent app gone)
+    is recovered by ResourceCleaner's native DeleteStack fallback, not here.
     """
-    v2 = _empty_list_client()
-    v1 = _empty_list_client()
-    cfn = _membership_cfn()
-    session = _multi3_session(v2, v1, cfn)
-
-    result = _delete_v2(_resource(_V2_TYPE, _MANAGED_APP), session)
-
-    assert result.status == HandlerStatus.SUCCESS
-    v2.delete_application.assert_not_called()  # never app-first for a managed app
-    v1.delete_application.assert_not_called()
-    cfn.delete_stack.assert_called_once_with(StackName=_MANAGING_STACK_ID)
-    cfn.get_waiter.assert_called_with("stack_delete_complete")
-
-
-@patch(_SLEEP)
-def test_stack_managed_delete_failed_retries_with_retain_resources(_sleep: MagicMock):
-    """An already-broken DELETE_FAILED stack is retried with RetainResources."""
-    from botocore.exceptions import WaiterError
-
-    v2 = _empty_list_client()
-    v1 = _empty_list_client()
-    cfn = _membership_cfn()
-    cfn.get_waiter.return_value.wait.side_effect = [
-        WaiterError(name="StackDeleteComplete", reason="terminal failure", last_response={}),
-        None,
-    ]
-
-    def _stack_resources(**kwargs):
-        if "PhysicalResourceId" in kwargs:  # membership lookup
-            return {
-                "StackResources": [
-                    {
-                        "StackId": _MANAGING_STACK_ID,
-                        "ResourceType": "AWS::KinesisAnalyticsV2::Application",
-                    }
-                ]
-            }
-        return {  # DELETE_FAILED lookup after the first wait fails
-            "StackResources": [
-                {"LogicalResourceId": "StudioLoggingOption", "ResourceStatus": "DELETE_FAILED"}
-            ]
-        }
-
-    cfn.describe_stack_resources.side_effect = _stack_resources
-    session = _multi3_session(v2, v1, cfn)
-
-    result = _delete_v2(_resource(_V2_TYPE, _MANAGED_APP), session)
-
-    assert result.status == HandlerStatus.SUCCESS
-    assert cfn.delete_stack.call_count == 2
-    retry_kwargs = cfn.delete_stack.call_args_list[1].kwargs
-    assert retry_kwargs["RetainResources"] == ["StudioLoggingOption"]
-    v2.delete_application.assert_not_called()
-
-
-@patch(_SLEEP)
-def test_stack_managed_app_still_waits_for_listing_after_stack_delete(_sleep: MagicMock):
-    """The cascaded app delete has the same listing lag; the wait still runs."""
-    v2 = _v2_list_client(_MANAGED_APP, present_polls=2)
-    v1 = _empty_list_client()
-    cfn = _membership_cfn()
-    session = _multi3_session(v2, v1, cfn)
-
-    result = _delete_v2(_resource(_V2_TYPE, _MANAGED_APP), session)
-
-    assert result.status == HandlerStatus.SUCCESS
-    assert v2.list_applications.call_count == 3  # 2 present + 1 absent
-    v2.delete_application.assert_not_called()
-
-
-def test_unmanaged_app_membership_error_falls_back_to_native_delete():
-    """A membership lookup failure (stack does not exist) uses the native app delete."""
-    v2 = _app_client()
+    name = "environment-2h384hj-studio-notebook"  # agent-stack member, not service-managed
+    v2 = _v2_list_client(name, present_polls=0)
     v1 = _empty_list_client()
     cfn = MagicMock()
-    cfn.describe_stack_resources.side_effect = ClientError(
-        {"Error": {"Code": "ValidationError", "Message": "does not exist"}},
-        "DescribeStackResources",
-    )
     session = _multi3_session(v2, v1, cfn)
 
-    result = _delete_v2(_resource(_V2_TYPE, "my-regular-app"), session)
+    result = _delete_v2(_resource(_V2_TYPE, name), session)
 
     assert result.status == HandlerStatus.SUCCESS
-    v2.delete_application.assert_called_once()
+    v2.delete_application.assert_called_once_with(ApplicationName=name, CreateTimestamp=_CREATE_TS)
+    assert "cloudformation" not in _requested_services(session)
+    cfn.describe_stack_resources.assert_not_called()
     cfn.delete_stack.assert_not_called()
