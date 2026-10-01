@@ -7,6 +7,7 @@ from unittest.mock import MagicMock, patch
 
 import boto3
 import pytest
+from botocore.exceptions import ClientError
 from moto import mock_aws
 
 from aws_bench.resource_management.ccapi.models import DeletionFailureEvent, Resource
@@ -556,6 +557,77 @@ def test_cfn_fallback_is_noop_without_stack_failures():
     failures = {Resource("AWS::S3::Bucket", "bucket"): DeletionFailureEvent("boom")}
 
     assert cleaner._delete_failed_cfn_stacks(dict(failures)) == failures
+
+
+# moto does not enforce termination protection on DeleteStack, so the protected-stack
+# path is exercised against a mocked CloudFormation client.
+_BUILD_CLIENT_PATH = "aws_bench.resource_management.cleanup.resource_cleaner.build_client"
+_LOGGER_PATH = "aws_bench.resource_management.cleanup.resource_cleaner.logger"
+_STACK_ARN = "arn:aws:cloudformation:us-east-1:111111111111:stack/agent-stack/0f5c6e2a"
+
+
+def _cfn_client(*, protected: bool) -> MagicMock:
+    client = MagicMock()
+    client.describe_stacks.return_value = {"Stacks": [{"EnableTerminationProtection": protected}]}
+    return client
+
+
+def test_cfn_fallback_turns_off_termination_protection_before_delete():
+    """An agent-protected stack has protection turned off, then DeleteStack runs and succeeds."""
+    client = _cfn_client(protected=True)
+    cleaner = ResourceCleaner(MagicMock())
+    stack = Resource(_CFN_TYPE, _STACK_ARN)
+
+    with patch(_BUILD_CLIENT_PATH, return_value=client):
+        result = cleaner._delete_failed_cfn_stacks({stack: DeletionFailureEvent("CCAPI failed")})
+
+    assert result == {}
+    client.update_termination_protection.assert_called_once_with(
+        EnableTerminationProtection=False, StackName=_STACK_ARN
+    )
+    client.delete_stack.assert_called_once_with(StackName=_STACK_ARN)
+    ordered = [
+        name
+        for name, _, _ in client.mock_calls
+        if name in ("update_termination_protection", "delete_stack")
+    ]
+    assert ordered == ["update_termination_protection", "delete_stack"]
+
+
+def test_cfn_fallback_leaves_protection_alone_when_off():
+    """An unprotected stack is deleted without an UpdateTerminationProtection call."""
+    client = _cfn_client(protected=False)
+    cleaner = ResourceCleaner(MagicMock())
+    stack = Resource(_CFN_TYPE, "agent-stack")
+
+    with patch(_BUILD_CLIENT_PATH, return_value=client):
+        result = cleaner._delete_failed_cfn_stacks({stack: DeletionFailureEvent("CCAPI failed")})
+
+    assert result == {}
+    client.update_termination_protection.assert_not_called()
+    client.delete_stack.assert_called_once_with(StackName="agent-stack")
+
+
+def test_cfn_fallback_logs_full_delete_error():
+    """A refused DeleteStack is logged with its full message, not cut to 80 characters."""
+    client = _cfn_client(protected=False)
+    message = f"Stack [{_STACK_ARN}] cannot be deleted while TerminationProtection is enabled"
+    client.delete_stack.side_effect = ClientError(
+        {"Error": {"Code": "ValidationError", "Message": message}}, "DeleteStack"
+    )
+    cleaner = ResourceCleaner(MagicMock())
+    stack = Resource(_CFN_TYPE, _STACK_ARN)
+    failures = {stack: DeletionFailureEvent("CCAPI failed")}
+
+    mock_log = MagicMock()
+    with patch(_BUILD_CLIENT_PATH, return_value=client), patch(_LOGGER_PATH, mock_log):
+        result = cleaner._delete_failed_cfn_stacks(dict(failures))
+
+    assert result == failures  # still surfaced as a failure
+    fmt, *args = mock_log.warning.call_args.args
+    logged = fmt % tuple(args)
+    assert _STACK_ARN in logged
+    assert message in logged
 
 
 # -- nodegroup-first dependency barrier --

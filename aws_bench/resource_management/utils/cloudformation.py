@@ -9,8 +9,11 @@ from typing import Any
 from botocore.client import BaseClient
 from botocore.exceptions import ClientError
 
+from aws_bench.logging.logger import get_logger
 from aws_bench.resource_management.exceptions import PollTimeout
 from aws_bench.utils.concurrent import raise_if_shutdown
+
+logger = get_logger(__name__)
 
 _DEFAULT_TIMEOUT_SEC = 300
 _DEFAULT_POLL_INTERVAL_SEC = 5
@@ -160,6 +163,48 @@ def is_stack_not_found(exc: ClientError) -> bool:
     """
     error_code = exc.response.get("Error", {}).get("Code", "")
     return error_code == "ValidationError" and "does not exist" in str(exc).lower()
+
+
+def disable_termination_protection(cfn_client: BaseClient, stack_name: str) -> bool:
+    """Turn termination protection off on ``stack_name`` if it is on.
+
+    CloudFormation refuses ``DeleteStack`` with a ``ValidationError`` while a
+    stack has termination protection enabled, and agents do create stacks with
+    ``EnableTerminationProtection`` set. Every deletion path (``env cleanup``
+    and the reset's native ``DeleteStack`` fallback) runs this first.
+
+    Errors are logged and swallowed: the caller's ``DeleteStack`` surfaces the
+    real failure.
+
+    Args:
+        cfn_client: CloudFormation client
+        stack_name: Stack name or ARN
+
+    Returns:
+        True if protection was on and has been turned off, False otherwise
+    """
+    try:
+        resp = cfn_client.describe_stacks(StackName=stack_name)
+        if not resp["Stacks"][0].get("EnableTerminationProtection", False):
+            return False
+        cfn_client.update_termination_protection(
+            EnableTerminationProtection=False, StackName=stack_name
+        )
+        logger.debug("Disabled termination protection on '%s'.", stack_name)
+        return True
+    except ClientError as e:
+        error_code = e.response.get("Error", {}).get("Code", "")
+        if error_code in ("AccessDenied", "UnauthorizedOperation", "InvalidClientTokenId"):
+            logger.error(
+                "Permission denied when disabling termination protection on '%s': %s",
+                stack_name,
+                error_code,
+            )
+        elif is_stack_not_found(e):
+            logger.debug("Stack '%s' not found when disabling termination protection", stack_name)
+        else:
+            logger.debug("Could not disable termination protection on '%s': %s", stack_name, e)
+        return False
 
 
 def get_stack_resource_drifts(cfn_client: BaseClient, stack_name: str) -> list[dict[str, Any]]:
