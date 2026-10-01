@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from harbor.models.trajectories import FinalMetrics, ObservationResult, Step, ToolCall, Trajectory
 
-from aws_bench.agents.kiro_cli import _DB_FILENAME, _SESSIONS_DIRNAME, KiroCli
+from aws_bench.agents.kiro_cli import _DB_FILENAME, _SESSIONS_DIRNAME, KiroCli, _kas_tool_call
 
 
 @pytest.fixture
@@ -383,6 +383,11 @@ def _extra(traj: Trajectory | None) -> dict[str, Any]:
     return extra
 
 
+def _all_calls(traj: Trajectory | None) -> list[ToolCall]:
+    assert traj is not None
+    return [c for s in traj.steps for c in s.tool_calls or []]
+
+
 # --- V3 engine: ~/.kiro/sessions/cli/<id>.json + .jsonl (primary source) ---
 
 _SESSION_ID = "373dafde-0d5f-4dab-9224-fc3b580e753e"
@@ -717,6 +722,180 @@ class TestSessionsDirKasSource:
         data = json.loads((logs_dir / "trajectory.json").read_text())
         assert data["session_id"] == _KAS_ID
         assert context.cost_usd == pytest.approx(0.35)
+
+
+# KAS (kiro-cli 2.25.0) tool_call payloads; shapes as recorded by a real session.
+_KAS_MCP_ID = "toolu_01mcp"
+_KAS_MCP_ARGS = {"query": "how do I rotate a key"}
+
+
+def _kas_mcp_call(**overrides: Any) -> dict:
+    payload = {
+        "type": "tool_call",
+        "toolCallId": _KAS_MCP_ID,
+        "toolName": "tool_call",
+        "args": _KAS_MCP_ARGS,
+        "status": "completed",
+        "kind": "other",
+        "actionType": "mcp_docs_mcp_search_docs",
+        "title": "@docs-mcp/search_docs",
+        "_meta": {"kiro": {"agentMode": "vibe", "serverName": "docs-mcp", "toolOrigin": "default"}},
+    }
+    payload.update(overrides)
+    return payload
+
+
+def _kas_mcp_events() -> list[dict]:
+    def ev(payload: dict, ts: str = "2026-09-29T10:29:57.075Z") -> dict:
+        return {"id": "x", "timestamp": ts, "payload": payload}
+
+    return [
+        ev({"type": "user", "content": "Why is the Batch log group empty?"}),
+        ev(
+            {
+                "type": "tool_call",
+                "toolCallId": "load-1",
+                "toolName": "tool_load",
+                "args": {"tool_ids": ["docs-mcp::search_docs", "docs-mcp::read_page"]},
+                "status": "completed",
+                "kind": "other",
+                "actionType": "tool_load",
+                "title": "Tool Load",
+                "_meta": {"kiro": {"agentMode": "vibe", "toolOrigin": "default"}},
+            }
+        ),
+        ev({"type": "tool_result", "toolCallId": "load-1", "content": "{}", "success": True}),
+        ev(
+            {
+                "type": "tool_call",
+                "toolCallId": "skill-1",
+                "toolName": "disclose_context",
+                "args": {"name": "release-checklist"},
+                "status": "completed",
+                "kind": "other",
+                "actionType": "disclose_context",
+                "title": "Loaded skill: release-checklist",
+                "_meta": {
+                    "kiro": {
+                        "agentMode": "vibe",
+                        "toolOrigin": "acp",
+                        "toolId": "disclose_context",
+                        "disclosedContext": {
+                            "type": "skill",
+                            "displayName": "release-checklist",
+                            "uri": "file:///root/.kiro/skills/release-checklist/SKILL.md",
+                        },
+                    }
+                },
+            }
+        ),
+        ev({"type": "tool_result", "toolCallId": "skill-1", "content": "ok", "success": True}),
+        ev(_kas_mcp_call()),
+        ev(
+            {
+                "type": "tool_result",
+                "toolCallId": _KAS_MCP_ID,
+                "content": '{"status": "error", "error": "no results"}',  # tool-level error
+                "success": True,
+            }
+        ),
+        ev(_kas_mcp_call(toolCallId="mcp-2", status="failed")),
+        ev(
+            {
+                "type": "tool_result",
+                "toolCallId": "mcp-2",
+                "content": "MCP tool error: Tool call 'search_docs' failed",
+                "success": False,
+            }
+        ),
+        ev(
+            {
+                "type": "tool_call",
+                "toolCallId": "run_command_1",
+                "toolName": "execute_bash",
+                "args": {"command": "mkdir -p /logs/agent"},
+                "status": "completed",
+                "kind": "execute",
+                "actionType": "run_command",
+                "title": "Ensure output directory exists",
+                "_meta": {"kiro": {"agentMode": "vibe", "toolOrigin": "default"}},
+            }
+        ),
+        ev({"type": "tool_result", "toolCallId": "run_command_1", "content": "", "success": True}),
+        ev({"type": "assistant", "content": "done", "operationType": "Say"}),
+    ]
+
+
+class TestKasToolCallNames:
+    """KAS names every MCP tool ``tool_call``; the converter recovers the real name."""
+
+    @pytest.fixture
+    def traj(self, agent: KiroCli) -> Trajectory | None:
+        return agent._convert_kas_session_to_trajectory(_kas_meta(), _kas_mcp_events())
+
+    def test_mcp_call_is_named_after_the_tool(self, traj: Trajectory | None):
+        names = [c.function_name for c in _all_calls(traj)]
+        assert names == [
+            "tool_load",
+            "disclose_context",
+            "search_docs",
+            "search_docs",
+            "execute_bash",
+        ]
+        assert "tool_call" not in names
+
+    def test_mcp_call_records_server_and_keeps_arguments(self, traj: Trajectory | None):
+        mcp = next(c for c in _all_calls(traj) if c.tool_call_id == _KAS_MCP_ID)
+        assert mcp.extra == {"mcp_server": "docs-mcp"}
+        assert mcp.arguments == _KAS_MCP_ARGS
+
+    def test_builtin_tool_has_no_extra(self, traj: Trajectory | None):
+        bash = next(c for c in _all_calls(traj) if c.function_name == "execute_bash")
+        assert bash.extra is None
+        assert bash.arguments == {"command": "mkdir -p /logs/agent"}
+
+    def test_skill_load_records_disclosed_context(self, traj: Trajectory | None):
+        skill = next(c for c in _all_calls(traj) if c.tool_call_id == "skill-1")
+        assert skill.function_name == "disclose_context"
+        assert skill.extra is not None
+        assert skill.extra["disclosed_context"]["type"] == "skill"
+        assert skill.extra["disclosed_context"]["displayName"] == "release-checklist"
+
+    def test_only_transport_failures_count_as_errors(self, traj: Trajectory | None):
+        # success=False counts; an error envelope inside a successful result does not.
+        assert _extra(traj)["total_tool_calls"] == 5
+        assert _extra(traj)["total_tool_calls_errors"] == 1
+
+    def test_name_falls_back_to_action_type_without_title(self):
+        call = _kas_tool_call(_kas_mcp_call(title=""))
+        assert call.function_name == "search_docs"
+        assert call.extra == {"mcp_server": "docs-mcp"}
+
+    def test_title_server_is_used_when_meta_has_none(self):
+        call = _kas_tool_call(_kas_mcp_call(_meta={}))
+        assert call.function_name == "search_docs"
+        assert call.extra == {"mcp_server": "docs-mcp"}
+
+    def test_generic_name_without_identity_stays_unknown(self):
+        call = _kas_tool_call(
+            {"toolCallId": "c1", "toolName": "tool_call", "title": "", "actionType": ""}
+        )
+        assert call.function_name == "unknown"
+        assert call.arguments == {}
+        assert call.extra is None
+
+    def test_json_string_args_are_parsed(self):
+        call = _kas_tool_call(_kas_mcp_call(args='{"code": "x = 1"}'))
+        assert call.arguments == {"code": "x = 1"}
+
+    def test_written_trajectory_has_real_names(self, agent: KiroCli, logs_dir: Path):
+        _write_kas_session(logs_dir, _kas_meta(), _kas_mcp_events())
+        agent.populate_context_post_run(MagicMock())
+        data = json.loads((logs_dir / "trajectory.json").read_text())
+        calls = [c for s in data["steps"] for c in s.get("tool_calls") or []]
+        mcp = [c for c in calls if c["function_name"] == "search_docs"]
+        assert len(mcp) == 2
+        assert all(c["extra"] == {"mcp_server": "docs-mcp"} for c in mcp)
 
 
 class TestToolResultText:
