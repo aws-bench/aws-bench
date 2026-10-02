@@ -6,6 +6,7 @@ and failed-resource handlers.
 
 from aws_bench.resource_management.cleanup.handlers import (
     acm,  # noqa: F401
+    acmpca,  # noqa: F401
     asg,  # noqa: F401
     athena,  # noqa: F401
     batch,  # noqa: F401
@@ -16,6 +17,7 @@ from aws_bench.resource_management.cleanup.handlers import (
     dms,  # noqa: F401
     dynamodb,  # noqa: F401
     ec2_image,  # noqa: F401
+    ec2_volume_attachment,  # noqa: F401
     ecr,  # noqa: F401
     efs,  # noqa: F401
     eks_nodegroup,  # noqa: F401
@@ -28,6 +30,7 @@ from aws_bench.resource_management.cleanup.handlers import (
     imagebuilder,  # noqa: F401
     iot,  # noqa: F401
     ipam,  # noqa: F401
+    kinesisanalytics,  # noqa: F401
     lakeformation,  # noqa: F401
     lambda_,  # noqa: F401
     medialive,  # noqa: F401

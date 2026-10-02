@@ -33,7 +33,7 @@ import tarfile
 import tempfile
 from collections.abc import Iterable
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path, PurePosixPath
 from tempfile import SpooledTemporaryFile
 
@@ -46,6 +46,7 @@ from aws_bench.scenario.paths import ScenarioPaths
 from aws_bench.utils.credentials_provider import (
     CredentialProvider,
     build_session_name,
+    run_credential_refresh_loop,
     session_to_credential_process,
 )
 
@@ -53,12 +54,6 @@ logger = get_logger(__name__)
 
 # Host bind-mounts the per-tag credential_process files here.
 CREDS_DIR = PurePosixPath("/awsbench-creds")
-# Re-mint this long before Expiration, so the file is fresh before the token dies.
-_CRED_REFRESH_SKEW_SEC = 15 * 60
-# Sleep floor, so a credential already within the skew window can't spin the loop.
-_CRED_REFRESH_MIN_SLEEP_SEC = 30
-# Backoff after a failed assume before retrying.
-_CRED_REFRESH_RETRY_SEC = 60
 
 # write_file path constraint. Tilde lets the in-container shell expand
 # $HOME; everything else is conservative ASCII so the unquoted path
@@ -147,7 +142,7 @@ class ScenarioContainer:
                 it is written. The trial reads phase outputs from here.
             cred_provider: Source of management credentials. The container's
                 per-account credentials are minted and refreshed from this by
-                the host-side refresher (see ``_refresh_credentials_loop``).
+                the host-side refresher (see ``run_credential_refresh_loop``).
             account_mapping: ``{account_tag: account_id}`` for the scenario.
                 Each tag becomes an ``AWS_PROFILE`` the container's scripts can
                 select; the refresher writes one credential file per tag.
@@ -237,8 +232,7 @@ class ScenarioContainer:
         # script's first AWS call resolves. Bind-mounted read-only; the refresher
         # rewrites them in place as they near expiry.
         self._creds_dir = Path(tempfile.mkdtemp(prefix=f"awsbench-creds-{self._container_name}-"))
-        for tag in self._account_mapping:
-            await asyncio.to_thread(self._write_creds_file, tag)
+        expires_at = await self._write_all_creds_files()
         # --mount k=v form over --volume so a host path containing ':' can't
         # be misparsed into the target or options field; operator-supplied
         # output dirs flow into self._host_logs_dir.
@@ -271,7 +265,9 @@ class ScenarioContainer:
         # Scripts select an account with AWS_PROFILE=<tag>; each profile's
         # credential_process reads the file the refresher keeps fresh.
         await self.write_file("~/.aws/config", self._build_aws_config())
-        self._refresh_task = asyncio.create_task(self._refresh_credentials_loop())
+        self._refresh_task = asyncio.create_task(
+            run_credential_refresh_loop(self._write_all_creds_files, expires_at, self._log)
+        )
         self._log.debug("Started container %s.", self._container_name)
 
     def _creds_file(self, tag: str) -> Path:
@@ -315,27 +311,12 @@ class ScenarioContainer:
         os.replace(tmp, path)
         return datetime.fromisoformat(str(creds["Expiration"]))
 
-    async def _refresh_credentials_loop(self) -> None:
-        """Re-mint every tag's credential file before the earliest expiry, until cancelled.
-
-        A transient assume failure is retried after a backoff rather than killing
-        the loop (which would strand the container credential-less).
-        """
-        while True:
-            try:
-                expiries = [
-                    await asyncio.to_thread(self._write_creds_file, tag)
-                    for tag in self._account_mapping
-                ]
-                now = datetime.now(timezone.utc)
-                soonest = min((e - now).total_seconds() for e in expiries)
-                sleep_for = max(soonest - _CRED_REFRESH_SKEW_SEC, _CRED_REFRESH_MIN_SLEEP_SEC)
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:  # noqa: BLE001 — refresher must not die on a transient error
-                self._log.warning("Credential refresh failed; retrying: %s", exc)
-                sleep_for = _CRED_REFRESH_RETRY_SEC
-            await asyncio.sleep(sleep_for)
+    async def _write_all_creds_files(self) -> datetime:
+        """Write every tag off-loop and return the soonest expiry."""
+        expiries = [
+            await asyncio.to_thread(self._write_creds_file, tag) for tag in self._account_mapping
+        ]
+        return min(expiries)
 
     async def _remove_existing(self) -> None:
         """Remove a stale container with the same name, if any."""

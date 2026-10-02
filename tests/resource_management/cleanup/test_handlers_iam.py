@@ -159,3 +159,78 @@ class TestDelete:
         client.delete_role.side_effect = BotoCoreError()
         result = _delete(_role("broken-role"), session)
         assert result.status == HandlerStatus.FAILED
+
+
+# -- OIDC provider delete handler --
+
+
+def _mock_iam_session():
+    session = MagicMock()
+    iam = MagicMock()
+    session.client.return_value = iam
+    return session, iam
+
+
+def _oidc(arn: str) -> Resource:
+    return Resource(type="AWS::IAM::OIDCProvider", identifier=arn)
+
+
+def test_delete_oidc_provider_registered():
+    """The delete handler must be registered so the OIDC provider does not leak."""
+    import aws_bench.resource_management.cleanup.handlers  # noqa: F401
+    from aws_bench.resource_management.cleanup.handler_registry import CUSTOM_DELETION_REGISTRY
+
+    assert "AWS::IAM::OIDCProvider" in CUSTOM_DELETION_REGISTRY
+
+
+def test_delete_oidc_provider_deletes():
+    """The handler calls delete_open_id_connect_provider with the ARN and succeeds."""
+    from aws_bench.resource_management.cleanup.handlers.iam import _delete_oidc_provider
+
+    session, iam = _mock_iam_session()
+    arn = "arn:aws:iam::123456789012:oidc-provider/oidc.eks.us-east-1.amazonaws.com/id/ABC123"
+
+    result = _delete_oidc_provider(_oidc(arn), session)
+
+    assert result.status == HandlerStatus.SUCCESS
+    iam.delete_open_id_connect_provider.assert_called_once_with(OpenIDConnectProviderArn=arn)
+
+
+def test_delete_oidc_provider_already_gone_is_success():
+    """A NoSuchEntity error means the provider is already deleted → SUCCESS (idempotent)."""
+    from aws_bench.resource_management.cleanup.handlers.iam import _delete_oidc_provider
+
+    session, iam = _mock_iam_session()
+    iam.delete_open_id_connect_provider.side_effect = ClientError(
+        {"Error": {"Code": "NoSuchEntity"}}, "DeleteOpenIDConnectProvider"
+    )
+
+    result = _delete_oidc_provider(_oidc("arn:aws:iam::123456789012:oidc-provider/x"), session)
+
+    assert result.status == HandlerStatus.SUCCESS
+
+
+def test_delete_oidc_provider_client_error_is_failed():
+    """A non-not-found ClientError maps to FAILED."""
+    from aws_bench.resource_management.cleanup.handlers.iam import _delete_oidc_provider
+
+    session, iam = _mock_iam_session()
+    iam.delete_open_id_connect_provider.side_effect = ClientError(
+        {"Error": {"Code": "ThrottlingException"}}, "DeleteOpenIDConnectProvider"
+    )
+
+    result = _delete_oidc_provider(_oidc("arn:aws:iam::123456789012:oidc-provider/x"), session)
+
+    assert result.status == HandlerStatus.FAILED
+
+
+def test_delete_oidc_provider_botocore_error_is_failed():
+    """A connection-level BotoCoreError maps to FAILED."""
+    from aws_bench.resource_management.cleanup.handlers.iam import _delete_oidc_provider
+
+    session, iam = _mock_iam_session()
+    iam.delete_open_id_connect_provider.side_effect = BotoCoreError()
+
+    result = _delete_oidc_provider(_oidc("arn:aws:iam::123456789012:oidc-provider/x"), session)
+
+    assert result.status == HandlerStatus.FAILED

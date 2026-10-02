@@ -204,3 +204,24 @@ def test_previously_unwired_handler_types_are_registered():
 
     assert "AWS::LakeFormation::Resource" in CUSTOM_DELETION_REGISTRY
     assert "AWS::IoT::ThingGroup" in CUSTOM_DELETION_REGISTRY
+
+
+def test_delete_before_prepare_types_all_have_custom_delete_handler():
+    """Every delete-before-prepare barrier type must have a custom delete handler.
+
+    The barrier fails closed: a type in ``DELETE_BEFORE_PREPARE_TYPES`` with no
+    ``CUSTOM_DELETION_REGISTRY`` entry comes back as an unattempted failure and
+    blocks the whole cleanup wave's prepare/CCAPI pipeline every run. Registration is an
+    import side-effect, so import the handlers package before asserting.
+    """
+    import aws_bench.resource_management.cleanup.handlers  # noqa: F401
+    from aws_bench.resource_management.cleanup.resource_cleaner import (
+        DELETE_BEFORE_PREPARE_TYPES,
+    )
+
+    missing = sorted(DELETE_BEFORE_PREPARE_TYPES - set(CUSTOM_DELETION_REGISTRY))
+    assert not missing, (
+        f"Barrier type(s) {missing} are in DELETE_BEFORE_PREPARE_TYPES but have no "
+        "custom delete handler. The delete-before-prepare barrier would fail closed "
+        "on them forever. Register a delete handler or drop them from the barrier set."
+    )

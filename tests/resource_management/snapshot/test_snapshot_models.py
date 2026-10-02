@@ -5,6 +5,7 @@ from aws_bench.resource_management.snapshot.models import (
     DriftBaseline,
     ResourceDrift,
     Snapshot,
+    SnapshotStage,
     StackMetadata,
 )
 
@@ -80,3 +81,10 @@ def test_snapshot_not_found_error():
 
     assert "env-test" in str(error)
     assert "123456789012" in str(error)
+
+
+def test_snapshot_not_found_error_names_init_for_pre_setup():
+    """The remedy for a missing PRE_SETUP baseline is env init, not env setup."""
+    error = SnapshotNotFoundError("env-test", "123456789012", SnapshotStage.PRE_SETUP)
+
+    assert "aws-bench env init" in str(error)

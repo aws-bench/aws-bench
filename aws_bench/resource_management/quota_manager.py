@@ -31,6 +31,7 @@ from aws_bench.utils.credentials_provider import (
     create_regional_session,
 )
 from aws_bench.utils.regions import get_enabled_regions
+from aws_bench.utils.retry import is_region_access_transient
 
 logger = get_logger(__name__)
 
@@ -42,6 +43,10 @@ ORG_QUOTA_SERVICE_CODE = "organizations"
 # service-quotas:ListServiceQuotas — the code AWS docs reference elsewhere
 ORG_ACCOUNT_QUOTA_CODE = "L-E619E033"
 ORG_QUOTA_REGION = "us-east-1"
+
+# Retries of a quota request rejected while regional access converges; at the default
+# 10 s delay that is 180 s. AWS notes a region's services may lag its ENABLED status.
+REGION_ACCESS_MAX_RETRIES = 18
 
 
 # APPROVED and CASE_CLOSED appear here because a granted increase can read
@@ -89,11 +94,12 @@ class QuotaManager:
         request: QuotaIncreaseRequest,
         log: logging.Logger | logging.LoggerAdapter,
         *,
-        max_retries: int = 3,
+        max_retries: int = REGION_ACCESS_MAX_RETRIES,
         retry_delay: int = 10,
     ) -> QuotaIncreaseResult:
         """Submit a single quota increase request.
 
+        Retries regional-access rejections for up to ``max_retries`` x ``retry_delay`` seconds.
         Returns a result with status REQUESTED, ALREADY_PENDING, or ALREADY_MET.
         Raises DeploymentError on unexpected API errors.
         """
@@ -145,12 +151,11 @@ class QuotaManager:
                         status=QuotaStatus.ALREADY_MET,
                     )
 
-                # RegionDisabledException here is a race: quotas requested too
-                # soon after account creation, before STS activates. Retry.
-                if error_code == "RegionDisabledException":
+                # Retry rejections while regional STS, region opt-in, or an SCP update converges.
+                if error_code == "RegionDisabledException" or is_region_access_transient(exc):
                     if attempt < max_retries:
                         log.warning(
-                            "STS is possibly not yet active for %s, retrying in %ds (%d/%d)",
+                            "Regional access is not yet ready for %s, retrying in %ds (%d/%d)",
                             request.quota_code,
                             retry_delay,
                             attempt + 1,

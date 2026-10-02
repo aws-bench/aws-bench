@@ -5,18 +5,23 @@ from __future__ import annotations
 import asyncio
 from unittest.mock import MagicMock, patch
 
+import boto3
 import pytest
+from moto import mock_aws
 
-from aws_bench.resource_management.ccapi.models import Resource
+from aws_bench.resource_management.ccapi.models import DeletionFailureEvent, Resource
 from aws_bench.resource_management.cleanup.models import (
+    CustomDeletionResult,
     HandlerResult,
     HandlerStatus,
     StackResource,
     to_ccapi_resources,
 )
 from aws_bench.resource_management.cleanup.resource_cleaner import (
+    DELETE_BEFORE_PREPARE_TYPES,
     ResourceCleaner,
     format_sample_list,
+    partition_delete_before_prepare,
     truncate_for_log,
 )
 
@@ -490,3 +495,292 @@ def test_cleanup_logs_stuck_resources():
     # Check that stuck resource handling was logged
     info_calls = [call for call in mock_log.debug.call_args_list if "stuck" in str(call).lower()]
     assert len(info_calls) > 0
+
+
+# -- cleanup: native CloudFormation DeleteStack fallback --
+
+_CFN_TYPE = "AWS::CloudFormation::Stack"
+_CFN_TEMPLATE = '{"Resources":{"T":{"Type":"AWS::SNS::Topic","Properties":{"TopicName":"probe"}}}}'
+_CCM_PATH = "aws_bench.resource_management.cleanup.resource_cleaner.CloudControlManager"
+
+
+def _stack_names(client: object) -> set[str]:
+    return {s["StackName"] for s in client.describe_stacks()["Stacks"]}  # type: ignore[attr-defined]
+
+
+@mock_aws
+def test_cfn_fallback_deletes_ccapi_failed_out_of_baseline_stack():
+    """When CCAPI fails on an out-of-baseline stack, native DeleteStack removes it."""
+    region = "us-east-1"
+    cfn = boto3.client("cloudformation", region_name=region)
+    cfn.create_stack(StackName="agent-stack", TemplateBody=_CFN_TEMPLATE)
+
+    cleaner = ResourceCleaner(boto3.Session(region_name=region), region)
+    resources = [StackResource("L", "agent-stack", _CFN_TYPE, "CREATE_COMPLETE")]
+    ccapi_failure = {
+        Resource(_CFN_TYPE, "agent-stack"): DeletionFailureEvent("CCAPI cannot delete")
+    }
+
+    with patch(_CCM_PATH) as mock_ccm_cls:
+        mock_ccm_cls.return_value.delete_resources.return_value = ccapi_failure
+        result = asyncio.run(cleaner.cleanup(resources, ccapi_fallback=True))
+
+    assert result == {}  # the stack no longer counts as a failure
+    assert "agent-stack" not in _stack_names(cfn)  # and is actually gone
+
+
+@mock_aws
+def test_cfn_fallback_leaves_infra_stack_untouched():
+    """A CDK bootstrap/toolkit (baseline infra) stack is never deleted by the fallback."""
+    region = "us-east-1"
+    cfn = boto3.client("cloudformation", region_name=region)
+    cfn.create_stack(StackName="CDKToolkit", TemplateBody=_CFN_TEMPLATE)
+
+    cleaner = ResourceCleaner(boto3.Session(region_name=region), region)
+    resources = [StackResource("L", "CDKToolkit", _CFN_TYPE, "CREATE_COMPLETE")]
+    infra_key = Resource(_CFN_TYPE, "CDKToolkit")
+
+    with patch(_CCM_PATH) as mock_ccm_cls:
+        mock_ccm_cls.return_value.delete_resources.return_value = {
+            infra_key: DeletionFailureEvent("CCAPI cannot delete")
+        }
+        result = asyncio.run(cleaner.cleanup(resources, ccapi_fallback=True))
+
+    assert infra_key in result  # still surfaced as a failure, not silently dropped
+    assert "CDKToolkit" in _stack_names(cfn)  # untouched
+
+
+def test_cfn_fallback_is_noop_without_stack_failures():
+    """No CloudFormation-stack failures means no client is built and failures pass through."""
+    cleaner = ResourceCleaner(MagicMock())
+    failures = {Resource("AWS::S3::Bucket", "bucket"): DeletionFailureEvent("boom")}
+
+    assert cleaner._delete_failed_cfn_stacks(dict(failures)) == failures
+
+
+# -- nodegroup-first dependency barrier --
+
+
+def test_delete_before_prepare_types_contains_nodegroup():
+    assert "AWS::EKS::Nodegroup" in DELETE_BEFORE_PREPARE_TYPES
+
+
+def test_partition_delete_before_prepare_splits_nodegroups():
+    nodegroup = StackResource("Ng", "c1|ng1", "AWS::EKS::Nodegroup", "CREATE_COMPLETE")
+    bucket = StackResource("B", "b1", "AWS::S3::Bucket", "CREATE_COMPLETE")
+    barrier, rest = partition_delete_before_prepare([nodegroup, bucket])
+    assert barrier == [nodegroup]
+    assert rest == [bucket]
+
+
+def test_barrier_nodegroup_deletes_before_asg_prepare_starts():
+    """The nodegroup custom deletion must complete before any ASG prepare runs."""
+    cleaner = ResourceCleaner(MagicMock())
+    nodegroup = StackResource("Ng", "c1|ng1", "AWS::EKS::Nodegroup", "CREATE_COMPLETE")
+    asg = StackResource("Asg", "asg-1", "AWS::AutoScaling::AutoScalingGroup", "CREATE_COMPLETE")
+    resources = [nodegroup, asg]
+
+    order: list[tuple[str, tuple[str, ...]]] = []
+
+    def fake_custom_delete(res, *args, **kwargs):
+        order.append(("custom_delete", tuple(r.type for r in res)))
+        return CustomDeletionResult(skipped=[], succeeded=list(res), failed={})
+
+    def fake_prepare_all(res, *args, **kwargs):
+        order.append(("prepare_all", tuple(r.type for r in res)))
+        return []
+
+    with (
+        patch.object(cleaner, "_custom_delete", side_effect=fake_custom_delete),
+        patch.object(cleaner, "_prepare_all", side_effect=fake_prepare_all),
+    ):
+        result = asyncio.run(cleaner.cleanup(resources, prepare=True, custom_delete=True))
+
+    assert result == {}
+    # First operation is the barrier custom-delete of the nodegroup alone.
+    assert order[0] == ("custom_delete", ("AWS::EKS::Nodegroup",))
+    first_prepare = next(i for i, (kind, _) in enumerate(order) if kind == "prepare_all")
+    assert first_prepare > 0
+    # The nodegroup is never routed through prepare, and the ASG is.
+    for kind, types in order:
+        if kind == "prepare_all":
+            assert "AWS::EKS::Nodegroup" not in types
+    assert any(
+        kind == "prepare_all" and "AWS::AutoScaling::AutoScalingGroup" in types
+        for kind, types in order
+    )
+
+
+def test_barrier_success_continues_prepare_custom_and_ccapi():
+    """A handled nodegroup is removed; remaining prepare/custom/CCAPI work proceeds."""
+    cleaner = ResourceCleaner(MagicMock())
+    nodegroup = StackResource("Ng", "c1|ng1", "AWS::EKS::Nodegroup", "CREATE_COMPLETE")
+    bucket = StackResource("B", "b1", "AWS::S3::Bucket", "CREATE_COMPLETE")
+    resources = [nodegroup, bucket]
+
+    def fake_ng_delete(resource, session):
+        return HandlerResult(resource.identifier, resource.type, "delete", HandlerStatus.SUCCESS)
+
+    with (
+        patch(
+            "aws_bench.resource_management.cleanup.resource_cleaner.CUSTOM_DELETION_REGISTRY",
+            {"AWS::EKS::Nodegroup": fake_ng_delete},
+        ),
+        patch.object(cleaner, "_prepare_all", return_value=[]) as mock_prepare,
+        patch(
+            "aws_bench.resource_management.cleanup.resource_cleaner.CloudControlManager"
+        ) as mock_ccm_cls,
+    ):
+        mock_ccm_cls.return_value.delete_resources.return_value = {}
+        result = asyncio.run(
+            cleaner.cleanup(resources, prepare=True, custom_delete=True, ccapi_fallback=True)
+        )
+
+    assert result == {}
+    # Prepare ran on the remaining resource only — never the nodegroup.
+    prepared_types = {r.type for r in mock_prepare.call_args.args[0]}
+    assert prepared_types == {"AWS::S3::Bucket"}
+    # The unregistered bucket fell through to CCAPI; the nodegroup did not.
+    ccapi_types = {r.type for r in mock_ccm_cls.return_value.delete_resources.call_args.args[0]}
+    assert "AWS::S3::Bucket" in ccapi_types
+    assert "AWS::EKS::Nodegroup" not in ccapi_types
+
+
+def test_barrier_nodegroup_failure_blocks_prepare_and_ccapi():
+    """A failing nodegroup barrier fails closed for the whole cleanup wave.
+
+    The real nodegroup error is preserved verbatim; the ASG and the unrelated
+    bucket are explicitly marked unattempted (never touched because the barrier
+    failed); and prepare/CCAPI stay blocked.
+    """
+    cleaner = ResourceCleaner(MagicMock())
+    nodegroup = StackResource("Ng", "c1|ng1", "AWS::EKS::Nodegroup", "CREATE_COMPLETE")
+    asg = StackResource("Asg", "asg-1", "AWS::AutoScaling::AutoScalingGroup", "CREATE_COMPLETE")
+    bucket = StackResource("B", "b1", "AWS::S3::Bucket", "CREATE_COMPLETE")
+    resources = [nodegroup, asg, bucket]
+
+    def fake_ng_delete(resource, session):
+        return HandlerResult(
+            resource.identifier, resource.type, "delete", HandlerStatus.FAILED, "drain stuck"
+        )
+
+    with (
+        patch(
+            "aws_bench.resource_management.cleanup.resource_cleaner.CUSTOM_DELETION_REGISTRY",
+            {"AWS::EKS::Nodegroup": fake_ng_delete},
+        ),
+        patch.object(cleaner, "_prepare_all") as mock_prepare,
+        patch(
+            "aws_bench.resource_management.cleanup.resource_cleaner.CloudControlManager"
+        ) as mock_ccm_cls,
+    ):
+        result = asyncio.run(
+            cleaner.cleanup(resources, prepare=True, custom_delete=True, ccapi_fallback=True)
+        )
+
+    by_id = {resource.identifier: (resource, event) for resource, event in result.items()}
+    # Every remaining resource with a physical ID is in the returned map.
+    assert set(by_id) == {"c1|ng1", "asg-1", "b1"}
+    # The real nodegroup error is preserved verbatim.
+    assert by_id["c1|ng1"][0].type == "AWS::EKS::Nodegroup"
+    assert by_id["c1|ng1"][1].status_message == "drain stuck"
+    # The ASG and the unrelated bucket are explicitly marked unattempted.
+    assert by_id["asg-1"][0].type == "AWS::AutoScaling::AutoScalingGroup"
+    assert "not attempted" in by_id["asg-1"][1].status_message.lower()
+    assert by_id["b1"][0].type == "AWS::S3::Bucket"
+    assert "not attempted" in by_id["b1"][1].status_message.lower()
+    # Prepare and CCAPI stay blocked behind the failed barrier.
+    mock_prepare.assert_not_called()
+    mock_ccm_cls.return_value.delete_resources.assert_not_called()
+
+
+def test_barrier_includes_delete_failed_nodegroup_and_invokes_handler():
+    """A nodegroup already in DELETE_FAILED still enters the barrier and is handled.
+
+    The barrier partitions purely by resource type, so a stuck (DELETE_FAILED)
+    nodegroup is routed to its custom delete handler — not left to the
+    ``handle_stuck`` path — before any general prepare runs.
+    """
+    cleaner = ResourceCleaner(MagicMock())
+    nodegroup = StackResource("Ng", "c1|ng1", "AWS::EKS::Nodegroup", "DELETE_FAILED")
+    handler = MagicMock(
+        return_value=HandlerResult("c1|ng1", "AWS::EKS::Nodegroup", "delete", HandlerStatus.SUCCESS)
+    )
+
+    with (
+        patch(
+            "aws_bench.resource_management.cleanup.resource_cleaner.CUSTOM_DELETION_REGISTRY",
+            {"AWS::EKS::Nodegroup": handler},
+        ),
+        patch.object(cleaner, "_prepare_all", return_value=[]),
+    ):
+        result = asyncio.run(cleaner.cleanup([nodegroup], prepare=True, custom_delete=True))
+
+    handler.assert_called_once()
+    assert handler.call_args.args[0].identifier == "c1|ng1"
+    assert result == {}
+
+
+def test_barrier_unregistered_nodegroup_handler_fails_closed():
+    """No registered handler (skipped by _custom_delete) is a fail-closed failure."""
+    cleaner = ResourceCleaner(MagicMock())
+    nodegroup = StackResource("Ng", "c1|ng1", "AWS::EKS::Nodegroup", "CREATE_COMPLETE")
+
+    with (
+        patch(
+            "aws_bench.resource_management.cleanup.resource_cleaner.CUSTOM_DELETION_REGISTRY",
+            {},
+        ),
+        patch.object(cleaner, "_prepare_all") as mock_prepare,
+        patch(
+            "aws_bench.resource_management.cleanup.resource_cleaner.CloudControlManager"
+        ) as mock_ccm_cls,
+    ):
+        result = asyncio.run(
+            cleaner.cleanup([nodegroup], prepare=True, custom_delete=True, ccapi_fallback=True)
+        )
+
+    assert len(result) == 1
+    failed = next(iter(result))
+    assert failed.type == "AWS::EKS::Nodegroup"
+    assert "No custom deletion handler registered" in result[failed].status_message
+    mock_prepare.assert_not_called()
+    mock_ccm_cls.return_value.delete_resources.assert_not_called()
+
+
+def test_prepare_only_does_not_invoke_barrier():
+    """prepare-only never triggers the barrier; the nodegroup flows through prepare unchanged."""
+    cleaner = ResourceCleaner(MagicMock())
+    nodegroup = StackResource("Ng", "c1|ng1", "AWS::EKS::Nodegroup", "CREATE_COMPLETE")
+
+    with (
+        patch.object(cleaner, "_delete_before_prepare") as mock_barrier,
+        patch.object(cleaner, "_prepare_all", return_value=[]) as mock_prepare,
+    ):
+        asyncio.run(cleaner.cleanup([nodegroup], prepare=True))
+
+    mock_barrier.assert_not_called()
+    prepared_types = {r.type for r in mock_prepare.call_args.args[0]}
+    assert prepared_types == {"AWS::EKS::Nodegroup"}
+
+
+def test_custom_delete_only_does_not_invoke_barrier():
+    """custom-delete-only never triggers the barrier; existing ordering/behavior is retained."""
+    cleaner = ResourceCleaner(MagicMock())
+    nodegroup = StackResource("Ng", "c1|ng1", "AWS::EKS::Nodegroup", "CREATE_COMPLETE")
+    handler = MagicMock(
+        return_value=HandlerResult("c1|ng1", "AWS::EKS::Nodegroup", "delete", HandlerStatus.SUCCESS)
+    )
+
+    with (
+        patch.object(cleaner, "_delete_before_prepare") as mock_barrier,
+        patch(
+            "aws_bench.resource_management.cleanup.resource_cleaner.CUSTOM_DELETION_REGISTRY",
+            {"AWS::EKS::Nodegroup": handler},
+        ),
+    ):
+        result = asyncio.run(cleaner.cleanup([nodegroup], custom_delete=True))
+
+    mock_barrier.assert_not_called()
+    handler.assert_called_once()
+    assert result == {}

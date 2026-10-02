@@ -9,8 +9,10 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import logging
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Iterable
+from datetime import datetime
 
 from harbor.agents.oracle import OracleAgent
 from harbor.models.task.task import Task
@@ -31,10 +33,14 @@ from aws_bench.logging.logger import (
 from aws_bench.scenario.events import ScenarioPhase
 from aws_bench.scenario.job_config import ScenarioTrialConfig
 from aws_bench.scenario.trial import ScenarioTrial
-from aws_bench.task.aws_creds import assume_role_for_script, resolve_env_with_creds
+from aws_bench.task.aws_creds import resolve_env_with_creds, session_for_script
 from aws_bench.task.script_runner import ScriptRunner
 from aws_bench.task.trial_config import AwsBenchTrialConfig
-from aws_bench.utils.credentials_provider import CredentialProvider, build_aws_credentials_file
+from aws_bench.utils.credentials_provider import (
+    CredentialProvider,
+    run_credential_refresh_loop,
+    session_to_credential_process,
+)
 from aws_bench.utils.placeholders import substitute_placeholders, update_placeholder_values
 
 PLACEHOLDER_OUTPUT_FILE_NAME = "placeholder.json"
@@ -49,14 +55,9 @@ PLACEHOLDER_OUTPUT_FILE_NAME = "placeholder.json"
 _SCENARIO_RESET_ROLE = "scenario-reset"
 _ROLE_LABEL_KEY = "awsbench.role"
 
-# In-container AWS credentials file at the SDK's default location, so tools
-# resolve it with no extra env. ``$HOME`` is expanded by the in-container shell,
-# which runs as the stage's own user, so the file lands in that user's home.
-_CREDS_FILE_PATH = "$HOME/.aws/credentials"
-
-# Heredoc terminator for the credentials-file write. A body containing this
-# line could close the heredoc early and inject shell, so such a body is
-# rejected before the write.
+# JSON payloads escape newlines; profile names come from validated account tags.
+_CREDS_DIR = "$HOME/.aws/creds"
+_AWS_CONFIG_PATH = "$HOME/.aws/config"
 _CREDS_HEREDOC_SENTINEL = "AWSBENCH_CREDS_EOF"
 
 # AWS env vars emptied in the stage env so neither a host-forwarded credential
@@ -68,6 +69,40 @@ _RAW_CRED_VARS = (
     "AWS_SESSION_TOKEN",
     "AWS_DEFAULT_PROFILE",
 )
+
+
+def _creds_write_command(payloads: dict[str, dict[str, object]]) -> str:
+    """Write private process credentials, replacing each file atomically."""
+    lines = [
+        "set -e",
+        "umask 077",
+        f'mkdir -p "{_CREDS_DIR}"',
+        f'chmod 700 "{_CREDS_DIR}"',
+    ]
+    for tag, payload in payloads.items():
+        path = f"{_CREDS_DIR}/{tag}.json"
+        lines.extend(
+            [
+                f"cat > \"{path}.tmp\" <<'{_CREDS_HEREDOC_SENTINEL}'",
+                json.dumps(payload),
+                _CREDS_HEREDOC_SENTINEL,
+                f'mv -f -- "{path}.tmp" "{path}"',
+            ]
+        )
+    return "\n".join(lines)
+
+
+def _aws_config_write_command(tags: Iterable[str]) -> str:
+    """Point each profile at the file the host refresher updates."""
+    body = "\n".join(
+        f"[profile {tag}]\ncredential_process = sh -c 'cat \"{_CREDS_DIR}/{tag}.json\"'\n"
+        for tag in tags
+    )
+    return (
+        'set -e\numask 077\nmkdir -p "$HOME/.aws"\n'
+        f"cat > \"{_AWS_CONFIG_PATH}\" <<'{_CREDS_HEREDOC_SENTINEL}'\n"
+        f'{body}\n{_CREDS_HEREDOC_SENTINEL}\nchmod 600 "{_AWS_CONFIG_PATH}"'
+    )
 
 
 class AwsBenchSingleStepTrial(SingleStepTrial):
@@ -159,91 +194,77 @@ class AwsBenchSingleStepTrial(SingleStepTrial):
         except Exception as exc:  # noqa: BLE001 — reset must not fail a finished benchmark
             self.logger.error("Post-trial reset raised for %s: %s", self.config.scenario_id, exc)
 
-    def _assume_all_tags(self, role_type: RoleType) -> dict[str, dict[str, str]]:
-        """Assume ``role_type``'s role in every account tag of this trial.
-
-        Returns ``{account_tag: creds}``. Each tag resolves the scoped role when
-        the task sets one for this phase, else the org-access role.
-        """
+    def _mint_all_tags(self, role_type: RoleType) -> dict[str, dict[str, object]]:
+        """Snapshot the phase's role credentials and their exact STS expiry."""
         role_name = self.task.config.scenario.role_name(role_type)
         return {
-            tag: assume_role_for_script(
-                account_id=account_id,
-                role_name=role_name,
-                role_type=role_type,
-                task_name=self.task.name,
-                job_id=self.config.job_id,
+            tag: session_to_credential_process(
+                session_for_script(
+                    account_id=account_id,
+                    role_name=role_name,
+                    role_type=role_type,
+                    task_name=self.task.name,
+                    job_id=self.config.job_id,
+                )
             )
             for tag, account_id in self.config.account_mapping.items()
         }
 
+    async def _write_stage_credentials(
+        self, role_type: RoleType, user: str | int | None
+    ) -> datetime:
+        """Mint off-loop, publish the files, and return their soonest expiry."""
+        payloads = await asyncio.to_thread(self._mint_all_tags, role_type)
+        await self._exec_checked(
+            command=_creds_write_command(payloads), user=user, action="write credential files"
+        )
+        return min(datetime.fromisoformat(str(value["Expiration"])) for value in payloads.values())
+
     @contextlib.asynccontextmanager
     async def _staged_credentials(
-        self, role_type: RoleType
+        self, role_type: RoleType, *, user: str | int | None = None
     ) -> AsyncGenerator[dict[str, str], None]:
-        """Write the per-tag credentials file into the container; remove it on exit.
-
-        Writes ``~/.aws/credentials`` as the stage's own user (so ``$HOME`` and
-        file ownership match the consuming process) with one static-credential
-        profile per account tag. Yields the credential-chain env vars emptied to
-        ``""`` so a host-forwarded credential set cannot outrank the file, plus
-        ``AWS_PROFILE`` set to the first tag. For the agent role only,
-        ``AWS_REGION``/``AWS_DEFAULT_REGION`` are pinned to the scenario's first
-        declared region. Removed on exit so a later stage in the same container
-        never inherits these credentials.
-
-        Raises:
-            RuntimeError: if the account mapping is empty, the credentials body
-                could break out of the heredoc, or the in-container write fails.
-        """
+        """Refresh this phase's credentials, then finish its writer before cleanup."""
         if not self.config.account_mapping:
             raise RuntimeError(
                 f"trial {self.config.trial_name}: empty account_mapping; cannot stage credentials"
             )
-
-        per_tag = self._assume_all_tags(role_type)
-        body = build_aws_credentials_file(per_tag)
-        if _CREDS_HEREDOC_SENTINEL in body:
-            raise RuntimeError("credentials body contains the heredoc sentinel")
-
-        # Run as the stage's user so $HOME resolves to that user's home and the
-        # file is owned by the process that reads it. Quoted-sentinel heredoc:
-        # the body (STS secrets) is written literally, no shell expansion.
-        user = self.task.config.agent.user
-        await self._exec_checked(
-            command=(
-                f"mkdir -p $(dirname {_CREDS_FILE_PATH}) && "
-                f"cat > {_CREDS_FILE_PATH} <<'{_CREDS_HEREDOC_SENTINEL}'\n"
-                f"{body}\n"
-                f"{_CREDS_HEREDOC_SENTINEL}\n"
-                f"chmod 600 {_CREDS_FILE_PATH}"
-            ),
-            user=user,
-            action="write credentials file",
-        )
-        cred_env: dict[str, str] = dict.fromkeys(_RAW_CRED_VARS, "")
-        # Default AWS_PROFILE to the first tag so a single-account task gets
-        # ambient credentials by default; multi-account tasks override per tag.
-        tag = next(iter(self.config.account_mapping))
-        cred_env["AWS_PROFILE"] = tag
-        cred_env["AWS_DEFAULT_PROFILE"] = tag
-        # Agent only: pre/post-invoke and verifier scripts declare their own
-        # regions in task.toml [*.env], which this would otherwise override.
-        if role_type is RoleType.AGENT:
-            cred_env["AWS_REGION"] = self.config.regions[0]
-            cred_env["AWS_DEFAULT_REGION"] = self.config.regions[0]
-
+        refresher: asyncio.Task[None] | None = None
         try:
+            expires_at = await self._write_stage_credentials(role_type, user)
+            await self._exec_checked(
+                command=_aws_config_write_command(self.config.account_mapping),
+                user=user,
+                action="write AWS config",
+            )
+            refresher = asyncio.create_task(
+                run_credential_refresh_loop(
+                    lambda: self._write_stage_credentials(role_type, user), expires_at, self.logger
+                )
+            )
+            cred_env: dict[str, str] = dict.fromkeys(_RAW_CRED_VARS, "")
+            tag = next(iter(self.config.account_mapping))
+            cred_env["AWS_PROFILE"] = tag
+            cred_env["AWS_DEFAULT_PROFILE"] = tag
+            # Script and verifier regions remain task-configured.
+            if role_type is RoleType.AGENT:
+                cred_env["AWS_REGION"] = self.config.regions[0]
+                cred_env["AWS_DEFAULT_REGION"] = self.config.regions[0]
             yield cred_env
         finally:
-            # Best-effort removal: never let a cleanup failure mask the body's
-            # exception. A surviving file is bounded to this trial's container.
             try:
-                await self.agent_environment.exec(
-                    command=f"rm -f {_CREDS_FILE_PATH}", user=self.task.config.agent.user
-                )
-            except Exception as exc:  # noqa: BLE001 — cleanup must not raise
-                self.logger.warning("Failed to remove credentials file: %s", exc)
+                if refresher is not None:
+                    refresher.cancel()
+                    await asyncio.gather(refresher, return_exceptions=True)
+            finally:
+                try:
+                    await self._exec_checked(
+                        command=f'rm -rf -- "{_CREDS_DIR}" "{_AWS_CONFIG_PATH}"',
+                        user=user,
+                        action="remove credential files",
+                    )
+                except Exception as exc:  # noqa: BLE001 — preserve the phase's result
+                    self.logger.warning("Failed to remove credential files: %s", exc)
 
     async def _exec_checked(self, *, command: str, user, action: str):
         """Exec in the agent environment; raise ``RuntimeError`` on non-zero exit.
@@ -252,7 +273,13 @@ class AwsBenchSingleStepTrial(SingleStepTrial):
         call this when a non-zero exit must abort. ``action`` names the step in
         the error message.
         """
-        result = await self.agent_environment.exec(command=command, user=user)
+        # Cancel the refresher without abandoning an in-flight container write.
+        operation = asyncio.create_task(self.agent_environment.exec(command=command, user=user))
+        try:
+            result = await asyncio.shield(operation)
+        except asyncio.CancelledError:
+            await asyncio.gather(operation, return_exceptions=True)
+            raise
         if result.return_code != 0:
             raise RuntimeError(
                 f"Failed to {action} for {self.config.trial_name} "
@@ -341,7 +368,9 @@ class AwsBenchSingleStepTrial(SingleStepTrial):
             else:
                 self.logger.debug("No placeholders produced from pre-invoke script.")
 
-    async def _run_agent_phase(self, *, instruction: str, **kwargs) -> None:
+    async def _run_agent_phase(
+        self, *, instruction: str, user: str | int | None = None, **kwargs
+    ) -> None:
         """Substitute placeholders, then run the agent phase under scoped creds."""
         if self._aws_placeholders:
             instruction = substitute_placeholders(instruction, self._aws_placeholders)
@@ -353,7 +382,7 @@ class AwsBenchSingleStepTrial(SingleStepTrial):
                 "injection (no _extra_env); cannot run an aws-bench trial with it."
             )
 
-        async with self._staged_credentials(RoleType.AGENT) as cred_env:
+        async with self._staged_credentials(RoleType.AGENT, user=user) as cred_env:
             extra_env = self.agent._extra_env  # type: ignore[attr-defined]
             saved = dict(extra_env)
             # Oracle only: resolve [solution.env] placeholders into its env; real
@@ -377,7 +406,7 @@ class AwsBenchSingleStepTrial(SingleStepTrial):
             if oracle_config is not None:
                 oracle_config.solution.env = {}
             try:
-                await super()._run_agent_phase(instruction=instruction, **kwargs)
+                await super()._run_agent_phase(instruction=instruction, user=user, **kwargs)
             finally:
                 if oracle_config is not None:
                     oracle_config.solution.env = solution_env
@@ -385,7 +414,7 @@ class AwsBenchSingleStepTrial(SingleStepTrial):
                 extra_env.update(saved)
 
     @contextlib.asynccontextmanager
-    async def _verifier_creds(self) -> AsyncGenerator[None, None]:
+    async def _verifier_creds(self, *, user: str | int | None = None) -> AsyncGenerator[None, None]:
         """Stage the verifier's creds file and transiently overlay ``verifier.env``.
 
         The env overlay (placeholders + emptied raw-credential vars) is restored
@@ -393,7 +422,7 @@ class AwsBenchSingleStepTrial(SingleStepTrial):
         mutation would leak creds to disk and break resume equality. The creds
         file is removed by the staging context.
         """
-        async with self._staged_credentials(RoleType.VERIFIER) as cred_env:
+        async with self._staged_credentials(RoleType.VERIFIER, user=user) as cred_env:
             original_env = self.task.config.verifier.env
             self.task.config.verifier.env = resolve_env_with_creds(
                 raw_env=original_env, placeholders=self._aws_placeholders, creds=cred_env
@@ -404,9 +433,9 @@ class AwsBenchSingleStepTrial(SingleStepTrial):
             finally:
                 self.task.config.verifier.env = original_env
 
-    async def _run_shared_verifier(self, **kwargs):
-        async with self._verifier_creds():
-            return await super()._run_shared_verifier(**kwargs)
+    async def _run_shared_verifier(self, *, user: str | int | None = None, **kwargs):
+        async with self._verifier_creds(user=user):
+            return await super()._run_shared_verifier(user=user, **kwargs)
 
     async def _recover_outputs(self) -> None:
         """Salvage agent outputs without stopping the env.

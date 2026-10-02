@@ -1,7 +1,10 @@
 """Tests for the assembled lister set: all_listers() + supersession + cfn_type_pins()."""
 
 from aws_bench.resource_management.fastscan.listers import all_listers, cfn_type_pins
-from aws_bench.resource_management.fastscan.listers.custom_listers import custom_listers
+from aws_bench.resource_management.fastscan.listers.custom_listers import (
+    custom_listers,
+    list_gamelift_custom_locations,
+)
 from aws_bench.resource_management.fastscan.listers.lister_registry import (
     DISABLED_LISTERS,
     SUPERSEDED_BY_CUSTOM_LISTER,
@@ -100,6 +103,22 @@ def test_all_listers_has_no_duplicate_scan_keys():
     keys = [f"{lister.service}:{lister.op}" for lister in all_listers()]
     dupes = sorted({k for k in keys if keys.count(k) > 1})
     assert not dupes, f"duplicate scan keys would crash scan(): {dupes}"
+
+
+def test_gamelift_list_locations_simple_lister_is_superseded():
+    """The no-arg simple gamelift:list_locations row must yield to the CUSTOM-filtered lister.
+
+    The simple row returns every AWS-managed Region / Local Zone location, which is undeletable
+    and absent from any snapshot, so it would surface as a new resource on every verify.
+    """
+    assert ("gamelift", "list_locations") in SUPERSEDED_BY_CUSTOM_LISTER
+    assert ("gamelift", "list_locations") in {(x.service, x.op) for x in SIMPLE_LISTERS}
+    # The custom lister reuses the row's op key (so the generated region-skip entry still
+    # applies), so exactly one lister runs under it: the custom one.
+    running = [x for x in all_listers() if (x.service, x.op) == ("gamelift", "list_locations")]
+    assert len(running) == 1
+    assert running[0].run is list_gamelift_custom_locations
+    assert running[0].cfn_type == "AWS::GameLift::Location"
 
 
 def test_superseded_table_op_never_runs_as_a_table_lister():

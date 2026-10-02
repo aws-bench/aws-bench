@@ -18,6 +18,8 @@ from aws_bench.resource_management.cleanup.handlers.cross_service import (
 )
 from aws_bench.resource_management.cleanup.models import (
     ExistenceStatus,
+    HandlerResult,
+    HandlerStatus,
     ResourceVerificationResult,
     StackDeletionResult,
     StackDeletionStatus,
@@ -1391,6 +1393,50 @@ def test_sweep_force_abandoned_records_cleanup_failures(deleter):
     assert deleter._manifest["my-stack"]["force_abandoned_sweep_failures"] == [
         "tigris-logs-111111111111"
     ]
+
+
+def test_sweep_force_abandoned_does_not_sweep_barrier_blocked_survivor(deleter):
+    """A failed nodegroup barrier must not report an untouched survivor as swept.
+
+    Regression: the sweep runs the real ``ResourceCleaner`` (cleanup is NOT
+    mocked). With a nodegroup and a second verified survivor both surviving the
+    force-delete, the nodegroup barrier fails, so cleanup returns the nodegroup
+    error AND marks the second survivor unattempted. Both must surface as stuck,
+    and the never-attempted survivor must NOT land in ``force_abandoned_swept``.
+    """
+    nodegroup = StackResource("Ng", "c1|ng1", "AWS::EKS::Nodegroup", "CREATE_COMPLETE")
+    asg = StackResource("Asg", "asg-1", "AWS::AutoScaling::AutoScalingGroup", "CREATE_COMPLETE")
+    snapshot = [nodegroup, asg]
+    verifications = [
+        _verification(nodegroup, ExistenceStatus.EXISTS),
+        _verification(asg, ExistenceStatus.EXISTS),
+    ]
+
+    def fake_ng_delete(resource, session):
+        return HandlerResult(
+            resource.identifier, resource.type, "delete", HandlerStatus.FAILED, "drain stuck"
+        )
+
+    with (
+        patch.object(
+            deleter._verifier,
+            "verify_resources",
+            new_callable=AsyncMock,
+            return_value=verifications,
+        ),
+        patch(
+            "aws_bench.resource_management.cleanup.resource_cleaner.CUSTOM_DELETION_REGISTRY",
+            {"AWS::EKS::Nodegroup": fake_ng_delete},
+        ),
+    ):
+        stuck = asyncio.run(deleter._sweep_force_abandoned("my-stack", snapshot))
+
+    # Both survivors come back stuck — the failed nodegroup and the unattempted ASG.
+    assert {r.physical_id for r in stuck} == {"c1|ng1", "asg-1"}
+    entry = deleter._manifest["my-stack"]
+    # The unattempted survivor must never be reported as successfully swept.
+    assert "force_abandoned_swept" not in entry
+    assert entry["force_abandoned_sweep_failures"] == ["asg-1", "c1|ng1"]
 
 
 def test_force_delete_success_triggers_abandoned_sweep(deleter):

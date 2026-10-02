@@ -3,18 +3,24 @@
 from __future__ import annotations
 
 import asyncio
+import time
 
+from botocore.exceptions import ClientError
 from tenacity import retry, retry_if_exception, stop_after_attempt, wait_random_exponential
 
 from aws_bench.account_management.constants import (
     CONTAMINATED_TAG_KEY,
     CONTAMINATION_TAG_MAX_ATTEMPTS,
+    DEFAULT_ENABLED_REGIONS,
     EMAIL_COLLISION_MAX_ATTEMPTS,
+    REGION_OPT_IN_POLL_INTERVAL_SEC,
+    REGION_OPT_IN_TIMEOUT_SEC,
     SCENARIO_ACCOUNT_TAG_KEY,
     SCENARIO_SHA_TAG_KEY,
 )
 from aws_bench.account_management.exceptions import (
     AccountCreationError,
+    AccountManagementError,
     AccountResolutionError,
     DuplicateScenarioAccountError,
     TestEnvironmentNotFoundError,
@@ -67,6 +73,8 @@ class AccountManager:
     def __init__(self) -> None:
         """Initialize the account manager."""
         self._org = OrganizationsClient()
+        self._account_management_lock = asyncio.Lock()
+        self._account_management_enabled = False
         active = active_account_config()
         self._preexisting: PreexistingEnvironmentConfig | None = active[0] if active else None
         self._preexisting_path = active[1] if active else None
@@ -358,13 +366,7 @@ class AccountManager:
     def ensure_region_restriction_scp(
         self, scenario_name: str, allowed_regions: list[str], account_ids: list[str]
     ) -> None:
-        """Lock ``account_ids`` to ``allowed_regions`` via a per-scenario SCP.
-
-        Public seam over :class:`OrganizationsClient` so callers (the CLI and
-        the trial lifecycle) don't reach into ``_org`` directly. Idempotent:
-        reuses the policy by name, updates its content when the region set
-        changes, and skips accounts that already have it attached.
-        """
+        """Lock ``account_ids`` to ``allowed_regions`` via a per-scenario SCP; idempotent."""
         if self._preexisting is not None:
             self._validate_allowlisted_accounts(account_ids)
             logger.info(
@@ -374,6 +376,68 @@ class AccountManager:
             )
             return
         self._org.ensure_region_restriction_scp(scenario_name, allowed_regions, account_ids)
+
+    async def ensure_regions_enabled(self, account_id: str, regions: list[str]) -> None:
+        """Opt a managed account into its declared opt-in regions and wait until all are enabled.
+
+        Default regions need no call. Pre-existing accounts are only checked against the
+        allowlist.
+
+        Raises:
+            AccountManagementError: A region cannot be enabled from its current state, or
+                the deadline passes with regions still pending.
+        """
+        if self._preexisting is not None:
+            self._validate_allowlisted_accounts([account_id])
+            return
+        pending = [region for region in regions if region not in DEFAULT_ENABLED_REGIONS]
+        if not pending:
+            return
+        await self._enable_account_management_access()
+        requested: set[str] = set()
+        deadline = time.monotonic() + REGION_OPT_IN_TIMEOUT_SEC
+        while True:
+            enabled: set[str] = set()
+            for region in pending:
+                status = await asyncio.to_thread(
+                    self._org.get_region_opt_status, account_id, region
+                )
+                if status in {"ENABLED", "ENABLED_BY_DEFAULT"}:
+                    enabled.add(region)
+                elif status == "DISABLED" and region not in requested:
+                    try:
+                        await asyncio.to_thread(self._org.enable_region, account_id, region)
+                    except ClientError as exc:
+                        if exc.response["Error"]["Code"] != "ConflictException":
+                            raise
+                        logger.info(
+                            "Region %s in account %s is already being enabled or disabled; waiting",
+                            region,
+                            account_id,
+                        )
+                        continue
+                    requested.add(region)
+                elif status not in {"DISABLED", "ENABLING"}:
+                    raise AccountManagementError(
+                        f"Account {account_id} region {region}: cannot enable from {status}"
+                    )
+            pending = [region for region in pending if region not in enabled]
+            if not pending:
+                return
+            if time.monotonic() >= deadline:
+                raise AccountManagementError(
+                    f"Account {account_id} regions not enabled after "
+                    f"{REGION_OPT_IN_TIMEOUT_SEC}s: {', '.join(pending)}; "
+                    "rerun env init to resume"
+                )
+            await asyncio.sleep(REGION_OPT_IN_POLL_INTERVAL_SEC)
+
+    async def _enable_account_management_access(self) -> None:
+        """Enable trusted access for Account Management once per manager; opt-in calls need it."""
+        async with self._account_management_lock:
+            if not self._account_management_enabled:
+                await asyncio.to_thread(self._org.enable_account_management_access)
+                self._account_management_enabled = True
 
     @retry(
         wait=wait_random_exponential(multiplier=1, min=2, max=30),

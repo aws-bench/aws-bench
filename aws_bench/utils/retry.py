@@ -26,6 +26,27 @@ def is_fresh_account_transient(exc: BaseException) -> bool:
     )
 
 
+def is_scp_access_denied(exc: BaseException) -> bool:
+    """Identify access denials whose message cites a service control policy."""
+    if not isinstance(exc, ClientError):
+        return False
+    error = exc.response.get("Error", {})
+    return (
+        error.get("Code")
+        in {
+            "AccessDenied",
+            "AccessDeniedException",
+            "UnauthorizedOperation",
+        }
+        and "service control policy" in error.get("Message", "").lower()
+    )
+
+
+def is_region_access_transient(exc: BaseException) -> bool:
+    """Identify subscription or SCP denial errors."""
+    return is_fresh_account_transient(exc) or is_scp_access_denied(exc)
+
+
 @tenacity.retry(
     stop=tenacity.stop_after_attempt(5),
     wait=tenacity.wait_exponential(min=5, max=60) + tenacity.wait_random(0, 10),

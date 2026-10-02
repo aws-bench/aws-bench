@@ -20,7 +20,11 @@ from aws_bench.account_management.preexisting import active_account_config
 from aws_bench.constants import STATE_DIR
 from aws_bench.logging.logger import get_logger, log_context
 from aws_bench.resource_management.ccapi.models import MAX_WORKERS_ACCOUNT, MAX_WORKERS_HEAVY
-from aws_bench.resource_management.exceptions import DriftDetectionError, SnapshotNotFoundError
+from aws_bench.resource_management.exceptions import (
+    DriftDetectionError,
+    SnapshotNotFoundError,
+    SnapshotRegionMismatchError,
+)
 from aws_bench.resource_management.fastscan.engine import _TRANSIENT_SERVER_CODES
 from aws_bench.resource_management.scanner import make_scanner, scan_method
 from aws_bench.resource_management.snapshot.drift import (
@@ -51,7 +55,7 @@ from aws_bench.utils.credentials_provider import (
     build_session_name,
     create_regional_session,
 )
-from aws_bench.utils.retry import is_fresh_account_transient
+from aws_bench.utils.retry import is_region_access_transient
 
 logger = get_logger(__name__)
 
@@ -210,6 +214,24 @@ class SnapshotManager:
 
         return snapshot
 
+    def validate_pre_setup_snapshot(
+        self,
+        scenario_name: str,
+        account_id: str,
+        regions: list[str],
+        *,
+        allow_missing: bool = False,
+    ) -> None:
+        """Require a PRE_SETUP baseline whose region set equals ``regions``."""
+        try:
+            baseline = self.load_snapshot(scenario_name, account_id, SnapshotStage.PRE_SETUP)
+        except SnapshotNotFoundError:
+            if allow_missing:
+                return
+            raise
+        if set(baseline.regions) != set(regions):
+            raise SnapshotRegionMismatchError(scenario_name, account_id, regions, baseline.regions)
+
     def snapshot_exists(
         self, env_name: str, account_id: str, stage: SnapshotStage = SnapshotStage.POST_SETUP
     ) -> bool:
@@ -242,7 +264,7 @@ class SnapshotManager:
 
     # Sequential per account+region, so it can afford a long convergence budget.
     @tenacity.retry(
-        retry=tenacity.retry_if_exception(is_fresh_account_transient),
+        retry=tenacity.retry_if_exception(is_region_access_transient),
         wait=tenacity.wait_exponential(multiplier=2, min=10, max=60) + tenacity.wait_random(0, 5),
         stop=tenacity.stop_after_delay(180),
         reraise=True,
@@ -250,8 +272,7 @@ class SnapshotManager:
     def _list_active_stacks(self, cfn: Any) -> list[dict[str, Any]]:
         """List active CloudFormation stacks (exclude deleted and nested stacks).
 
-        The snapshot's first AWS call, so a fresh account's unconverged subscription
-        surfaces here (see is_fresh_account_transient); the decorator retries it.
+        The snapshot's first AWS call, so it carries the region-access retry.
         """
         logger.debug("Listing CloudFormation stacks")
         stacks = []

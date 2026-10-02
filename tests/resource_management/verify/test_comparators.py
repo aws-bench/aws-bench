@@ -125,6 +125,40 @@ def test_filter_aws_managed_resources_removes_default_iot_domain_configurations(
     }
 
 
+def test_filter_aws_managed_resources_removes_aws_managed_gamelift_locations():
+    """AWS-managed GameLift locations (Region / Local Zone names) are filtered out.
+
+    ``gamelift:ListLocations`` returns the AWS-owned locations GameLift supports. They are
+    absent from the scenario snapshot and cannot be deleted, so an account that lists them
+    would otherwise fail every reset/verify with "N new resources". Custom locations
+    (customer-created, ``custom-`` prefix) are kept.
+    """
+    resources = {
+        "AWS::GameLift::Location": [
+            {"Identifier": "us-east-1"},
+            {"Identifier": "us-east-1-atl-2"},
+            {"Identifier": "ap-south-2"},
+            {"Identifier": "custom-my-location"},
+        ],
+    }
+
+    filtered = filter_aws_managed_resources(resources)
+
+    assert {r["Identifier"] for r in filtered["AWS::GameLift::Location"]} == {"custom-my-location"}
+
+
+def test_filter_aws_managed_resources_drops_gamelift_type_when_only_aws_locations():
+    """A type whose entries are all AWS-managed disappears from the result entirely."""
+    resources = {
+        "AWS::GameLift::Location": [
+            {"Identifier": "us-west-2"},
+            {"Identifier": "us-west-2-lax-1"},
+        ],
+    }
+
+    assert "AWS::GameLift::Location" not in filter_aws_managed_resources(resources)
+
+
 def test_filter_aws_managed_resources_removes_service_managed_secrets():
     """Service-managed secrets ("<service>!") are filtered; customer secrets kept.
 
@@ -164,6 +198,40 @@ def test_filter_aws_managed_resources_removes_service_managed_secrets():
         "my!secret",
         "prod!db-creds",
     }
+
+
+def test_filter_aws_managed_resources_removes_dynamodb_import_jobs():
+    """DynamoDB Import-from-S3 job records are filtered; real tables/exports/backups kept.
+
+    Import jobs (``ImportArn``) are permanent, undeletable import history (no DeleteImport
+    API, no CCAPI handler), so the orphan/drift check flags them forever. The ``ListImports``
+    lister has no ``cfn_type``, so its ARNs land in the synthetic ``AWS::dynamodb::*`` bucket
+    next to backups/exports/global tables. Only the ``/import/`` ARN segment is matched, so a
+    real table ARN (no ``/import/``) and the sibling ``/export/`` / ``/backup/`` records — none
+    of which are import jobs — are NOT filtered.
+    """
+    acct = "arn:aws:dynamodb:us-east-1:123456789012:table"
+    resources = {
+        "AWS::dynamodb::*": [
+            {"Identifier": f"{acct}/order_items.csv/import/01789480117964-fb5eb55b"},
+            {"Identifier": f"{acct}/products.csv/import/01789480117000-aa11bb22"},
+            # Sibling DynamoDB metadata in the same synthetic bucket — must be KEPT.
+            {"Identifier": f"{acct}/orders/export/01700000000000-deadbeef"},
+            {"Identifier": f"{acct}/orders/backup/01700000000000-cafed00d"},
+        ],
+        # A real agent-created table (proper CCAPI type, no ``/import/``) — must be KEPT.
+        "AWS::DynamoDB::Table": [
+            {"Identifier": f"{acct}/order_items"},
+        ],
+    }
+
+    filtered = filter_aws_managed_resources(resources)
+
+    assert {r["Identifier"] for r in filtered["AWS::dynamodb::*"]} == {
+        f"{acct}/orders/export/01700000000000-deadbeef",
+        f"{acct}/orders/backup/01700000000000-cafed00d",
+    }
+    assert {r["Identifier"] for r in filtered["AWS::DynamoDB::Table"]} == {f"{acct}/order_items"}
 
 
 def test_filter_aws_managed_resources_removes_custom_types():
@@ -471,3 +539,49 @@ class TestPhase2AwsOwnedFilters:
         # Regression guard: the match MUST be exact equality, not startswith("default") — a
         # legitimately named group that merely starts with "default" is real, deletable drift.
         assert not predicate("default-valkey-subnets", {})
+
+
+def test_filter_aws_managed_resources_removes_autoscaling_managed_rule():
+    """EC2 Auto Scaling's ``AutoScalingManagedRule`` is filtered; task rules are kept.
+
+    The rule is a lazily-created, account-persistent, AWS-managed EventBridge rule
+    absent from the pre-deploy snapshot, so reset flagged it as new/orphan. It must
+    be excluded (by exact name) while any task/agent-created rule is preserved.
+    """
+    resources = {
+        "AWS::Events::Rule": [
+            {"Identifier": "arn:aws:events:us-east-1:123456789012:rule/AutoScalingManagedRule"},
+            {"Identifier": "AutoScalingManagedRule"},
+            {"Identifier": "arn:aws:events:us-east-1:123456789012:rule/my-task-rule"},
+            {"Identifier": "my-bare-rule"},
+        ]
+    }
+
+    filtered = filter_aws_managed_resources(resources)
+
+    kept = {r["Identifier"] for r in filtered["AWS::Events::Rule"]}
+    assert kept == {
+        "arn:aws:events:us-east-1:123456789012:rule/my-task-rule",
+        "my-bare-rule",
+    }
+
+
+def test_filter_keeps_custom_bus_rule_named_like_managed_rule_suffix():
+    """A custom rule whose name merely ends in the managed name is still filtered by exact match.
+
+    ``…:rule/<bus>/AutoScalingManagedRule`` (custom-bus ARN) resolves to the exact
+    managed name on its trailing segment, so it is excluded; a differently-named
+    rule is not.
+    """
+    prefix = "arn:aws:events:us-east-1:123456789012:rule/mybus"
+    resources = {
+        "AWS::Events::Rule": [
+            {"Identifier": f"{prefix}/AutoScalingManagedRule"},
+            {"Identifier": f"{prefix}/NotManaged"},
+        ]
+    }
+
+    filtered = filter_aws_managed_resources(resources)
+
+    kept = {r["Identifier"] for r in filtered["AWS::Events::Rule"]}
+    assert kept == {f"{prefix}/NotManaged"}

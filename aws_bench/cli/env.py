@@ -1089,6 +1089,14 @@ def creds(
     force: Annotated[bool, Option(help="Regenerate even if cached creds are valid")] = False,
     no_verify: Annotated[bool, Option("--no-verify", help="Skip credential verification")] = False,
     days: Annotated[int, Option(help="Credential lifetime in days")] = 30,
+    reclaim_slot: Annotated[
+        bool,
+        Option(
+            "--reclaim-slot",
+            help="If both Bedrock credential slots are in use and a rotation is needed, "
+            "authorize deleting the soonest-to-expire credential to free a slot",
+        ),
+    ] = False,
     eval_mode: Annotated[
         bool, Option("--eval", help="Output eval-friendly format (no comments)")
     ] = False,
@@ -1106,7 +1114,9 @@ def creds(
 
     err_console.print("[bold]Generating Bedrock bearer token...[/bold]")
     try:
-        token = generate_bearer_token(force=force, no_verify=no_verify, days=days)
+        token = generate_bearer_token(
+            force=force, no_verify=no_verify, days=days, reclaim_slot=reclaim_slot
+        )
     except BedrockCredentialError as e:
         err_console.print(f"[red]Error:[/red] {escape(str(e))}")
         raise typer.Exit(code=1) from e

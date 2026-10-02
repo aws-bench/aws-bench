@@ -163,3 +163,53 @@ def _delete(resource: Resource, session: boto3.Session) -> HandlerResult:
         status=HandlerStatus.FAILED,
         message=f"Exhausted {_MAX_DELETE_ATTEMPTS} attempts: {last_error}",
     )
+
+
+@resource_handler("AWS::IAM::OIDCProvider", role="delete")
+def _delete_oidc_provider(resource: Resource, session: boto3.Session) -> HandlerResult:
+    """Delete an EKS/IRSA OIDC identity provider.
+
+    ``AWS::IAM::OIDCProvider`` is not removed by the CCAPI fallback, so an
+    EKS-created IAM OIDC provider (``oidc.eks.<region>.amazonaws.com/id/…``, set up
+    for IRSA by eksctl / the cluster) survives reset. Being a global IAM resource,
+    it also surfaces in every region's scan, so the orphan re-check reports it
+    (and repeatedly, once per region) and the reset fails. The fast-scan lister
+    emits the provider ARN, which is exactly what
+    ``delete_open_id_connect_provider`` takes; the delete is idempotent
+    (``NoSuchEntity`` → already gone), so the per-region repeats are safe no-ops.
+    """
+    arn = resource.identifier
+    iam = build_client(session, "iam")
+    try:
+        iam.delete_open_id_connect_provider(OpenIDConnectProviderArn=arn)
+    except ClientError as e:
+        if e.response.get("Error", {}).get("Code", "") in _NOT_FOUND_CODES:
+            return HandlerResult(
+                resource_id=arn,
+                resource_type=resource.type,
+                action="delete",
+                status=HandlerStatus.SUCCESS,
+                message="OIDC provider already gone",
+            )
+        return HandlerResult(
+            resource_id=arn,
+            resource_type=resource.type,
+            action="delete",
+            status=HandlerStatus.FAILED,
+            message=f"Failed to delete OIDC provider: {e}",
+        )
+    except BotoCoreError as e:
+        return HandlerResult(
+            resource_id=arn,
+            resource_type=resource.type,
+            action="delete",
+            status=HandlerStatus.FAILED,
+            message=f"Connection error deleting OIDC provider: {e}",
+        )
+    logger.debug("Deleted IAM OIDC provider '%s'", arn)
+    return HandlerResult(
+        resource_id=arn,
+        resource_type=resource.type,
+        action="delete",
+        status=HandlerStatus.SUCCESS,
+    )
