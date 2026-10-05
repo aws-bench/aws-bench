@@ -1,7 +1,7 @@
 [
   {
     "name": "api-and-observability",
-    "version": "0.7.4",
+    "version": "0.7.5",
     "description": "Multi-service environment with OpenSearch, ECS, Lambda, API Gateway, CloudFront, Redshift, Step Functions, Bedrock, and ELBv2 across us-east-1, us-west-2, and ap-southeast-1; 15 aws-introspection tasks against api-and-observability.",
     "tasks": [
       {
@@ -99,7 +99,7 @@
       {
         "name": "api-and-observability",
         "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
-        "git_commit_id": "a45996f548e588d1a6c4c2faeeeaac1b177e83fe",
+        "git_commit_id": "b1b22256aedd2651d40214764bd17ac13e315d9b",
         "path": "scenarios/api-and-observability"
       }
     ],
@@ -128,7 +128,7 @@
   },
   {
     "name": "compute-and-data",
-    "version": "0.7.4",
+    "version": "0.7.5",
     "description": "Mutation scenario (compute-and-data) \u2014 multi-region: us-east-1 (primary deployments), us-east-2 (Image Builder distribution), ap-southeast-1 (EMR cluster creation); 27 aws-introspection tasks against compute-and-data.",
     "tasks": [
       {
@@ -298,7 +298,7 @@
       {
         "name": "compute-and-data",
         "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
-        "git_commit_id": "a45996f548e588d1a6c4c2faeeeaac1b177e83fe",
+        "git_commit_id": "b1b22256aedd2651d40214764bd17ac13e315d9b",
         "path": "scenarios/compute-and-data"
       }
     ],
@@ -327,7 +327,7 @@
   },
   {
     "name": "databases-and-storage",
-    "version": "0.7.2",
+    "version": "0.7.3",
     "description": "Multi-service environment with Athena, CodeBuild, DynamoDB, EC2, ECS, Route53, S3, SQS, SSM, and WAF stacks across us-east-1 and us-west-2; 30 aws-introspection tasks against databases-and-storage.",
     "tasks": [
       {
@@ -515,7 +515,7 @@
       {
         "name": "databases-and-storage",
         "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
-        "git_commit_id": "a45996f548e588d1a6c4c2faeeeaac1b177e83fe",
+        "git_commit_id": "b1b22256aedd2651d40214764bd17ac13e315d9b",
         "path": "scenarios/databases-and-storage"
       }
     ],
@@ -544,7 +544,7 @@
   },
   {
     "name": "ec2-multiregion",
-    "version": "0.7.2",
+    "version": "0.7.3",
     "description": "Small EC2-only environment used for end-to-end env-setup validation. Two stacks (ec2_ks84v1fh1, ec2_ls9fuhb52) plus AppRolesStack across us-east-1, us-west-1, and us-west-2; 9 aws-introspection tasks against ec2-multiregion.",
     "tasks": [
       {
@@ -606,7 +606,7 @@
       {
         "name": "ec2-multiregion",
         "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
-        "git_commit_id": "a45996f548e588d1a6c4c2faeeeaac1b177e83fe",
+        "git_commit_id": "b1b22256aedd2651d40214764bd17ac13e315d9b",
         "path": "scenarios/ec2-multiregion"
       }
     ],
@@ -635,7 +635,7 @@
   },
   {
     "name": "reference-architectures",
-    "version": "0.7.3",
+    "version": "0.7.4",
     "description": "Multi-service environment with ALB, API Gateway, AppSync, Backup, Batch, CloudFormation, CloudFront, CloudWatch, CodePipeline, Cognito, DynamoDB, EC2, ECS, EventBridge, Glue, ImageBuilder, Lambda, Lex, MQ, RDS, Rekognition, Route53, S3, Service Catalog, SSM, Step Functions, Transfer Family, and WAF stacks in us-east-1; 11 aws-introspection tasks against reference-architectures.",
     "tasks": [
       {
@@ -709,7 +709,7 @@
       {
         "name": "reference-architectures",
         "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
-        "git_commit_id": "a45996f548e588d1a6c4c2faeeeaac1b177e83fe",
+        "git_commit_id": "b1b22256aedd2651d40214764bd17ac13e315d9b",
         "path": "scenarios/reference-architectures"
       }
     ],
@@ -738,7 +738,7 @@
   },
   {
     "name": "serverless-apps",
-    "version": "0.7.3",
+    "version": "0.7.4",
     "description": "Complex multi-service environment: VPC, ALB, RDS, MSK, ECS, DocumentDB, Lambda, S3, SNS, Firehose. Single stack across us-east-1; 13 aws-introspection tasks against serverless-apps.",
     "tasks": [
       {
@@ -824,7 +824,7 @@
       {
         "name": "serverless-apps",
         "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
-        "git_commit_id": "a45996f548e588d1a6c4c2faeeeaac1b177e83fe",
+        "git_commit_id": "b1b22256aedd2651d40214764bd17ac13e315d9b",
         "path": "scenarios/serverless-apps"
       }
     ],
@@ -853,7 +853,7 @@
   },
   {
     "name": "streaming-and-iot",
-    "version": "0.7.2",
+    "version": "0.7.3",
     "description": "Multi-service environment for niche-service mutation tasks: Connect Customer Profiles, S3, IoT, EventBridge, ECS-on-EC2, Kinesis Data Streams, RDS+S3-Tables, MSK, Neptune. 9 stacks in us-east-1; 8 aws-introspection tasks against streaming-and-iot.",
     "tasks": [
       {
@@ -909,7 +909,7 @@
       {
         "name": "streaming-and-iot",
         "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
-        "git_commit_id": "a45996f548e588d1a6c4c2faeeeaac1b177e83fe",
+        "git_commit_id": "b1b22256aedd2651d40214764bd17ac13e315d9b",
         "path": "scenarios/streaming-and-iot"
       }
     ],
@@ -938,7 +938,7 @@
   },
   {
     "name": "troubleshooting-multiservice",
-    "version": "0.7.4",
+    "version": "0.7.5",
     "description": "30 stacks across 7 regions exercising EC2/ECS/ECR/Glue/Lambda/CFN/RDS/Redshift/SageMaker. Includes setup scripts that build & push Docker images to ECR, mutate KMS key policies, trigger expected Glue/SFN states, and intentionally drive one CFN stack into UPDATE_FAILED for a troubleshooting task; 21 aws-introspection tasks against troubleshooting-multiservice.",
     "tasks": [
       {
@@ -1072,7 +1072,7 @@
       {
         "name": "troubleshooting-multiservice",
         "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
-        "git_commit_id": "a45996f548e588d1a6c4c2faeeeaac1b177e83fe",
+        "git_commit_id": "b1b22256aedd2651d40214764bd17ac13e315d9b",
         "path": "scenarios/troubleshooting-multiservice"
       }
     ],
@@ -1101,7 +1101,7 @@
   },
   {
     "name": "aws-bench-quickstart",
-    "version": "0.7.2",
+    "version": "0.7.3",
     "description": "Test dataset to try out aws-bench and run a smoke test to confirm that the framework is configured correctly. It uses the same tasks as the ec2-multiregion scenario.",
     "tasks": [
       {
@@ -1163,7 +1163,7 @@
       {
         "name": "ec2-multiregion",
         "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
-        "git_commit_id": "a45996f548e588d1a6c4c2faeeeaac1b177e83fe",
+        "git_commit_id": "b1b22256aedd2651d40214764bd17ac13e315d9b",
         "path": "scenarios/ec2-multiregion"
       }
     ],
@@ -1192,7 +1192,7 @@
   },
   {
     "name": "aws-bench-advanced",
-    "version": "0.7.5",
+    "version": "0.7.6",
     "description": "Hard-tier launch dataset (phase 1): 47 introspection tasks across reference-architectures, api-and-observability, and troubleshooting-multiservice.",
     "tasks": [
       {
@@ -1482,19 +1482,19 @@
       {
         "name": "reference-architectures",
         "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
-        "git_commit_id": "a45996f548e588d1a6c4c2faeeeaac1b177e83fe",
+        "git_commit_id": "b1b22256aedd2651d40214764bd17ac13e315d9b",
         "path": "scenarios/reference-architectures"
       },
       {
         "name": "api-and-observability",
         "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
-        "git_commit_id": "a45996f548e588d1a6c4c2faeeeaac1b177e83fe",
+        "git_commit_id": "b1b22256aedd2651d40214764bd17ac13e315d9b",
         "path": "scenarios/api-and-observability"
       },
       {
         "name": "troubleshooting-multiservice",
         "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
-        "git_commit_id": "a45996f548e588d1a6c4c2faeeeaac1b177e83fe",
+        "git_commit_id": "b1b22256aedd2651d40214764bd17ac13e315d9b",
         "path": "scenarios/troubleshooting-multiservice"
       }
     ],
@@ -1523,7 +1523,7 @@
   },
   {
     "name": "aws-bench-basic",
-    "version": "0.7.4",
+    "version": "0.7.5",
     "description": "Easy-tier launch dataset (phase 1): 78 introspection and mutation tasks across streaming-and-iot, compute-and-data, serverless-apps, and databases-and-storage.",
     "tasks": [
       {
@@ -1999,25 +1999,25 @@
       {
         "name": "streaming-and-iot",
         "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
-        "git_commit_id": "a45996f548e588d1a6c4c2faeeeaac1b177e83fe",
+        "git_commit_id": "b1b22256aedd2651d40214764bd17ac13e315d9b",
         "path": "scenarios/streaming-and-iot"
       },
       {
         "name": "compute-and-data",
         "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
-        "git_commit_id": "a45996f548e588d1a6c4c2faeeeaac1b177e83fe",
+        "git_commit_id": "b1b22256aedd2651d40214764bd17ac13e315d9b",
         "path": "scenarios/compute-and-data"
       },
       {
         "name": "serverless-apps",
         "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
-        "git_commit_id": "a45996f548e588d1a6c4c2faeeeaac1b177e83fe",
+        "git_commit_id": "b1b22256aedd2651d40214764bd17ac13e315d9b",
         "path": "scenarios/serverless-apps"
       },
       {
         "name": "databases-and-storage",
         "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
-        "git_commit_id": "a45996f548e588d1a6c4c2faeeeaac1b177e83fe",
+        "git_commit_id": "b1b22256aedd2651d40214764bd17ac13e315d9b",
         "path": "scenarios/databases-and-storage"
       }
     ],
@@ -2046,7 +2046,7 @@
   },
   {
     "name": "all",
-    "version": "0.7.6",
+    "version": "0.7.7",
     "description": "Unified dataset spanning 8 scenario(s) (api-and-observability, compute-and-data, databases-and-storage, ec2-multiregion, reference-architectures, serverless-apps, streaming-and-iot, troubleshooting-multiservice): 8 scenarios, 134 tasks.",
     "tasks": [
       {
@@ -2858,49 +2858,49 @@
       {
         "name": "api-and-observability",
         "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
-        "git_commit_id": "a45996f548e588d1a6c4c2faeeeaac1b177e83fe",
+        "git_commit_id": "b1b22256aedd2651d40214764bd17ac13e315d9b",
         "path": "scenarios/api-and-observability"
       },
       {
         "name": "compute-and-data",
         "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
-        "git_commit_id": "a45996f548e588d1a6c4c2faeeeaac1b177e83fe",
+        "git_commit_id": "b1b22256aedd2651d40214764bd17ac13e315d9b",
         "path": "scenarios/compute-and-data"
       },
       {
         "name": "databases-and-storage",
         "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
-        "git_commit_id": "a45996f548e588d1a6c4c2faeeeaac1b177e83fe",
+        "git_commit_id": "b1b22256aedd2651d40214764bd17ac13e315d9b",
         "path": "scenarios/databases-and-storage"
       },
       {
         "name": "ec2-multiregion",
         "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
-        "git_commit_id": "a45996f548e588d1a6c4c2faeeeaac1b177e83fe",
+        "git_commit_id": "b1b22256aedd2651d40214764bd17ac13e315d9b",
         "path": "scenarios/ec2-multiregion"
       },
       {
         "name": "reference-architectures",
         "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
-        "git_commit_id": "a45996f548e588d1a6c4c2faeeeaac1b177e83fe",
+        "git_commit_id": "b1b22256aedd2651d40214764bd17ac13e315d9b",
         "path": "scenarios/reference-architectures"
       },
       {
         "name": "serverless-apps",
         "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
-        "git_commit_id": "a45996f548e588d1a6c4c2faeeeaac1b177e83fe",
+        "git_commit_id": "b1b22256aedd2651d40214764bd17ac13e315d9b",
         "path": "scenarios/serverless-apps"
       },
       {
         "name": "streaming-and-iot",
         "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
-        "git_commit_id": "a45996f548e588d1a6c4c2faeeeaac1b177e83fe",
+        "git_commit_id": "b1b22256aedd2651d40214764bd17ac13e315d9b",
         "path": "scenarios/streaming-and-iot"
       },
       {
         "name": "troubleshooting-multiservice",
         "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
-        "git_commit_id": "a45996f548e588d1a6c4c2faeeeaac1b177e83fe",
+        "git_commit_id": "b1b22256aedd2651d40214764bd17ac13e315d9b",
         "path": "scenarios/troubleshooting-multiservice"
       }
     ],
