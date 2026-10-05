@@ -288,11 +288,19 @@ class VerifyManager:
                 f"region (cannot hold an orphan): {tolerated}"
             )
         if unenumerable:
-            logger.warning(f"Could not enumerate baseline resource type(s): {unenumerable}")
+            # Surface the underlying per-lister error (already in failed_baseline) so a
+            # fail-closed "could not enumerate" is diagnosable — otherwise the trial log
+            # shows only the type name with no cause. Does NOT change the fail-closed
+            # decision; only enriches the log and details.
+            unenumerable_errors = {t: failed_baseline[t] for t in unenumerable}
+            logger.warning(f"Could not enumerate baseline resource type(s): {unenumerable_errors}")
             return VerifyResult(
                 success=False,
                 reason=f"Could not enumerate {len(unenumerable)} baseline resource type(s)",
-                details={"unenumerable_types": unenumerable},
+                details={
+                    "unenumerable_types": unenumerable,
+                    "unenumerable_errors": unenumerable_errors,
+                },
                 suggestion="Run 'aws-bench env cleanup' and 'aws-bench env setup' to reset",
             )
 

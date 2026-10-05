@@ -1000,6 +1000,8 @@ def test_check_new_resources_fails_closed_on_unenumerable_baseline_type(mock_sca
     assert "Could not enumerate 1 baseline resource type(s)" in result.reason
     assert isinstance(result.details, dict)
     assert result.details["unenumerable_types"] == ["AWS::EC2::InternetGateway"]
+    # The underlying per-lister error is surfaced for diagnosability (B1).
+    assert result.details["unenumerable_errors"] == {"AWS::EC2::InternetGateway": "throttled"}
 
 
 @mock_aws
