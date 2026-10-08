@@ -1326,6 +1326,196 @@ def test_check_new_resources_type_with_resources_not_tolerated_even_if_enumerabl
 
 
 # ===========================================================================
+# _check_new_resources — baseline-Lambda log-group toleration (option B)
+# ===========================================================================
+
+
+@mock_aws
+@patch("aws_bench.resource_management.verify.manager.make_scanner")
+def test_check_new_resources_tolerates_baseline_lambda_log_group(mock_scanner_class):
+    """A /aws/lambda/<fn> log group whose function is baseline is NOT a new resource.
+
+    AWS auto-recreates the group on every invoke, so a baseline function reset must
+    leave alive would otherwise re-mint it and fail the reset.
+    """
+    from aws_bench.resource_management.ccapi.models import ScanResult
+
+    session = boto3.Session(region_name="us-east-1")
+    mock_scanner = MagicMock()
+    # The log group reappeared (auto-created); the function itself is unchanged.
+    mock_scanner.scan_resources.return_value = ScanResult(
+        detected={
+            "AWS::Lambda::Function": [{"Identifier": "LambdaCron-123-us-east-1"}],
+            "AWS::Logs::LogGroup": [{"Identifier": "/aws/lambda/LambdaCron-123-us-east-1"}],
+        },
+        failed={},
+    )
+    mock_scanner_class.return_value = mock_scanner
+
+    manager = VerifyManager(session)
+    result = manager._check_new_resources(
+        baseline_resource_ids={
+            "AWS::Lambda::Function": [{"Identifier": "LambdaCron-123-us-east-1"}],
+            "AWS::Logs::LogGroup": [],
+        },
+        baseline_failed={},
+        baseline_empty={"AWS::Logs::LogGroup"},
+    )
+
+    # The group is tolerated -> no new resources -> clean.
+    assert result is None
+
+
+@mock_aws
+@patch("aws_bench.resource_management.verify.manager.make_scanner")
+def test_check_new_resources_fails_closed_on_non_baseline_lambda_log_group(mock_scanner_class):
+    """A /aws/lambda/<fn> group whose function is NOT baseline still fails closed.
+
+    An agent-created Lambda's log group is a genuine residual; the fail-closed
+    guarantee must hold.
+    """
+    from aws_bench.resource_management.ccapi.models import ScanResult
+
+    session = boto3.Session(region_name="us-east-1")
+    mock_scanner = MagicMock()
+    mock_scanner.scan_resources.return_value = ScanResult(
+        detected={
+            "AWS::Logs::LogGroup": [{"Identifier": "/aws/lambda/AgentCreatedFn-123-us-east-1"}],
+        },
+        failed={},
+    )
+    mock_scanner_class.return_value = mock_scanner
+
+    manager = VerifyManager(session)
+    result = manager._check_new_resources(
+        # Baseline has a DIFFERENT function; the scanned group's function is not baseline.
+        baseline_resource_ids={
+            "AWS::Lambda::Function": [{"Identifier": "LambdaCron-123-us-east-1"}],
+            "AWS::Logs::LogGroup": [],
+        },
+        baseline_failed={},
+        baseline_empty={"AWS::Logs::LogGroup"},
+    )
+
+    assert result is not None
+    assert result.success is False
+    assert result.new_resources is not None
+    assert result.new_resources["AWS::Logs::LogGroup"] == [
+        {"Identifier": "/aws/lambda/AgentCreatedFn-123-us-east-1"}
+    ]
+
+
+@mock_aws
+@patch("aws_bench.resource_management.verify.manager.make_scanner")
+def test_check_new_resources_non_lambda_log_group_not_tolerated(mock_scanner_class):
+    """A new non-/aws/lambda/ log group is untouched by the toleration and fails closed.
+
+    The rule is scoped to the /aws/lambda/ prefix; an explicitly-named new log group
+    (e.g. a service's vended-logs group) is a normal residual.
+    """
+    from aws_bench.resource_management.ccapi.models import ScanResult
+
+    session = boto3.Session(region_name="us-east-1")
+    mock_scanner = MagicMock()
+    mock_scanner.scan_resources.return_value = ScanResult(
+        detected={
+            "AWS::Lambda::Function": [{"Identifier": "LambdaCron-123-us-east-1"}],
+            "AWS::Logs::LogGroup": [{"Identifier": "/custom/app-log-group"}],
+        },
+        failed={},
+    )
+    mock_scanner_class.return_value = mock_scanner
+
+    manager = VerifyManager(session)
+    result = manager._check_new_resources(
+        baseline_resource_ids={
+            "AWS::Lambda::Function": [{"Identifier": "LambdaCron-123-us-east-1"}],
+            "AWS::Logs::LogGroup": [],
+        },
+        baseline_failed={},
+        baseline_empty={"AWS::Logs::LogGroup"},
+    )
+
+    assert result is not None
+    assert result.success is False
+    assert result.new_resources is not None
+    assert result.new_resources["AWS::Logs::LogGroup"] == [{"Identifier": "/custom/app-log-group"}]
+
+
+@mock_aws
+@patch("aws_bench.resource_management.verify.manager.make_scanner")
+def test_check_new_resources_mixed_lambda_log_groups(mock_scanner_class):
+    """Baseline-function group tolerated while a non-baseline-function group fails closed."""
+    from aws_bench.resource_management.ccapi.models import ScanResult
+
+    session = boto3.Session(region_name="us-east-1")
+    mock_scanner = MagicMock()
+    mock_scanner.scan_resources.return_value = ScanResult(
+        detected={
+            "AWS::Lambda::Function": [{"Identifier": "BaselineFn-123-us-east-1"}],
+            "AWS::Logs::LogGroup": [
+                {"Identifier": "/aws/lambda/BaselineFn-123-us-east-1"},
+                {"Identifier": "/aws/lambda/AgentFn-123-us-east-1"},
+            ],
+        },
+        failed={},
+    )
+    mock_scanner_class.return_value = mock_scanner
+
+    manager = VerifyManager(session)
+    result = manager._check_new_resources(
+        baseline_resource_ids={
+            "AWS::Lambda::Function": [{"Identifier": "BaselineFn-123-us-east-1"}],
+            "AWS::Logs::LogGroup": [],
+        },
+        baseline_failed={},
+        baseline_empty={"AWS::Logs::LogGroup"},
+    )
+
+    assert result is not None
+    assert result.success is False
+    assert result.new_resources is not None
+    # Only the agent-function group survives; the baseline-function group is tolerated.
+    assert result.new_resources["AWS::Logs::LogGroup"] == [
+        {"Identifier": "/aws/lambda/AgentFn-123-us-east-1"}
+    ]
+
+
+@mock_aws
+@patch("aws_bench.resource_management.verify.manager.make_scanner")
+def test_check_new_resources_lambda_log_group_no_baseline_functions(mock_scanner_class):
+    """With no baseline Lambda functions, a /aws/lambda/ group is a normal residual.
+
+    Nothing to match against, so the toleration is a no-op and the group fails closed.
+    """
+    from aws_bench.resource_management.ccapi.models import ScanResult
+
+    session = boto3.Session(region_name="us-east-1")
+    mock_scanner = MagicMock()
+    mock_scanner.scan_resources.return_value = ScanResult(
+        detected={
+            "AWS::Logs::LogGroup": [{"Identifier": "/aws/lambda/SomeFn-123-us-east-1"}],
+        },
+        failed={},
+    )
+    mock_scanner_class.return_value = mock_scanner
+
+    manager = VerifyManager(session)
+    result = manager._check_new_resources(
+        baseline_resource_ids={"AWS::Logs::LogGroup": []},
+        baseline_failed={},
+        baseline_empty={"AWS::Logs::LogGroup"},
+    )
+
+    assert result is not None
+    assert result.success is False
+    assert result.new_resources is not None
+    assert result.new_resources["AWS::Logs::LogGroup"] == [
+        {"Identifier": "/aws/lambda/SomeFn-123-us-east-1"}
+    ]
+
+
+# ===========================================================================
 # find_orphan_resources — reset's orphan/scan-health census wrapper
 # ===========================================================================
 

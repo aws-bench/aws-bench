@@ -84,6 +84,75 @@ def _is_region_unavailable(error: str) -> bool:
     return any(signal in error for signal in _REGION_UNAVAILABLE_SIGNALS)
 
 
+# CloudWatch Logs and Lambda CFN types, plus the fixed prefix AWS uses for a
+# function's auto-created log group. A `/aws/lambda/<FunctionName>` group is minted
+# by AWS the first time its function is invoked; deleting the function does not
+# remove it. See ``_exclude_baseline_lambda_log_groups``.
+_LOG_GROUP_TYPE = "AWS::Logs::LogGroup"
+_LAMBDA_FUNCTION_TYPE = "AWS::Lambda::Function"
+_LAMBDA_LOG_GROUP_PREFIX = "/aws/lambda/"
+
+
+def _exclude_baseline_lambda_log_groups(
+    new_resources: dict[str, list[dict]], baseline_resource_ids: dict[str, list[dict]]
+) -> dict[str, list[dict]]:
+    """Drop ``/aws/lambda/<fn>`` log groups whose function is a baseline resource.
+
+    AWS auto-creates a function's ``/aws/lambda/<FunctionName>`` log group on first
+    invoke, and re-creates it on any later invoke even after reset deletes it. When
+    the function is a BASELINE resource (deployed at setup, which reset must leave
+    alive), its log group's reappearance is an expected, inert byproduct — not an
+    agent-created residual. Counting it as "new" makes reset fail closed against a
+    group it can never keep deleted while the baseline function keeps being invoked.
+
+    So a ``/aws/lambda/<fn>`` group is dropped from ``new_resources`` iff ``<fn>``
+    matches a baseline ``AWS::Lambda::Function`` identifier. The log-group census
+    carries only names, so this is a pure string match against the baseline — no
+    extra AWS calls, no emptiness check (unavailable in the census and unreliable
+    via ``storedBytes``, which is eventually consistent).
+
+    Fail-closed preserved: a ``/aws/lambda/<fn>`` group whose ``<fn>`` is NOT a
+    baseline function (an agent-created Lambda) is left in ``new_resources`` and
+    still fails the reset. Non-``/aws/lambda/`` log groups are untouched; a
+    baseline function with the group explicitly stack-managed is unaffected (it is
+    already in the baseline and so never appears as "new").
+
+    Args:
+        new_resources: The computed new-resource set, by CFN type.
+        baseline_resource_ids: Baseline snapshot resources, by CFN type.
+
+    Returns:
+        ``new_resources`` with tolerated baseline-Lambda log groups removed. Types
+        that empty out are dropped entirely so callers see no empty lists.
+    """
+    log_groups = new_resources.get(_LOG_GROUP_TYPE)
+    if not log_groups:
+        return new_resources
+
+    baseline_functions = {
+        r.get("Identifier", "") for r in baseline_resource_ids.get(_LAMBDA_FUNCTION_TYPE, [])
+    }
+    if not baseline_functions:
+        return new_resources
+
+    def _is_baseline_lambda_group(identifier: str) -> bool:
+        if not identifier.startswith(_LAMBDA_LOG_GROUP_PREFIX):
+            return False
+        function_name = identifier[len(_LAMBDA_LOG_GROUP_PREFIX) :]
+        return function_name in baseline_functions
+
+    kept = [g for g in log_groups if not _is_baseline_lambda_group(g.get("Identifier", ""))]
+    if len(kept) == len(log_groups):
+        return new_resources
+
+    result = dict(new_resources)
+    if kept:
+        result[_LOG_GROUP_TYPE] = kept
+    else:
+        del result[_LOG_GROUP_TYPE]
+    return result
+
+
 @dataclasses.dataclass
 class _RegionScanContext:
     """Phase-1 scan state for one region in the multi-region verify.
@@ -327,6 +396,23 @@ class VerifyManager:
             deferred = before - count_resources(new_resources)
             if deferred:
                 logger.debug(f"Excluded {deferred} deferred (eventually-consistent) resource(s)")
+
+        # Drop /aws/lambda/<fn> log groups whose function is a baseline resource.
+        # AWS auto-recreates them on every invoke, so a baseline function reset must
+        # leave alive would otherwise re-mint the group between delete and re-verify
+        # and fail the reset. A group for a non-baseline (agent-created) function is
+        # kept and still fails closed. See _exclude_baseline_lambda_log_groups.
+        if new_resources:
+            before = count_resources(new_resources)
+            new_resources = _exclude_baseline_lambda_log_groups(
+                new_resources, baseline_resource_ids
+            )
+            tolerated_groups = before - count_resources(new_resources)
+            if tolerated_groups:
+                logger.debug(
+                    f"Excluded {tolerated_groups} baseline-Lambda log group(s) "
+                    f"(auto-recreated byproduct of a baseline function)"
+                )
 
         if new_resources:
             resource_count = count_resources(new_resources)
