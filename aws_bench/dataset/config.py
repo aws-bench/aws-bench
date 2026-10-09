@@ -550,6 +550,28 @@ class AwsBenchDatasetConfig(HarborDatasetConfig):
         return result
 
     # ---- Tasks-side: deterministic local listing ----
+    @staticmethod
+    def _list_local_task_dirs(tasks_path: Path) -> list[Path]:
+        """List task dirs under ``tasks_path``, flat or grouped one level deep.
+
+        Accepts both ``<tasks-path>/<task>`` and ``<tasks-path>/<scenario>/<task>``.
+        A dir that is itself a task is never descended into; nesting stops at
+        one level.
+        """
+        task_dirs: list[Path] = []
+        for child in sorted(tasks_path.iterdir()):
+            if not child.is_dir():
+                continue
+            if AwsBenchTask.is_valid_dir(child):
+                task_dirs.append(child)
+                continue
+            task_dirs.extend(
+                grandchild
+                for grandchild in sorted(child.iterdir())
+                if AwsBenchTask.is_valid_dir(grandchild)
+            )
+        return task_dirs
+
     async def _get_local_task_configs(self, disable_verification: bool) -> list[TaskConfig]:
         """Resolve local task directories into config objects."""
         # is_valid_dir is a structural filter only; each listed dir is fully
@@ -558,9 +580,7 @@ class AwsBenchDatasetConfig(HarborDatasetConfig):
         # is unconditional); it is accepted for base-class signature parity.
         assert self.path is not None
         task_ids: list[TaskIdType] = [
-            LocalTaskId(path=path)
-            for path in sorted(self.path.iterdir())
-            if AwsBenchTask.is_valid_dir(path)
+            LocalTaskId(path=path) for path in self._list_local_task_dirs(self.path)
         ]
         return [
             TaskConfig(
