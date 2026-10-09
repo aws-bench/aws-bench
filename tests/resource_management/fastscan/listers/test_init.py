@@ -98,6 +98,21 @@ def test_unavailable_lister_regions_contract():
     assert not empty, f"region_policy has keys with no regions: {empty}"
 
 
+def test_translate_parallel_data_unavailable_regions():
+    # AWS Translate ParallelData is offered only in us-east-1, us-west-2, eu-west-1.
+    # The entry lists scenario regions where it is NOT available (so the lister is
+    # recorded empty there); the 3 available regions must never appear in the set.
+    from aws_bench.resource_management.fastscan.listers.region_policy import (
+        UNAVAILABLE_LISTER_REGIONS,
+    )
+
+    regions = UNAVAILABLE_LISTER_REGIONS[("translate", "ListParallelData")]
+    # Must cover the regions where the fail-closed was observed.
+    assert {"us-east-2", "ap-southeast-1"} <= regions
+    # Must never list a region where ParallelData IS available.
+    assert regions.isdisjoint({"us-east-1", "us-west-2", "eu-west-1"})
+
+
 def test_all_listers_has_no_duplicate_scan_keys():
     # Two listers on one "service:op" would clobber each other; the scanner fails loudly on it.
     keys = [f"{lister.service}:{lister.op}" for lister in all_listers()]
