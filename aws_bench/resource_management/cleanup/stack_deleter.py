@@ -48,7 +48,10 @@ from aws_bench.resource_management.cleanup.models import (
 from aws_bench.resource_management.cleanup.resource_cleaner import ResourceCleaner
 from aws_bench.resource_management.cleanup.verification.manager import ResourceVerifier
 from aws_bench.resource_management.deferred import mark_deferred
-from aws_bench.resource_management.utils.cloudformation import is_stack_not_found
+from aws_bench.resource_management.utils.cloudformation import (
+    disable_termination_protection,
+    is_stack_not_found,
+)
 from aws_bench.resource_management.utils.file_io import write_json
 from aws_bench.utils.concurrent import build_client, reraise_if_cancelled
 
@@ -195,27 +198,7 @@ class StackDeleter:
             raise
 
     def _disable_termination_protection(self, stack_name: str) -> None:
-        try:
-            resp = self._client.describe_stacks(StackName=stack_name)
-            if resp["Stacks"][0].get("EnableTerminationProtection", False):
-                self._client.update_termination_protection(
-                    EnableTerminationProtection=False, StackName=stack_name
-                )
-                logger.debug("Disabled termination protection on '%s'.", stack_name)
-        except ClientError as e:
-            error_code = e.response.get("Error", {}).get("Code", "")
-            if error_code in ("AccessDenied", "UnauthorizedOperation", "InvalidClientTokenId"):
-                logger.error(
-                    "Permission denied when disabling termination protection on '%s': %s",
-                    stack_name,
-                    error_code,
-                )
-            elif is_stack_not_found(e):
-                logger.debug(
-                    "Stack '%s' not found when disabling termination protection", stack_name
-                )
-            else:
-                logger.debug("Could not disable termination protection on '%s': %s", stack_name, e)
+        disable_termination_protection(self._client, stack_name)
 
     def _get_failure_reason(self, stack_name: str) -> str:
         try:
