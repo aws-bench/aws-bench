@@ -86,7 +86,10 @@ def start(
         Option(
             "-p",
             "--path",
-            help="Directory containing task directories.",
+            help=(
+                "Directory containing task directories, either flat (<path>/<task>) "
+                "or grouped by scenario (<path>/<scenario>/<task>)."
+            ),
             rich_help_panel="Dataset",
             show_default=False,
         ),

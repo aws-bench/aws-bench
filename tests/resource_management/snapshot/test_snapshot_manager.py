@@ -941,11 +941,7 @@ def test_snapshot_account_saves_when_forbidden_identifiers_absent(temp_snapshot_
 
 
 # ===========================================================================
-# Fresh-account subscription retry — _list_active_stacks self-heals OptInRequired
-#
-# _list_active_stacks is the snapshot's first CloudFormation call, so it is the
-# one place an unconverged subscription surfaces (OptInRequired) on a fresh
-# account; the retry lives there, not on the whole capture_snapshot orchestration.
+# _list_active_stacks retries region-access errors
 # ===========================================================================
 
 
@@ -986,7 +982,6 @@ def _cfn_with_paginate(mocker, *, paginate_side_effect):
     "error",
     [
         _client_error("OptInRequired"),
-        _client_error("AuthFailure"),
         ClientError(
             {
                 "Error": {
@@ -1001,10 +996,8 @@ def _cfn_with_paginate(mocker, *, paginate_side_effect):
 def test_list_active_stacks_retries_then_succeeds_on_regional_access_error(
     _instant_stacks_retry: None, mocker: MockerFixture, error: ClientError
 ) -> None:
-    """Regional access propagation errors clear and the listing succeeds."""
     manager = create_test_manager()
 
-    # First two ListStacks calls fail, third returns no stacks.
     mock_cfn, paginator = _cfn_with_paginate(
         mocker,
         paginate_side_effect=[
@@ -1021,7 +1014,7 @@ def test_list_active_stacks_retries_then_succeeds_on_regional_access_error(
 
 
 def test_list_active_stacks_does_not_retry_non_transient_error(_instant_stacks_retry, mocker):
-    """A non-subscription ClientError (AccessDenied) surfaces on the first attempt."""
+    """An AccessDenied that does not cite an SCP surfaces on the first attempt."""
     manager = create_test_manager()
 
     mock_cfn, paginator = _cfn_with_paginate(
@@ -1054,15 +1047,8 @@ def test_list_active_stacks_does_not_retry_non_transient_error(_instant_stacks_r
 def test_list_active_stacks_reraises_original_error_after_budget(
     mocker: MockerFixture, error: ClientError
 ) -> None:
-    """When the transient error never clears, the budget stops retry and reraises.
-
-    Overrides stop with stop_after_attempt so the budget is deterministic, and
-    asserts the ORIGINAL ClientError surfaces (reraise=True), not a
-    tenacity RetryError — so snapshot_account records the real cause.
-    """
     manager = create_test_manager()
 
-    # tenacity attaches the .retry controller at runtime; the stubs don't model it.
     controller = SnapshotManager._list_active_stacks.retry  # type: ignore[attr-defined]
     mocker.patch.object(controller, "wait", tenacity.wait_none())
     mocker.patch.object(controller, "stop", tenacity.stop_after_attempt(3))

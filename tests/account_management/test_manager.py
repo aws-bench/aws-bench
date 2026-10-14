@@ -3,18 +3,17 @@
 from __future__ import annotations
 
 import asyncio
+import itertools
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, call, patch
 
 import pytest
-from botocore.exceptions import ClientError, ReadTimeoutError
-from tenacity import stop_after_attempt, wait_none
+from botocore.exceptions import ClientError
+from tenacity import wait_none
 
 from aws_bench.account_management.exceptions import AccountCreationError, AccountManagementError
 from aws_bench.account_management.manager import AccountManager
 from aws_bench.account_management.models import OrgInfo
-from aws_bench.utils.concurrent import build_client
-from aws_bench.utils.retry import retrying_region_read
 
 
 def _make_org_info() -> OrgInfo:
@@ -90,11 +89,23 @@ def test_init_organization_attaches_scp_to_new_ou(manager):
     manager._org.ensure_org_role_protection_scp.assert_called_once_with("ou-new")
 
 
+def test_init_organization_does_not_enable_account_management(manager):
+    """Trusted access is enabled lazily by ensure_regions_enabled, only for opt-in regions."""
+    manager._org.get_org_info.return_value = _make_org_info()
+    manager._org.find_ou_by_name.return_value = "ou-existing"
+
+    manager.init_organization("test-env")
+
+    manager._org.enable_account_management_access.assert_not_called()
+
+
 # ── scenario-aware methods ──
 
 from aws_bench.account_management.constants import (  # noqa: E402
     CONTAMINATED_TAG_KEY,
     CONTAMINATION_TAG_MAX_ATTEMPTS,
+    REGION_OPT_IN_POLL_INTERVAL_SEC,
+    REGION_OPT_IN_TIMEOUT_SEC,
     SCENARIO_ACCOUNT_TAG_KEY,
     SCENARIO_SHA_TAG_KEY,
 )
@@ -469,188 +480,188 @@ def test_ensure_region_restriction_scp_delegates_to_org(manager):
     )
 
 
-# ── region enablement ──
+# ── ensure_regions_enabled ──
 
 
-@pytest.fixture
-def region_client(monkeypatch):
-    provider = MagicMock()
-    client = provider.get_session_for_account.return_value.client.return_value
-    client.get_region_opt_status.return_value = {"RegionOptStatus": "ENABLED"}
-    now = 0.0
+@pytest.fixture()
+def slept(monkeypatch):
+    """Record region-poll sleeps and advance the manager's monotonic clock by them."""
+    durations: list[float] = []
 
-    async def advance(seconds: float) -> None:
-        nonlocal now
-        now += seconds
+    async def fake_sleep(seconds: float) -> None:
+        durations.append(seconds)
 
-    monkeypatch.setattr("aws_bench.account_management.manager.time.monotonic", lambda: now)
-    monkeypatch.setattr("aws_bench.account_management.manager.asyncio.sleep", advance)
-    controller = retrying_region_read.retry  # type: ignore[attr-defined]
-    monkeypatch.setattr(controller, "wait", wait_none())
-    monkeypatch.setattr(controller, "stop", stop_after_attempt(3))
-    return provider, client
-
-
-@pytest.mark.parametrize(
-    ("states", "enables"),
-    [
-        (["ENABLED"], 0),
-        (["ENABLED_BY_DEFAULT"], 0),
-        (["DISABLED", "DISABLED", "ENABLING", "ENABLED"], 1),
-        (["ENABLING", "DISABLED", "ENABLED"], 0),
-    ],
-)
-def test_ensure_regions_enabled_resumes_idempotently(
-    manager, region_client, states, enables, mocker
-):
-    build = mocker.patch("aws_bench.account_management.manager.build_client", wraps=build_client)
-    provider, client = region_client
-    client.get_region_opt_status.side_effect = [{"RegionOptStatus": state} for state in states]
-    asyncio.run(manager.ensure_regions_enabled("111", ["eu-south-2"], provider))
-    assert client.enable_region.call_count == enables
-    client.get_region_opt_status.assert_called_with(RegionName="eu-south-2")
-    if enables:
-        client.enable_region.assert_called_once_with(RegionName="eu-south-2")
-        calls = provider.get_session_for_account.return_value.client.call_args_list
-        assert calls[-1].kwargs["config"].retries == {"total_max_attempts": 1}
-    assert build.call_count == 1 + enables
-    assert build.call_args_list[0].kwargs["config"].retries == {
-        "mode": "standard",
-        "total_max_attempts": 3,
-    }
-    if enables:
-        assert build.call_args_list[1].kwargs["config"].retries == {"total_max_attempts": 1}
-    for call in build.call_args_list:
-        assert call.args == (provider.get_session_for_account.return_value, "account")
-        assert call.kwargs["region_name"] == "us-east-1"
-        assert call.kwargs["config"].connect_timeout == 5
-        assert call.kwargs["config"].read_timeout == 10
-
-
-def test_ensure_regions_enabled_checks_each_region_once(manager, region_client):
-    provider, client = region_client
-    asyncio.run(
-        manager.ensure_regions_enabled("111", ["us-east-1", "eu-south-2", "us-east-1"], provider)
-    )
-    assert [c.kwargs["RegionName"] for c in client.get_region_opt_status.call_args_list] == [
-        "us-east-1",
-        "eu-south-2",
-    ]
-
-
-@pytest.mark.parametrize("state", ["DISABLING", "UNKNOWN"])
-def test_ensure_regions_enabled_rejects_unusable_states(manager, region_client, state):
-    provider, client = region_client
-    client.get_region_opt_status.return_value = {"RegionOptStatus": state}
-    with pytest.raises(AccountManagementError, match=f"111 region eu-south-2.*{state}"):
-        asyncio.run(manager.ensure_regions_enabled("111", ["eu-south-2"], provider))
-    client.enable_region.assert_not_called()
-
-
-def test_ensure_regions_enabled_times_out_without_resubmitting(manager, region_client):
-    provider, client = region_client
-    client.get_region_opt_status.return_value = {"RegionOptStatus": "DISABLED"}
-    with pytest.raises(
-        AccountManagementError, match="111 region eu-south-2.*timed out.*rerun env init"
-    ):
-        asyncio.run(manager.ensure_regions_enabled("111", ["eu-south-2"], provider))
-    client.enable_region.assert_called_once()
-
-
-@pytest.mark.parametrize("conflict", [True, False])
-def test_ensure_regions_enabled_reconciles_uncertain_or_conflicting_write(
-    manager, region_client, conflict
-):
-    provider, client = region_client
-    client.get_region_opt_status.side_effect = [
-        {"RegionOptStatus": state} for state in ["DISABLED", "DISABLED", "ENABLING", "ENABLED"]
-    ]
-    client.enable_region.side_effect = (
-        ClientError({"Error": {"Code": "ConflictException"}}, "EnableRegion")
-        if conflict
-        else ReadTimeoutError(endpoint_url="https://account.us-east-1.amazonaws.com")
-    )
-    asyncio.run(manager.ensure_regions_enabled("111", ["eu-south-2"], provider))
-    client.enable_region.assert_called_once()
-
-
-@pytest.mark.parametrize("operation", ["get_region_opt_status", "enable_region"])
-def test_ensure_regions_enabled_surfaces_permanent_denial(manager, region_client, operation):
-    provider, client = region_client
-    client.get_region_opt_status.return_value = {"RegionOptStatus": "DISABLED"}
-    error = ClientError(
-        {"Error": {"Code": "AccessDeniedException", "Message": "IAM denied"}}, operation
-    )
-    getattr(client, operation).side_effect = error
-    with pytest.raises(ClientError, match="IAM denied"):
-        asyncio.run(manager.ensure_regions_enabled("111", ["eu-south-2"], provider))
-    getattr(client, operation).assert_called_once()
-
-
-def test_ensure_regions_enabled_retries_scp_read_before_enable(manager, region_client):
-    provider, client = region_client
-    client.get_region_opt_status.side_effect = [
-        ClientError(
-            {
-                "Error": {
-                    "Code": "AccessDeniedException",
-                    "Message": "explicit deny in a service control policy",
-                }
-            },
-            "GetRegionOptStatus",
-        ),
-        {"RegionOptStatus": "DISABLED"},
-        {"RegionOptStatus": "ENABLED"},
-    ]
-    asyncio.run(manager.ensure_regions_enabled("111", ["eu-south-2"], provider))
-    assert client.get_region_opt_status.call_count == 3
-    client.enable_region.assert_called_once()
-
-
-def test_ensure_regions_enabled_retries_scp_rejected_write(manager, region_client):
-    provider, client = region_client
-    client.get_region_opt_status.side_effect = [
-        {"RegionOptStatus": state} for state in ["DISABLED", "ENABLING", "ENABLED"]
-    ]
-    client.enable_region.side_effect = [
-        ClientError(
-            {
-                "Error": {
-                    "Code": "AccessDeniedException",
-                    "Message": "explicit deny in a service control policy",
-                }
-            },
-            "EnableRegion",
-        ),
-        None,
-    ]
-    asyncio.run(manager.ensure_regions_enabled("111", ["eu-south-2"], provider))
-    assert client.enable_region.call_count == 2
-    client.enable_region.assert_called_with(RegionName="eu-south-2")
-    assert client.get_region_opt_status.call_count == 3
-
-
-def test_ensure_regions_enabled_preserves_cancellation(manager, region_client, monkeypatch):
-    provider, client = region_client
-    client.get_region_opt_status.return_value = {"RegionOptStatus": "ENABLING"}
     monkeypatch.setattr(
-        "aws_bench.account_management.manager.asyncio.sleep",
-        AsyncMock(side_effect=asyncio.CancelledError),
+        "aws_bench.account_management.manager.time.monotonic", lambda: sum(durations)
     )
-    with pytest.raises(asyncio.CancelledError):
-        asyncio.run(manager.ensure_regions_enabled("111", ["eu-south-2"], provider))
-    client.enable_region.assert_not_called()
+    monkeypatch.setattr("aws_bench.account_management.manager.asyncio.sleep", fake_sleep)
+    return durations
 
 
-def test_ensure_regions_enabled_does_not_mutate_preexisting_accounts(manager, region_client):
-    provider, client = region_client
+def _stub_region_statuses(manager, statuses: dict[str, list[str]]) -> None:
+    """Replay each region's RegionOptStatus sequence, then repeat its last status."""
+    replay = {
+        region: itertools.chain(sequence, itertools.repeat(sequence[-1]))
+        for region, sequence in statuses.items()
+    }
+
+    def get_region_opt_status(_account_id: str, region: str) -> str:
+        return next(replay[region])
+
+    manager._org.get_region_opt_status.side_effect = get_region_opt_status
+
+
+def test_ensure_regions_enabled_skips_enabled_regions(manager, slept):
+    _stub_region_statuses(manager, {"eu-south-2": ["ENABLED"]})
+
+    asyncio.run(manager.ensure_regions_enabled("111", ["us-east-1", "eu-south-2"]))
+
+    manager._org.enable_region.assert_not_called()
+    assert [c.args[1] for c in manager._org.get_region_opt_status.call_args_list] == ["eu-south-2"]
+    assert slept == []
+
+
+def test_ensure_regions_enabled_makes_no_calls_for_default_regions(manager):
+    asyncio.run(manager.ensure_regions_enabled("111", ["us-east-1", "eu-west-1"]))
+
+    assert manager._org.mock_calls == []
+
+
+def test_ensure_regions_enabled_shares_one_trusted_access_call(manager, monkeypatch):
+    """Concurrent accounts share one trusted-access call, made before any Account API read."""
+    _stub_region_statuses(manager, {"eu-south-2": ["ENABLED"]})
+
+    async def to_thread_after_a_turn(func, /, *args):
+        """Let the other account run before ``func`` returns, as a real thread hand-off does."""
+        turn = asyncio.get_running_loop().create_future()
+        turn.get_loop().call_soon(turn.set_result, None)
+        await turn
+        return func(*args)
+
+    monkeypatch.setattr(
+        "aws_bench.account_management.manager.asyncio.to_thread", to_thread_after_a_turn
+    )
+
+    async def both() -> None:
+        await asyncio.gather(
+            manager.ensure_regions_enabled("111", ["eu-south-2"]),
+            manager.ensure_regions_enabled("222", ["eu-south-2"]),
+        )
+
+    asyncio.run(both())
+
+    assert manager._org.enable_account_management_access.call_count == 1
+    assert manager._org.mock_calls[0] == call.enable_account_management_access()
+
+
+def test_ensure_regions_enabled_requests_once_and_polls_regions_together(manager, slept):
+    """Each region is requested once, and every pass reads all pending regions."""
+    _stub_region_statuses(
+        manager,
+        {
+            "eu-south-2": ["DISABLED", "ENABLING", "ENABLED"],
+            # Still DISABLED on the pass after the request; must not be requested again.
+            "ap-east-2": ["DISABLED", "DISABLED", "ENABLED"],
+        },
+    )
+
+    asyncio.run(manager.ensure_regions_enabled("111", ["eu-south-2", "ap-east-2"]))
+
+    assert [c.args for c in manager._org.enable_region.call_args_list] == [
+        ("111", "eu-south-2"),
+        ("111", "ap-east-2"),
+    ]
+    assert [c.args[1] for c in manager._org.get_region_opt_status.call_args_list] == [
+        "eu-south-2",
+        "ap-east-2",
+    ] * 3
+    assert slept == [REGION_OPT_IN_POLL_INTERVAL_SEC] * 2
+
+
+def test_ensure_regions_enabled_rejects_disabling_region(manager, slept):
+    _stub_region_statuses(manager, {"eu-south-2": ["DISABLING"]})
+
+    with pytest.raises(
+        AccountManagementError, match="Account 111 region eu-south-2: cannot enable from DISABLING"
+    ):
+        asyncio.run(manager.ensure_regions_enabled("111", ["eu-south-2"]))
+
+    manager._org.enable_region.assert_not_called()
+
+
+def test_ensure_regions_enabled_times_out_on_one_shared_deadline(manager, slept):
+    """Regions still pending at the deadline are named; a DISABLED region is requested once."""
+    _stub_region_statuses(manager, {"eu-south-2": ["DISABLED"], "ap-east-2": ["ENABLING"]})
+
+    with pytest.raises(AccountManagementError, match="eu-south-2, ap-east-2; rerun env init"):
+        asyncio.run(manager.ensure_regions_enabled("111", ["eu-south-2", "ap-east-2"]))
+
+    manager._org.enable_region.assert_called_once_with("111", "eu-south-2")
+    assert sum(slept) == REGION_OPT_IN_TIMEOUT_SEC
+
+
+def test_ensure_regions_enabled_propagates_enable_error(manager, slept):
+    _stub_region_statuses(manager, {"eu-south-2": ["DISABLED"]})
+    error = ClientError(
+        {"Error": {"Code": "AccessDeniedException", "Message": "not authorized"}},
+        "EnableRegion",
+    )
+    manager._org.enable_region.side_effect = error
+
+    with pytest.raises(ClientError) as caught:
+        asyncio.run(manager.ensure_regions_enabled("111", ["eu-south-2"]))
+
+    assert caught.value is error
+    assert slept == []
+
+
+def _enable_region_conflict() -> ClientError:
+    message = "Account 111 and region eu-south-2 is currently being enabled or disabled."
+    return ClientError({"Error": {"Code": "ConflictException", "Message": message}}, "EnableRegion")
+
+
+def test_ensure_regions_enabled_waits_after_conflict_while_region_is_switching(manager, slept):
+    _stub_region_statuses(manager, {"eu-south-2": ["DISABLED", "ENABLING", "ENABLED"]})
+    manager._org.enable_region.side_effect = _enable_region_conflict()
+
+    asyncio.run(manager.ensure_regions_enabled("111", ["eu-south-2"]))
+
+    manager._org.enable_region.assert_called_once_with("111", "eu-south-2")
+    assert slept == [REGION_OPT_IN_POLL_INTERVAL_SEC] * 2
+
+
+def test_ensure_regions_enabled_resends_after_conflict_when_region_is_still_off(manager, slept):
+    _stub_region_statuses(manager, {"eu-south-2": ["DISABLED", "DISABLED", "ENABLING", "ENABLED"]})
+    manager._org.enable_region.side_effect = [_enable_region_conflict(), None]
+
+    asyncio.run(manager.ensure_regions_enabled("111", ["eu-south-2"]))
+
+    assert manager._org.enable_region.call_count == 2
+    assert slept == [REGION_OPT_IN_POLL_INTERVAL_SEC] * 3
+
+
+def test_ensure_regions_enabled_rejects_disabling_after_conflict(manager, slept):
+    _stub_region_statuses(manager, {"eu-south-2": ["DISABLED", "DISABLING"]})
+    manager._org.enable_region.side_effect = _enable_region_conflict()
+
+    with pytest.raises(
+        AccountManagementError, match="Account 111 region eu-south-2: cannot enable from DISABLING"
+    ):
+        asyncio.run(manager.ensure_regions_enabled("111", ["eu-south-2"]))
+
+    manager._org.enable_region.assert_called_once_with("111", "eu-south-2")
+
+
+def test_ensure_regions_enabled_only_validates_preexisting_accounts(manager):
     manager._preexisting = MagicMock()
     manager._preexisting.accounts = {"scenario": {"PRIMARY": "111"}}
-    asyncio.run(manager.ensure_regions_enabled("111", ["eu-south-2"], provider))
-    provider.get_session_for_account.assert_not_called()
-    client.enable_region.assert_not_called()
+
+    asyncio.run(manager.ensure_regions_enabled("111", ["eu-south-2"]))
     with pytest.raises(AccountResolutionError):
-        asyncio.run(manager.ensure_regions_enabled("other", ["eu-south-2"], provider))
+        asyncio.run(manager.ensure_regions_enabled("222", ["eu-south-2"]))
+
+    manager._org.get_region_opt_status.assert_not_called()
+    manager._org.enable_region.assert_not_called()
 
 
 # ── contamination helpers ──

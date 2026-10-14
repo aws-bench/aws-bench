@@ -272,8 +272,7 @@ class SnapshotManager:
     def _list_active_stacks(self, cfn: Any) -> list[dict[str, Any]]:
         """List active CloudFormation stacks (exclude deleted and nested stacks).
 
-        The snapshot's first AWS call, so subscription, regional authentication,
-        and SCP propagation failures surface here; the decorator retries them.
+        The snapshot's first AWS call, so it carries the region-access retry.
         """
         logger.debug("Listing CloudFormation stacks")
         stacks = []

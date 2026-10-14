@@ -190,7 +190,6 @@ def test_status_matches_api_outcome(scenario, expected_status):
     ],
 )
 def test_unexpected_error_raises_deployment_error_with_quota_code(error_code):
-    """Unexpected ClientError raises DeploymentError containing the quota code."""
     request = QuotaIncreaseRequest("vpc", "L-F678F1CE", 10.0)
     mock_client = MagicMock()
     mock_client.request_service_quota_increase.side_effect = _make_client_error(
@@ -208,7 +207,7 @@ def test_unexpected_error_raises_deployment_error_with_quota_code(error_code):
 
 
 # ---------------------------------------------------------------------------
-# RegionDisabledException retry / exhaustion (STS race condition fix)
+# Regional-access rejection retry / exhaustion
 # ---------------------------------------------------------------------------
 
 
@@ -217,10 +216,10 @@ def test_unexpected_error_raises_deployment_error_with_quota_code(error_code):
     [
         _make_client_error("RegionDisabledException"),
         _make_client_error("AccessDeniedException", "explicit deny in a service control policy"),
+        _make_client_error("InvalidClientTokenId"),
     ],
 )
 def test_region_disabled_retries_then_succeeds(error: ClientError) -> None:
-    """Explicit regional access rejection on first attempt retries and succeeds."""
     request = QuotaIncreaseRequest("vpc", "L-F678F1CE", 10.0)
     mock_client = MagicMock()
     mock_client.request_service_quota_increase.side_effect = [
@@ -245,7 +244,6 @@ def test_region_disabled_retries_then_succeeds(error: ClientError) -> None:
     ],
 )
 def test_region_disabled_exhausts_retries_raises_deployment_error(error: ClientError) -> None:
-    """Persistent regional access rejection exhausts the existing retry limit."""
     request = QuotaIncreaseRequest("vpc", "L-F678F1CE", 10.0)
     mock_client = MagicMock()
     mock_client.request_service_quota_increase.side_effect = error

@@ -62,7 +62,6 @@ from aws_bench.utils.credentials_provider import (
     build_session_name,
 )
 from aws_bench.utils.placeholders import substitute_placeholders
-from aws_bench.utils.regions import wait_for_region_access
 
 logger = get_logger(__name__)
 
@@ -339,14 +338,9 @@ class ScenarioTrial:
     ) -> None:
         """Build/start the container (if needed), apply guardrails, run the phase script.
 
-        Idempotent on start: the post-reset deploy redeploy reuses this and may
-        already have a running container (from a reset.sh) or none (a reset with no
-        reset.sh) — start only when not already running, since ``container.start``
-        refuses a double start.
-
-        ``check_contamination`` gates the DEPLOY contamination refusal. The reset's
-        own redeploy passes ``False``: it recovers a contaminated account, so it must
-        not block on the flag it is about to clear.
+        Reuses a running container, since ``container.start`` refuses a double start.
+        ``check_contamination=False`` skips the DEPLOY contamination refusal, for a
+        redeploy that recovers a contaminated account.
         """
         await self._invoke_hooks(ScenarioEvent.ENVIRONMENT_START, phase=phase)
         if not self._container.is_started:
@@ -364,17 +358,6 @@ class ScenarioTrial:
                 self._scenario.manifest.scenario.regions,
                 list(self._config.account_mapping.values()),
             )
-            # SCP reconciliation can return before regional authorization propagates.
-            # Read-only even in pre-existing mode: only init may enable regions.
-            regions = self._scenario.manifest.scenario.regions
-            for account_id in self._config.account_mapping.values():
-                session = await asyncio.to_thread(
-                    self._cred_provider.get_session_for_account,
-                    account_id,
-                    ORG_ACCESS_ROLE,
-                    build_session_name("session"),
-                )
-                await asyncio.to_thread(wait_for_region_access, session, list(regions))
             await self._clean_stale_changesets()
             await self._delete_terminal_stacks()
 
