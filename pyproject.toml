@@ -131,12 +131,6 @@ source = ["aws_bench"]
 
 [tool.commitizen]
 name = "cz_conventional_commits"
-version_provider = "uv"
-tag_format = "v$version"
-version_files = [
-    "pyproject.toml:version",
-]
-update_changelog_on_bump = true
 
 [tool.coverage.report]
 fail_under = 85
