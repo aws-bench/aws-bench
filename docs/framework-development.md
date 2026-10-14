@@ -155,6 +155,17 @@ This requires a local checkout of `aws-bench-datasets` at `../aws-bench-datasets
 
 Contributors can run this locally, for example to make sure the framework picks up local dataset changes in a private live run. The release of new datasets versions in the registry will be usually driven by the project maintainers.
 
+The same regeneration runs in GitHub Actions as the **Registry Bump** workflow: on a manual dispatch (with the datasets ref to pin, default `main`) and weekly. When pins change, it opens a pull request with the new `registry.json`.
+
+## Maintainer: Releases
+
+Releases are cut by [release-please](https://github.com/googleapis/release-please-action). On every push to `main` it opens or updates one release pull request that bumps the version in `pyproject.toml` and adds the next `CHANGELOG.md` section, computed from the conventional commits since the last tag. Merging that pull request creates the tag and the GitHub Release.
+
+- Re-pin the registry to the dataset release first; the release pull request picks up new commits until it is merged.
+- Do not hand-edit `CHANGELOG.md` sections that release-please generates, and do not run `cz bump`; version, changelog, tag and release come from the release pull request.
+- `release-please-config.json` and `.release-please-manifest.json` hold the configuration and the current version. A `release-as` entry forces the next version; remove it once that release ships.
+- The default `GITHUB_TOKEN` cannot start CI on the pull requests it opens. Store a fine-grained personal access token or a GitHub App token as the `RELEASE_PLEASE_TOKEN` secret to lift that limit.
+
 ## Troubleshooting
 
 | Problem | Solution |
