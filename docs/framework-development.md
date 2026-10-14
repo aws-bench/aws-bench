@@ -164,7 +164,8 @@ Releases are cut by [release-please](https://github.com/googleapis/release-pleas
 - Re-pin the registry to the dataset release first; the release pull request picks up new commits until it is merged.
 - Do not hand-edit `CHANGELOG.md` sections that release-please generates, and do not run `cz bump`; version, changelog, tag and release come from the release pull request.
 - `release-please-config.json` and `.release-please-manifest.json` hold the configuration and the current version. A `release-as` entry forces the next version; remove it once that release ships.
-- The default `GITHUB_TOKEN` cannot start CI on the pull requests it opens. Store a fine-grained personal access token or a GitHub App token as the `RELEASE_PLEASE_TOKEN` secret to lift that limit.
+- Store a fine-grained personal access token or a GitHub App token (contents, pull requests and issues: read and write) as the `RELEASE_PLEASE_TOKEN` secret. The default `GITHUB_TOKEN` cannot start CI on the pull requests it opens, so the required status checks never run and the release pull request cannot be merged.
+- The release pull request does not touch `uv.lock`. Run `uv lock` on its branch before merging, or right after the merge.
 
 ## Troubleshooting
 
