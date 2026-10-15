@@ -169,10 +169,10 @@ The agents below have an aws-bench-specific adapter that integrates them with th
 | `-a` (agent) | Model provider(s) | How it authenticates | Notes |
 |--------------|-------------------|----------------------|-------|
 | `claude-code` | Anthropic API or Amazon Bedrock | `ANTHROPIC_API_KEY`, or Bedrock auto-detected from a non-empty `AWS_BEARER_TOKEN_BEDROCK` | Can install Claude Code plugins (each bundling MCP servers + skills) per trial — e.g. `--ak marketplaces='["owner/repo"]' --ak plugins='["name@owner/repo"]'`. |
-| `codex` | OpenAI or Amazon Bedrock | `OPENAI_API_KEY`, or Bedrock auto-detected from a non-empty `AWS_BEARER_TOKEN_BEDROCK` | Can install Codex plugins from a marketplace per trial — e.g. `--ak marketplaces='["owner/repo"]' --ak plugins='["plugin-name@marketplace-name"]'`; the marketplace name comes from its manifest. |
+| `codex` | OpenAI or Amazon Bedrock | `OPENAI_API_KEY`, or Bedrock auto-detected from a non-empty `AWS_BEARER_TOKEN_BEDROCK` | Can install Codex plugins from a marketplace per trial — e.g. `--ak marketplaces='["owner/repo"]' --ak plugins='["plugin-name@marketplace-name"]'`; the marketplace name comes from its manifest. Requires a Codex version that supports `codex plugin add`. |
 | `kiro-cli` | Kiro | `KIRO_API_KEY` (`ksk_…`) exported on the host | Defaults to `--agent-engine v3` (pinned because kiro-cli otherwise picks an engine per session; v2 currently ignores `--model`). Override with `--ak agent_engine=v1\|v2\|v3` or `KIRO_CLI_AGENT_ENGINE`. |
 | `mini-swe-agent` | Any LiteLLM provider (incl. Amazon Bedrock) | Provider-specific; Bedrock uses `bedrock/<model-id>` and `AWS_BEARER_TOKEN_BEDROCK` | |
-| `opencode` | Amazon Bedrock, or any provider OpenCode supports | Bedrock auto-detected from a non-empty `AWS_BEARER_TOKEN_BEDROCK`; Bedrock model IDs take the form `amazon-bedrock/<model-id>` | |
+| `opencode` | Amazon Bedrock, or any provider OpenCode supports | Provider-specific; Bedrock auto-detected from a non-empty `AWS_BEARER_TOKEN_BEDROCK`, with model IDs of the form `amazon-bedrock/<model-id>` | |
 | `aws-bench-baseline-agent` | Amazon Bedrock (Strands Agent SDK) | `AWS_BEARER_TOKEN_BEDROCK` | aws-bench's baseline evaluation agent (see note below). |
 | `oracle` | *(none)* | *(none)* | Replays a task's reference solution (`solution/solve.sh`) instead of calling a model. Every task ships a reference solution, so the oracle validates that a scenario and its verifier work end-to-end. |
 

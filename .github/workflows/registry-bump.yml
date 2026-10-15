@@ -6,7 +6,6 @@ on:
       datasets-ref:
         description: aws-bench-datasets ref to pin (branch, tag or commit)
         default: main
-        type: string
   schedule:
     - cron: "0 6 * * 1"
 
@@ -29,12 +28,18 @@ jobs:
           repository: aws-bench/aws-bench-datasets
           ref: ${{ env.DATASETS_REF }}
           path: aws-bench-datasets
+          # update_registry.py pins each entry to the last commit that touched its path;
+          # a shallow clone would pin everything to HEAD.
           fetch-depth: 0
           persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
       - name: Regenerate registry.json
         run: python3 scripts/update_registry.py --datasets-path aws-bench-datasets --add-unified --output registry.json
       - uses: peter-evans/create-pull-request@5f6978faf089d4d20b00c7766989d076bb2fc7f1 # v8.1.1
         with:
+          # Same token as release-please.yml: the default token cannot start CI on the PR it opens.
           token: ${{ secrets.RELEASE_PLEASE_TOKEN || secrets.GITHUB_TOKEN }}
           add-paths: registry.json
           branch: chore/registry-bump
@@ -42,6 +47,4 @@ jobs:
           commit-message: "chore(registry): pin datasets to ${{ env.DATASETS_REF }}"
           title: "chore(registry): pin datasets to ${{ env.DATASETS_REF }}"
           body: |
-            Regenerated `registry.json` against `aws-bench/aws-bench-datasets@${{ env.DATASETS_REF }}`
-            with `scripts/update_registry.py --add-unified`. Entries whose content changed get a
-            patch version bump; unchanged entries keep their pins.
+            Regenerated `registry.json` against `aws-bench/aws-bench-datasets@${{ env.DATASETS_REF }}`.
