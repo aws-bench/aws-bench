@@ -159,9 +159,9 @@ The same regeneration runs in GitHub Actions as the **Registry Bump** workflow: 
 
 ## Maintainer: Releases
 
-Releases are cut by [release-please](https://github.com/googleapis/release-please-action). On every push to `main` it opens or updates one release pull request that bumps the version in `pyproject.toml` and adds the next `CHANGELOG.md` section, computed from the conventional commits since the last tag. Merging that pull request creates the tag and the GitHub Release.
+Releases are cut by [release-please](https://github.com/googleapis/release-please-action). A maintainer starts a release by running the Release Please workflow by hand (Actions > Release Please > Run workflow). The run opens or updates one release pull request that bumps the version in `pyproject.toml` and adds the next `CHANGELOG.md` section, computed from the conventional commits since the last tag. Merging that pull request creates the tag and the GitHub Release: the workflow run on that push publishes the merged release and never opens pull requests on its own.
 
-- Re-pin the registry to the dataset release first; the release pull request picks up new commits until it is merged.
+- Re-pin the registry to the dataset release first, then run the workflow again so the release pull request includes that commit. New merges to `main` do not refresh an open release pull request on their own.
 - Do not hand-edit `CHANGELOG.md` sections that release-please generates, and do not run `cz bump`; version, changelog, tag and release come from the release pull request.
 - `release-please-config.json` and `.release-please-manifest.json` hold the configuration and the current version. A `release-as` entry forces the next version; remove it once that release ships.
 - Store a fine-grained personal access token or a GitHub App token (contents, pull requests and issues: read and write) as the `RELEASE_PLEASE_TOKEN` secret. The default `GITHUB_TOKEN` cannot start CI on the pull requests it opens, so the required status checks never run and the release pull request cannot be merged.

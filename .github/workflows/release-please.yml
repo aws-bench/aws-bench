@@ -21,3 +21,7 @@ jobs:
           # The default token cannot start CI on the release PR it opens. A fine-grained
           # PAT or GitHub App token stored as RELEASE_PLEASE_TOKEN lifts that limit.
           token: ${{ secrets.RELEASE_PLEASE_TOKEN || secrets.GITHUB_TOKEN }}
+          # A push to main only publishes an already merged release pull request (tag and
+          # GitHub Release). To open or update the release pull request, run this workflow
+          # by hand: Actions > Release Please > Run workflow.
+          skip-github-pull-request: ${{ github.event_name == 'push' }}
