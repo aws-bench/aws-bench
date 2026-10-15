@@ -1,0 +1,28 @@
+name: Release Please
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  release-please:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      issues: write
+      pull-requests: write
+    steps:
+      - uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
+        with:
+          # The default token cannot start CI on the release PR it opens. A fine-grained
+          # personal access token stored as RELEASE_PLEASE_TOKEN lifts that limit.
+          token: ${{ secrets.RELEASE_PLEASE_TOKEN || secrets.GITHUB_TOKEN }}
+          # A push to main only publishes an already merged release pull request (tag and
+          # GitHub Release). To open or update the release pull request, run this workflow
+          # by hand: Actions > Release Please > Run workflow.
+          skip-github-pull-request: ${{ github.event_name == 'push' }}
