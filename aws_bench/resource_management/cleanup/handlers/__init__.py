@@ -11,6 +11,7 @@ from aws_bench.resource_management.cleanup.handlers import (
     athena,  # noqa: F401
     batch,  # noqa: F401
     bedrock,  # noqa: F401
+    codebuild,  # noqa: F401
     cross_service,  # noqa: F401
     databases,  # noqa: F401
     directory_service,  # noqa: F401
@@ -41,5 +42,6 @@ from aws_bench.resource_management.cleanup.handlers import (
     s3tables,  # noqa: F401
     sagemaker,  # noqa: F401
     servicecatalog,  # noqa: F401
+    ssm,  # noqa: F401
     vpc,  # noqa: F401
 )

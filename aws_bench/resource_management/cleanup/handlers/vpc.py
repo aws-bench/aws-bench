@@ -36,15 +36,28 @@ from botocore.exceptions import ClientError
 
 from aws_bench.logging.logger import get_logger
 from aws_bench.resource_management.ccapi.models import Resource
-from aws_bench.resource_management.cleanup.handler_registry import pre_delete_hook
+from aws_bench.resource_management.cleanup.handler_registry import (
+    pre_delete_hook,
+    resource_handler,
+)
 from aws_bench.resource_management.cleanup.handlers.cross_service import (
     clear_igw_public_address_wedge,
     discover_vpc_dynamic_resources,
 )
-from aws_bench.resource_management.cleanup.models import StackResource
+from aws_bench.resource_management.cleanup.models import (
+    HandlerResult,
+    HandlerStatus,
+    StackResource,
+)
+from aws_bench.resource_management.fastscan.listers.custom_listers import default_vpcs
 from aws_bench.utils.concurrent import build_client
 
 logger = get_logger(__name__)
+
+# AWS's sentinel for AssociateDhcpOptions meaning "revert this VPC to the
+# Amazon-provided default DNS/DHCP config" — detaches a custom set without
+# needing another set to swap in.
+_DEFAULT_DHCP_OPTIONS = "default"
 
 # Gateway↔VPC attachment states that still hold the gateway to a VPC and thus
 # block deletion. An attachment in any other state (notably ``detaching`` /
@@ -137,3 +150,103 @@ def _is_not_found(error: ClientError) -> bool:
     """Return True for an EC2 ``Invalid...ID.NotFound`` error (gateway already gone)."""
     code = error.response.get("Error", {}).get("Code", "")
     return code.endswith(".NotFound")
+
+
+@resource_handler("AWS::EC2::DHCPOptions", role="delete")
+def _delete_dhcp_options(resource: Resource, session: boto3.Session) -> HandlerResult:
+    """Disassociate a DHCP options set from its VPCs, then delete it.
+
+    AWS Managed AD (and similar services) creates a non-default DHCP options set
+    and associates it with a VPC. ``delete_dhcp_options`` returns
+    ``DependencyViolation`` for as long as any VPC references the set, and nothing
+    on the reset/cleanup path clears that association — so without this handler the
+    set falls to the CCAPI fallback and never deletes, failing the reset closed.
+
+    This handler issues the explicit teardown the CCAPI path cannot: for every VPC
+    referencing the set, ``associate_dhcp_options(DhcpOptionsId="default", ...)``
+    reverts the VPC to Amazon-provided DNS/DHCP (no replacement set needed), then
+    ``delete_dhcp_options`` removes the now-unreferenced set.
+
+    The set associated with the account's **default VPC** is never touched: the
+    fast-scan lister already excludes it from discovery, but this handler re-guards
+    independently (it now issues mutating calls) by reading the default VPC's
+    current ``DhcpOptionsId`` — swapping the default VPC's set would degrade its
+    DNS/DHCP config.
+
+    Idempotent and safe to retry: an already-gone set is treated as success, and a
+    VPC already on ``"default"`` needs no disassociate. A set still referenced after
+    the disassociate pass (e.g. a VPC we could not detach) fails closed.
+    """
+    dopt_id = resource.identifier
+    ec2 = build_client(session, "ec2")
+
+    # Re-guard: never touch the set the default VPC currently uses.
+    try:
+        default_dopt_ids = {
+            vpc["DhcpOptionsId"] for vpc in default_vpcs(ec2) if vpc.get("DhcpOptionsId")
+        }
+    except ClientError as e:
+        return _dhcp_result(
+            dopt_id, HandlerStatus.FAILED, f"Could not resolve default VPC DHCP options: {e}"
+        )
+    if dopt_id in default_dopt_ids:
+        return _dhcp_result(
+            dopt_id,
+            HandlerStatus.SKIPPED,
+            "DHCP options set is associated with the default VPC; left untouched",
+        )
+
+    # Find every VPC referencing this set and detach it.
+    try:
+        vpc_ids = _vpcs_using_dhcp_options(ec2, dopt_id)
+    except ClientError as e:
+        return _dhcp_result(dopt_id, HandlerStatus.FAILED, f"DescribeVpcs failed: {e}")
+
+    for vpc_id in vpc_ids:
+        try:
+            ec2.associate_dhcp_options(DhcpOptionsId=_DEFAULT_DHCP_OPTIONS, VpcId=vpc_id)
+            logger.debug("Disassociated DHCP options %s from VPC %s", dopt_id, vpc_id)
+        except ClientError as e:
+            if _is_not_found(e):
+                continue  # VPC gone — no longer a blocker
+            return _dhcp_result(
+                dopt_id,
+                HandlerStatus.FAILED,
+                f"Could not disassociate from VPC {vpc_id}: {e}",
+            )
+
+    # Delete the now-unreferenced set.
+    try:
+        ec2.delete_dhcp_options(DhcpOptionsId=dopt_id)
+    except ClientError as e:
+        if _is_not_found(e):
+            return _dhcp_result(dopt_id, HandlerStatus.SUCCESS, "DHCP options set already gone")
+        return _dhcp_result(dopt_id, HandlerStatus.FAILED, f"delete_dhcp_options failed: {e}")
+
+    logger.debug("Deleted DHCP options set %s", dopt_id)
+    return _dhcp_result(
+        dopt_id, HandlerStatus.SUCCESS, f"Disassociated from {len(vpc_ids)} VPC(s) and deleted"
+    )
+
+
+def _vpcs_using_dhcp_options(ec2: Any, dopt_id: str) -> list[str]:
+    """Return the ids of every VPC currently associated with ``dopt_id``."""
+    return [
+        vpc["VpcId"]
+        for page in ec2.get_paginator("describe_vpcs").paginate(
+            Filters=[{"Name": "dhcp-options-id", "Values": [dopt_id]}]
+        )
+        for vpc in page.get("Vpcs", [])
+        if vpc.get("VpcId")
+    ]
+
+
+def _dhcp_result(dopt_id: str, status: HandlerStatus, message: str) -> HandlerResult:
+    """Build a HandlerResult for the DHCP options delete handler."""
+    return HandlerResult(
+        resource_id=dopt_id,
+        resource_type="AWS::EC2::DHCPOptions",
+        action="delete",
+        status=status,
+        message=message,
+    )
