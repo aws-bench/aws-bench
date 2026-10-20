@@ -18,6 +18,7 @@ from aws_bench.resource_management.cleanup.handlers import (
     dms,  # noqa: F401
     dynamodb,  # noqa: F401
     ec2_image,  # noqa: F401
+    ec2_network_interface,  # noqa: F401
     ec2_volume_attachment,  # noqa: F401
     ecr,  # noqa: F401
     efs,  # noqa: F401
