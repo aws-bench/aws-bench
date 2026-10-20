@@ -1,6 +1,6 @@
 [project]
 name = "aws-bench"
-version = "0.7.0"
+version = "1.0.0"
 description = "A public benchmark with 100+ real-world AWS automation tasks for evaluating AI agent and LLM performance."
 readme = "README.md"
 requires-python = ">=3.12"
