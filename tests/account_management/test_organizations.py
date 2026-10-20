@@ -465,7 +465,6 @@ def test_ensure_scp_retries_on_policy_type_not_enabled(org_client):
 
 
 def test_ensure_region_restriction_scp_creates_and_attaches_to_accounts(org_client):
-    """Creates per-scenario SCP and attaches to each account."""
     client, mock_boto = org_client
     mock_boto.get_paginator.return_value.paginate.return_value = [{"Policies": []}]
     mock_boto.create_policy.return_value = {"Policy": {"PolicySummary": {"Id": "p-reg123"}}}
@@ -641,7 +640,6 @@ def test_ensure_region_restriction_scp_no_update_when_regions_reordered(org_clie
 
 
 def test_build_region_restriction_policy_structure(org_client):
-    """Produces valid JSON with correct policy structure."""
     import json
 
     client, _ = org_client
@@ -650,12 +648,71 @@ def test_build_region_restriction_policy_structure(org_client):
 
     policy = json.loads(result)
     assert policy["Version"] == "2012-10-17"
-    assert len(policy["Statement"]) == 1
+    assert len(policy["Statement"]) == 2
 
     stmt = policy["Statement"][0]
     assert stmt["Effect"] == "Deny"
     assert "NotAction" in stmt
     assert isinstance(stmt["NotAction"], list)
     assert stmt["Resource"] == "*"
-    # Regions are canonicalized (sorted) regardless of input order.
     assert stmt["Condition"]["StringNotEquals"]["aws:RequestedRegion"] == ["us-east-1", "us-west-2"]
+    assert policy["Statement"][1] == {
+        "Sid": "DenyAccountSettingChanges",
+        "Effect": "Deny",
+        "Action": [
+            "account:EnableRegion",
+            "account:DisableRegion",
+            "account:Put*",
+            "account:Delete*",
+        ],
+        "Resource": "*",
+    }
+
+
+# ── Region opt-in ──
+
+
+@pytest.fixture()
+def org_client_per_service():
+    """Create an OrganizationsClient with one mocked boto3 client per service."""
+    with patch("aws_bench.account_management.organizations.CredentialProvider") as mock_cred_cls:
+        clients = {"organizations": MagicMock(), "account": MagicMock()}
+        session = mock_cred_cls.get.return_value.session
+        session.client.side_effect = lambda service, **_: clients[service]
+        yield OrganizationsClient(), clients
+
+
+def test_enable_account_management_access_enables_trusted_access(org_client_per_service):
+    """Enables Organizations trusted access for the Account Management service principal."""
+    client, clients = org_client_per_service
+
+    client.enable_account_management_access()
+
+    clients["organizations"].enable_aws_service_access.assert_called_once_with(
+        ServicePrincipal="account.amazonaws.com"
+    )
+
+
+def test_get_region_opt_status_reads_member_account(org_client_per_service):
+    """Reads the member account's status by AccountId and returns RegionOptStatus."""
+    client, clients = org_client_per_service
+    clients["account"].get_region_opt_status.return_value = {
+        "RegionName": "eu-south-2",
+        "RegionOptStatus": "DISABLED",
+    }
+
+    assert client.get_region_opt_status("222222222222", "eu-south-2") == "DISABLED"
+    clients["account"].get_region_opt_status.assert_called_once_with(
+        AccountId="222222222222", RegionName="eu-south-2"
+    )
+
+
+def test_enable_region_targets_member_account(org_client_per_service):
+    """Requests opt-in for the member account by AccountId."""
+    client, clients = org_client_per_service
+
+    client.enable_region("222222222222", "eu-south-2")
+
+    clients["account"].enable_region.assert_called_once_with(
+        AccountId="222222222222", RegionName="eu-south-2"
+    )

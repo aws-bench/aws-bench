@@ -59,6 +59,27 @@ def _one_service(service: str, client: _FakeClient) -> MagicMock:
 # -- filtering listers: the AWS-managed / default exclusions each lister enforces --
 
 
+def test_gamelift_locations_requests_only_custom_locations():
+    # ListLocations returns the AWS-managed Region / Local Zone locations too (undeletable, and
+    # absent from any snapshot); the lister asks the service for CUSTOM locations only.
+    paginator = MagicMock()
+    paginator.paginate.return_value = iter(
+        [
+            {"Locations": [{"LocationName": "custom-lan-party", "LocationArn": "arn:..."}]},
+            {"Locations": [{"LocationName": "custom-office"}, {"LocationArn": "no-name"}]},
+        ]
+    )
+    client = MagicMock()
+    client.get_paginator.return_value = paginator
+
+    assert cl.list_gamelift_custom_locations(_one_service("gamelift", client)) == [
+        "custom-lan-party",
+        "custom-office",
+    ]
+    client.get_paginator.assert_called_once_with("list_locations")
+    paginator.paginate.assert_called_once_with(Filters=["CUSTOM"])
+
+
 def test_bedrock_inference_profiles_excludes_system_defined():
     client = _FakeClient(
         paginated={
@@ -1155,10 +1176,12 @@ def test_listers_tuple_is_complete_and_unique():
     which had no lister at all — are detected and CCAPI-deletable. A ``logs`` metric-filter lister
     emits the composite ``logGroupName|filterName`` (the CCAPI primaryIdentifier a SimpleLister
     cannot express). A custom ``ec2:DescribeDhcpOptions`` lister supersedes the simple row so the
-    default VPC's associated (undeletable) DHCP options set is excluded from orphan reporting.
+    default VPC's associated (undeletable) DHCP options set is excluded from orphan reporting. A
+    custom ``gamelift:ListLocations`` lister passes ``Filters=["CUSTOM"]`` so the AWS-managed
+    Region / Local Zone locations (undeletable) are excluded server-side.
     """
     listers = cl.custom_listers()
-    assert len(listers) == 157
+    assert len(listers) == 158
     keys = [(lister.service, lister.op) for lister in listers]
     assert len(keys) == len(set(keys))
     assert all(callable(lister.run) for lister in listers)

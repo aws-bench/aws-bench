@@ -60,4 +60,23 @@ UNAVAILABLE_LISTER_REGIONS: dict[tuple[str, str], frozenset[str]] = {
     ("omics", "ListVariantStores"): frozenset({"us-east-2"}),
     ("rekognition", "DescribeProjects"): frozenset({"us-west-1"}),
     ("rekognition", "ListStreamProcessors"): frozenset({"ap-southeast-1", "us-west-1"}),
+    # AWS Translate ParallelData is offered ONLY in us-east-1, us-west-2, eu-west-1
+    # (AWS regional-availability catalog: Translate+ListParallelData is "Not Found"
+    # in every other region). Listed here are the scenario regions where it is NOT
+    # available, so the lister is recorded ``empty`` there and never needs
+    # cross-region corroboration — fixing the reset fail-closed when the type could
+    # not be enumerated in those regions. Derived from the availability fact, not the
+    # regions where a failure happened to be observed; keep in sync with scenario
+    # regions if a scenario adds a region where Translate is unavailable.
+    ("translate", "ListParallelData"): frozenset(
+        {
+            "ap-northeast-1",
+            "ap-northeast-2",
+            "ap-southeast-1",
+            "ap-southeast-2",
+            "eu-central-1",
+            "us-east-2",
+            "us-west-1",
+        }
+    ),
 }

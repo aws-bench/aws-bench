@@ -191,3 +191,40 @@ async def test_local_task_configs_name_filter_same_subset(tmp_path):
 
     assert first == second
     assert first == {"alpha", "beta"}
+
+
+@pytest.mark.asyncio
+async def test_get_tasks_lists_tasks_grouped_by_scenario(tmp_path):
+    """A <tasks>/<scenario>/<task> layout yields every task, across scenarios.
+
+    Dataset repos keep tasks grouped per scenario. Listing them in one run is
+    what lets a single run cover several scenarios, as a registry dataset does.
+    """
+    tasks_dir = tmp_path / "tasks"
+    a = _make_task_layout(tasks_dir / "ec2-small" / "task-a", scenario_id="ec2-small")
+    b = _make_task_layout(tasks_dir / "ec2-small" / "task-b", scenario_id="ec2-small")
+    c = _make_task_layout(tasks_dir / "rds-mysql" / "task-c", scenario_id="rds-mysql")
+
+    cfg = AwsBenchDatasetConfig(path=tasks_dir)
+    pairs = await cfg.get_tasks()
+
+    assert [tc.get_local_path() for tc, _ in pairs] == [a, b, c]
+    assert {task.config.scenario.scenario_id for _, task in pairs} == {
+        "ec2-small",
+        "rds-mysql",
+    }
+
+
+@pytest.mark.asyncio
+async def test_get_tasks_mixes_flat_and_grouped_task_dirs(tmp_path):
+    """A flat task dir and a grouped one coexist; a task dir is not descended into."""
+    tasks_dir = tmp_path / "tasks"
+    flat = _make_task_layout(tasks_dir / "flat-task")
+    # A nested dir under a task dir is part of that task, never a task itself.
+    _make_task_layout(tasks_dir / "flat-task" / "not-a-task")
+    grouped = _make_task_layout(tasks_dir / "ec2-small" / "grouped-task")
+
+    cfg = AwsBenchDatasetConfig(path=tasks_dir)
+    pairs = await cfg.get_tasks()
+
+    assert [tc.get_local_path() for tc, _ in pairs] == [grouped, flat]

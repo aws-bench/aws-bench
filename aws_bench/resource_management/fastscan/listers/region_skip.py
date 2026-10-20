@@ -3977,54 +3977,6 @@ LISTER_REGION_SKIP: dict[tuple[str, str], frozenset[str]] = {
     ),
     ("timestream-influxdb", "list_db_clusters"): frozenset({"us-west-1"}),
     ("timestream-influxdb", "list_db_instances"): frozenset({"us-west-1"}),
-    ("tnb", "ListSolFunctionInstances"): frozenset(
-        {
-            "ap-northeast-1",
-            "ap-northeast-3",
-            "ap-south-1",
-            "ap-southeast-1",
-            "eu-west-1",
-            "eu-west-2",
-            "us-east-2",
-            "us-west-1",
-        }
-    ),
-    ("tnb", "ListSolFunctionPackages"): frozenset(
-        {
-            "ap-northeast-1",
-            "ap-northeast-3",
-            "ap-south-1",
-            "ap-southeast-1",
-            "eu-west-1",
-            "eu-west-2",
-            "us-east-2",
-            "us-west-1",
-        }
-    ),
-    ("tnb", "ListSolNetworkInstances"): frozenset(
-        {
-            "ap-northeast-1",
-            "ap-northeast-3",
-            "ap-south-1",
-            "ap-southeast-1",
-            "eu-west-1",
-            "eu-west-2",
-            "us-east-2",
-            "us-west-1",
-        }
-    ),
-    ("tnb", "ListSolNetworkPackages"): frozenset(
-        {
-            "ap-northeast-1",
-            "ap-northeast-3",
-            "ap-south-1",
-            "ap-southeast-1",
-            "eu-west-1",
-            "eu-west-2",
-            "us-east-2",
-            "us-west-1",
-        }
-    ),
     ("transcribe", "ListCallAnalyticsCategories"): frozenset({"ap-northeast-3"}),
     ("transcribe", "ListLanguageModels"): frozenset({"ap-northeast-3"}),
     ("transcribe", "ListMedicalVocabularies"): frozenset({"ap-northeast-3"}),

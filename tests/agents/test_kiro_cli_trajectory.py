@@ -3,11 +3,13 @@
 import json
 import sqlite3
 from pathlib import Path
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from harbor.models.trajectories import FinalMetrics, ObservationResult, Step, ToolCall, Trajectory
 
-from aws_bench.agents.kiro_cli import _DB_FILENAME, KiroCli
+from aws_bench.agents.kiro_cli import _DB_FILENAME, _SESSIONS_DIRNAME, KiroCli, _kas_tool_call
 
 
 @pytest.fixture
@@ -348,4 +350,588 @@ class TestRunCopiesDb:
         # The main run command should NOT have --agent
         run_cmds = [c for c in commands if "kiro-cli chat" in c]
         assert run_cmds
-        assert "--agent" not in run_cmds[0]
+        assert "--agent " not in run_cmds[0]
+
+
+# --- typed accessors: narrow the Optional ATIF fields for pyright ---
+
+
+def _calls(step: Step) -> list[ToolCall]:
+    assert step.tool_calls is not None
+    return step.tool_calls
+
+
+def _obs(step: Step) -> ObservationResult:
+    assert step.observation is not None
+    return step.observation.results[0]
+
+
+def _obs_text(step: Step) -> str:
+    content = _obs(step).content
+    assert isinstance(content, str)
+    return content
+
+
+def _metrics(traj: Trajectory | None) -> FinalMetrics:
+    assert traj is not None and traj.final_metrics is not None
+    return traj.final_metrics
+
+
+def _extra(traj: Trajectory | None) -> dict[str, Any]:
+    extra = _metrics(traj).extra
+    assert extra is not None
+    return extra
+
+
+def _all_calls(traj: Trajectory | None) -> list[ToolCall]:
+    assert traj is not None
+    return [c for s in traj.steps for c in s.tool_calls or []]
+
+
+# --- V3 engine: ~/.kiro/sessions/cli/<id>.json + .jsonl (primary source) ---
+
+_SESSION_ID = "373dafde-0d5f-4dab-9224-fc3b580e753e"
+_TOOL_USE_ID = "toolu_bdrk_01C5N6BXVgamvWtyczhy1f3t"
+
+
+def _session_meta(session_id: str = _SESSION_ID, updated_at: str = "2026-09-23T15:08:00Z") -> dict:
+    return {
+        "session_id": session_id,
+        "cwd": "/app",
+        "created_at": "2026-09-23T15:07:24Z",
+        "updated_at": updated_at,
+        "session_state": {
+            "version": "v1",
+            "conversation_metadata": {
+                "user_turn_metadatas": [
+                    {
+                        "model": "claude-sonnet-4-6",
+                        "input_token_count": 10,
+                        "output_token_count": 3,
+                        "metering_usage": [
+                            {"value": 1.25, "unit": "credit"},
+                            {"value": 0.75, "unit": "credit"},
+                        ],
+                    }
+                ]
+            },
+            "rts_model_state": {"model_info": {"model_id": "claude-sonnet-4-6"}},
+        },
+    }
+
+
+def _session_entries() -> list[dict]:
+    return [
+        {
+            "version": "v1",
+            "kind": "Prompt",
+            "data": {
+                "content": [{"kind": "text", "data": "Run sleep 25 then reply pong"}],
+                "meta": {"timestamp": 1790176047},
+            },
+        },
+        {
+            "version": "v1",
+            "kind": "AssistantMessage",
+            "data": {
+                "content": [
+                    {"kind": "text", "data": ""},
+                    {
+                        "kind": "toolUse",
+                        "data": {
+                            "toolUseId": _TOOL_USE_ID,
+                            "name": "shell",
+                            "input": {"command": "sleep 25"},
+                        },
+                    },
+                ]
+            },
+        },
+        {
+            "version": "v1",
+            "kind": "ToolResults",
+            "data": {
+                "content": [
+                    {
+                        "kind": "toolResult",
+                        "data": {
+                            "toolUseId": _TOOL_USE_ID,
+                            "content": [
+                                {"kind": "json", "data": {"exit_status": "exit status: 0"}}
+                            ],
+                            "status": "success",
+                        },
+                    }
+                ]
+            },
+        },
+        {
+            "version": "v1",
+            "kind": "AssistantMessage",
+            "data": {"content": [{"kind": "text", "data": "pong"}]},
+        },
+    ]
+
+
+def _write_session(logs_dir: Path, meta: dict, entries: list[dict]) -> Path:
+    sessions = logs_dir / _SESSIONS_DIRNAME / "cli"
+    sessions.mkdir(parents=True, exist_ok=True)
+    (sessions / f"{meta['session_id']}.json").write_text(json.dumps(meta))
+    (sessions / f"{meta['session_id']}.jsonl").write_text(
+        "".join(json.dumps(e) + "\n" for e in entries)
+    )
+    return sessions
+
+
+class TestConvertSessionToTrajectory:
+    def test_steps_and_tool_observation(self, agent: KiroCli):
+        traj = agent._convert_session_to_trajectory(_session_meta(), _session_entries())
+        assert traj is not None
+        assert traj.session_id == _SESSION_ID
+        assert [s.source for s in traj.steps] == ["user", "agent", "agent"]
+        assert traj.steps[0].message == "Run sleep 25 then reply pong"
+        assert traj.steps[0].timestamp is not None
+        tool_step = traj.steps[1]
+        assert _calls(tool_step)[0].tool_call_id == _TOOL_USE_ID
+        assert _calls(tool_step)[0].function_name == "shell"
+        assert _calls(tool_step)[0].arguments == {"command": "sleep 25"}
+        assert _obs(tool_step).source_call_id == _TOOL_USE_ID
+        assert "exit status: 0" in _obs_text(tool_step)
+        assert traj.steps[2].message == "pong"
+        assert traj.steps[2].model_name == "claude-sonnet-4-6"
+
+    def test_metrics_from_turn_metadata(self, agent: KiroCli):
+        traj = agent._convert_session_to_trajectory(_session_meta(), _session_entries())
+        assert traj is not None
+        m = _metrics(traj)
+        assert m.total_cost_usd == pytest.approx(2.0)
+        assert m.total_prompt_tokens == 10
+        assert m.total_completion_tokens == 3
+        assert _extra(traj)["total_tool_calls"] == 1
+        assert _extra(traj)["total_tool_calls_errors"] == 0
+
+    def test_empty_entries_returns_none(self, agent: KiroCli):
+        assert agent._convert_session_to_trajectory(_session_meta(), []) is None
+
+
+class TestSessionsDirSource:
+    def test_picks_most_recently_updated_session(self, agent: KiroCli, logs_dir: Path):
+        _write_session(logs_dir, _session_meta("old", "2026-09-23T10:00:00Z"), _session_entries())
+        _write_session(logs_dir, _session_meta("new", "2026-09-23T11:00:00Z"), _session_entries())
+        traj = agent._trajectory_from_sessions(logs_dir / _SESSIONS_DIRNAME)
+        assert traj is not None
+        assert traj.session_id == "new"
+
+    def test_missing_dir_returns_none(self, agent: KiroCli, logs_dir: Path):
+        assert agent._trajectory_from_sessions(logs_dir / _SESSIONS_DIRNAME) is None
+
+
+class TestPopulateContextPrefersSessions:
+    def test_session_files_win_over_sqlite(self, agent: KiroCli, logs_dir: Path):
+        _create_db(
+            logs_dir,
+            {
+                "conversation_id": "from-sqlite",
+                "history": [
+                    {
+                        "user": {"content": {"Prompt": {"prompt": "hi"}}},
+                        "assistant": {"Response": {"content": "hello"}},
+                    }
+                ],
+            },
+        )
+        _write_session(logs_dir, _session_meta(), _session_entries())
+        context = MagicMock()
+        agent.populate_context_post_run(context)
+        data = json.loads((logs_dir / "trajectory.json").read_text())
+        assert data["session_id"] == _SESSION_ID
+        assert context.cost_usd == pytest.approx(2.0)
+
+    def test_empty_sessions_dir_falls_back_to_sqlite(self, agent: KiroCli, logs_dir: Path):
+        (logs_dir / _SESSIONS_DIRNAME / "cli").mkdir(parents=True)
+        _create_db(
+            logs_dir,
+            {
+                "conversation_id": "from-sqlite",
+                "history": [
+                    {
+                        "user": {"content": {"Prompt": {"prompt": "hi"}}},
+                        "assistant": {"Response": {"content": "hello"}},
+                    }
+                ],
+            },
+        )
+        agent.populate_context_post_run(MagicMock())
+        data = json.loads((logs_dir / "trajectory.json").read_text())
+        assert data["session_id"] == "from-sqlite"
+
+
+class TestRunCopiesSessions:
+    @pytest.mark.asyncio
+    async def test_run_copies_sessions_dir_in_finally(self, agent: KiroCli):
+        environment = MagicMock()
+        environment.exec = AsyncMock(return_value=MagicMock(return_code=0, stdout="", stderr=""))
+        with patch.dict("os.environ", {"KIRO_API_KEY": "ksk_test"}, clear=True):
+            await agent.run("Do the task", environment, MagicMock())
+        last_cmd = environment.exec.call_args_list[-1].kwargs.get("command", "")
+        assert ".kiro/sessions " in last_cmd
+        assert f"/logs/agent/{_SESSIONS_DIRNAME}" in last_cmd
+
+
+# --- V3 (KAS) engine: ~/.kiro/sessions/<workspace>/sess_<id>/{session.json,messages.jsonl} ---
+
+_KAS_ID = "sess_be1a3667-798d-4ee7-80af-0546ba8c6339"
+_KAS_TOOL_ID = "run_command_toolu_bdrk_01Hn46f6McTKjurQuHPbGFhg"
+
+
+def _kas_meta(session_id: str = _KAS_ID, last_modified: str = "2026-09-23T16:03:03.100Z") -> dict:
+    return {
+        "schemaVersion": "1.0.0",
+        "id": session_id,
+        "createdAt": "2026-09-23T16:02:55.602Z",
+        "lastModifiedAt": last_modified,
+        "modelId": "claude-sonnet-4-6",
+        "status": "idle",
+    }
+
+
+def _kas_events() -> list[dict]:
+    def ev(payload: dict, ts: str = "2026-09-23T16:02:58.992Z") -> dict:
+        return {"id": "x", "timestamp": ts, "payload": payload}
+
+    return [
+        ev({"type": "user", "content": "Run echo hi then reply pong"}, "2026-09-23T16:02:55.692Z"),
+        ev({"type": "turn_start", "executionId": "e1"}),
+        ev({"type": "steering_inclusion", "documents": []}),
+        ev({"type": "assistant", "content": "...", "operationType": "Reasoning"}),
+        ev({"type": "pending_interaction", "toolCallId": _KAS_TOOL_ID}),
+        ev({"type": "interaction_resolved", "toolCallId": _KAS_TOOL_ID}),
+        ev(
+            {
+                "type": "tool_call",
+                "toolCallId": _KAS_TOOL_ID,
+                "toolName": "execute_bash",
+                "args": {"command": "echo hi"},
+                "status": "completed",
+            }
+        ),
+        ev(
+            {
+                "type": "tool_result",
+                "toolCallId": _KAS_TOOL_ID,
+                "content": "Output:\nhi\n\nExit Code: 0",
+                "success": True,
+            }
+        ),
+        ev(
+            {"type": "assistant", "content": "pong", "operationType": "Say"},
+            "2026-09-23T16:03:03.073Z",
+        ),
+        ev(
+            {
+                "type": "usage_summary",
+                "promptTurnSummaries": [{"unit": "credit", "usage": 0.35}],
+                "elapsedTime": 7098,
+                "status": "success",
+            }
+        ),
+        ev({"type": "turn_end", "stopReason": "end_turn"}),
+        ev({"type": "session_start", "agentType": "vibe", "content": "You are Kiro..."}),
+    ]
+
+
+def _write_kas_session(logs_dir: Path, meta: dict, events: list[dict]) -> Path:
+    d = logs_dir / _SESSIONS_DIRNAME / "da5ade4fbec1ce65" / meta["id"]
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "session.json").write_text(json.dumps(meta))
+    (d / "messages.jsonl").write_text("".join(json.dumps(e) + "\n" for e in events))
+    (d / "publish.cursor").write_text("0")
+    return d
+
+
+class TestConvertKasSessionToTrajectory:
+    def test_steps_and_tool_observation(self, agent: KiroCli):
+        traj = agent._convert_kas_session_to_trajectory(_kas_meta(), _kas_events())
+        assert traj is not None
+        assert traj.session_id == _KAS_ID
+        assert [s.source for s in traj.steps] == ["user", "agent", "agent"]
+        assert traj.steps[0].message == "Run echo hi then reply pong"
+        assert traj.steps[0].timestamp == "2026-09-23T16:02:55.692Z"
+        tool_step = traj.steps[1]
+        assert _calls(tool_step)[0].tool_call_id == _KAS_TOOL_ID
+        assert _calls(tool_step)[0].function_name == "execute_bash"
+        assert _calls(tool_step)[0].arguments == {"command": "echo hi"}
+        assert _obs(tool_step).source_call_id == _KAS_TOOL_ID
+        assert "Exit Code: 0" in _obs_text(tool_step)
+        assert traj.steps[2].message == "pong"
+        assert traj.steps[2].model_name == "claude-sonnet-4-6"
+
+    def test_metrics_from_usage_summary(self, agent: KiroCli):
+        traj = agent._convert_kas_session_to_trajectory(_kas_meta(), _kas_events())
+        assert traj is not None
+        m = _metrics(traj)
+        assert m.total_cost_usd == pytest.approx(0.35)
+        assert _extra(traj)["total_tool_calls"] == 1
+        assert _extra(traj)["total_tool_calls_errors"] == 0
+
+    def test_failed_tool_result_counts_as_error(self, agent: KiroCli):
+        events = _kas_events()
+        next(e for e in events if e["payload"]["type"] == "tool_result")["payload"]["success"] = (
+            False
+        )
+        traj = agent._convert_kas_session_to_trajectory(_kas_meta(), events)
+        assert traj is not None
+        assert _extra(traj)["total_tool_calls_errors"] == 1
+
+    def test_empty_events_returns_none(self, agent: KiroCli):
+        assert agent._convert_kas_session_to_trajectory(_kas_meta(), []) is None
+
+
+class TestSessionsDirKasSource:
+    def test_reads_kas_session(self, agent: KiroCli, logs_dir: Path):
+        _write_kas_session(logs_dir, _kas_meta(), _kas_events())
+        traj = agent._trajectory_from_sessions(logs_dir / _SESSIONS_DIRNAME)
+        assert traj is not None
+        assert traj.session_id == _KAS_ID
+
+    def test_picks_newest_across_v2_and_v3_layouts(self, agent: KiroCli, logs_dir: Path):
+        _write_session(
+            logs_dir, _session_meta("v2-old", "2026-09-23T10:00:00Z"), _session_entries()
+        )
+        _write_kas_session(logs_dir, _kas_meta("sess_new", "2026-09-23T11:00:00Z"), _kas_events())
+        traj = agent._trajectory_from_sessions(logs_dir / _SESSIONS_DIRNAME)
+        assert traj is not None
+        assert traj.session_id == "sess_new"
+
+    def test_kas_session_wins_over_sqlite_in_post_run(self, agent: KiroCli, logs_dir: Path):
+        _create_db(
+            logs_dir,
+            {
+                "conversation_id": "from-sqlite",
+                "history": [
+                    {
+                        "user": {"content": {"Prompt": {"prompt": "hi"}}},
+                        "assistant": {"Response": {"content": "hello"}},
+                    }
+                ],
+            },
+        )
+        _write_kas_session(logs_dir, _kas_meta(), _kas_events())
+        context = MagicMock()
+        agent.populate_context_post_run(context)
+        data = json.loads((logs_dir / "trajectory.json").read_text())
+        assert data["session_id"] == _KAS_ID
+        assert context.cost_usd == pytest.approx(0.35)
+
+
+# KAS (kiro-cli 2.25.0) tool_call payloads; shapes as recorded by a real session.
+_KAS_MCP_ID = "toolu_01mcp"
+_KAS_MCP_ARGS = {"query": "how do I rotate a key"}
+
+
+def _kas_mcp_call(**overrides: Any) -> dict:
+    payload = {
+        "type": "tool_call",
+        "toolCallId": _KAS_MCP_ID,
+        "toolName": "tool_call",
+        "args": _KAS_MCP_ARGS,
+        "status": "completed",
+        "kind": "other",
+        "actionType": "mcp_docs_mcp_search_docs",
+        "title": "@docs-mcp/search_docs",
+        "_meta": {"kiro": {"agentMode": "vibe", "serverName": "docs-mcp", "toolOrigin": "default"}},
+    }
+    payload.update(overrides)
+    return payload
+
+
+def _kas_mcp_events() -> list[dict]:
+    def ev(payload: dict, ts: str = "2026-09-29T10:29:57.075Z") -> dict:
+        return {"id": "x", "timestamp": ts, "payload": payload}
+
+    return [
+        ev({"type": "user", "content": "Why is the Batch log group empty?"}),
+        ev(
+            {
+                "type": "tool_call",
+                "toolCallId": "load-1",
+                "toolName": "tool_load",
+                "args": {"tool_ids": ["docs-mcp::search_docs", "docs-mcp::read_page"]},
+                "status": "completed",
+                "kind": "other",
+                "actionType": "tool_load",
+                "title": "Tool Load",
+                "_meta": {"kiro": {"agentMode": "vibe", "toolOrigin": "default"}},
+            }
+        ),
+        ev({"type": "tool_result", "toolCallId": "load-1", "content": "{}", "success": True}),
+        ev(
+            {
+                "type": "tool_call",
+                "toolCallId": "skill-1",
+                "toolName": "disclose_context",
+                "args": {"name": "release-checklist"},
+                "status": "completed",
+                "kind": "other",
+                "actionType": "disclose_context",
+                "title": "Loaded skill: release-checklist",
+                "_meta": {
+                    "kiro": {
+                        "agentMode": "vibe",
+                        "toolOrigin": "acp",
+                        "toolId": "disclose_context",
+                        "disclosedContext": {
+                            "type": "skill",
+                            "displayName": "release-checklist",
+                            "uri": "file:///root/.kiro/skills/release-checklist/SKILL.md",
+                        },
+                    }
+                },
+            }
+        ),
+        ev({"type": "tool_result", "toolCallId": "skill-1", "content": "ok", "success": True}),
+        ev(_kas_mcp_call()),
+        ev(
+            {
+                "type": "tool_result",
+                "toolCallId": _KAS_MCP_ID,
+                "content": '{"status": "error", "error": "no results"}',  # tool-level error
+                "success": True,
+            }
+        ),
+        ev(_kas_mcp_call(toolCallId="mcp-2", status="failed")),
+        ev(
+            {
+                "type": "tool_result",
+                "toolCallId": "mcp-2",
+                "content": "MCP tool error: Tool call 'search_docs' failed",
+                "success": False,
+            }
+        ),
+        ev(
+            {
+                "type": "tool_call",
+                "toolCallId": "run_command_1",
+                "toolName": "execute_bash",
+                "args": {"command": "mkdir -p /logs/agent"},
+                "status": "completed",
+                "kind": "execute",
+                "actionType": "run_command",
+                "title": "Ensure output directory exists",
+                "_meta": {"kiro": {"agentMode": "vibe", "toolOrigin": "default"}},
+            }
+        ),
+        ev({"type": "tool_result", "toolCallId": "run_command_1", "content": "", "success": True}),
+        ev({"type": "assistant", "content": "done", "operationType": "Say"}),
+    ]
+
+
+class TestKasToolCallNames:
+    """KAS names every MCP tool ``tool_call``; the converter recovers the real name."""
+
+    @pytest.fixture
+    def traj(self, agent: KiroCli) -> Trajectory | None:
+        return agent._convert_kas_session_to_trajectory(_kas_meta(), _kas_mcp_events())
+
+    def test_mcp_call_is_named_after_the_tool(self, traj: Trajectory | None):
+        names = [c.function_name for c in _all_calls(traj)]
+        assert names == [
+            "tool_load",
+            "disclose_context",
+            "search_docs",
+            "search_docs",
+            "execute_bash",
+        ]
+        assert "tool_call" not in names
+
+    def test_mcp_call_records_server_and_keeps_arguments(self, traj: Trajectory | None):
+        mcp = next(c for c in _all_calls(traj) if c.tool_call_id == _KAS_MCP_ID)
+        assert mcp.extra == {"mcp_server": "docs-mcp"}
+        assert mcp.arguments == _KAS_MCP_ARGS
+
+    def test_builtin_tool_has_no_extra(self, traj: Trajectory | None):
+        bash = next(c for c in _all_calls(traj) if c.function_name == "execute_bash")
+        assert bash.extra is None
+        assert bash.arguments == {"command": "mkdir -p /logs/agent"}
+
+    def test_skill_load_records_disclosed_context(self, traj: Trajectory | None):
+        skill = next(c for c in _all_calls(traj) if c.tool_call_id == "skill-1")
+        assert skill.function_name == "disclose_context"
+        assert skill.extra is not None
+        assert skill.extra["disclosed_context"]["type"] == "skill"
+        assert skill.extra["disclosed_context"]["displayName"] == "release-checklist"
+
+    def test_only_transport_failures_count_as_errors(self, traj: Trajectory | None):
+        # success=False counts; an error envelope inside a successful result does not.
+        assert _extra(traj)["total_tool_calls"] == 5
+        assert _extra(traj)["total_tool_calls_errors"] == 1
+
+    def test_name_falls_back_to_action_type_without_title(self):
+        call = _kas_tool_call(_kas_mcp_call(title=""))
+        assert call.function_name == "search_docs"
+        assert call.extra == {"mcp_server": "docs-mcp"}
+
+    def test_title_server_is_used_when_meta_has_none(self):
+        call = _kas_tool_call(_kas_mcp_call(_meta={}))
+        assert call.function_name == "search_docs"
+        assert call.extra == {"mcp_server": "docs-mcp"}
+
+    def test_generic_name_without_identity_stays_unknown(self):
+        call = _kas_tool_call(
+            {"toolCallId": "c1", "toolName": "tool_call", "title": "", "actionType": ""}
+        )
+        assert call.function_name == "unknown"
+        assert call.arguments == {}
+        assert call.extra is None
+
+    def test_json_string_args_are_parsed(self):
+        call = _kas_tool_call(_kas_mcp_call(args='{"code": "x = 1"}'))
+        assert call.arguments == {"code": "x = 1"}
+
+    def test_written_trajectory_has_real_names(self, agent: KiroCli, logs_dir: Path):
+        _write_kas_session(logs_dir, _kas_meta(), _kas_mcp_events())
+        agent.populate_context_post_run(MagicMock())
+        data = json.loads((logs_dir / "trajectory.json").read_text())
+        calls = [c for s in data["steps"] for c in s.get("tool_calls") or []]
+        mcp = [c for c in calls if c["function_name"] == "search_docs"]
+        assert len(mcp) == 2
+        assert all(c["extra"] == {"mcp_server": "docs-mcp"} for c in mcp)
+
+
+class TestToolResultText:
+    def test_v2_text_result_part_is_verbatim(self, agent: KiroCli):
+        entries = _session_entries()
+        tool_results = next(e for e in entries if e["kind"] == "ToolResults")
+        tool_results["data"]["content"][0]["data"]["content"] = [
+            {"kind": "text", "data": "hello world"}
+        ]
+        traj = agent._convert_session_to_trajectory(_session_meta(), entries)
+        assert traj is not None
+        assert _obs_text(traj.steps[1]) == "hello world"
+
+    def test_v1_text_result_part_is_verbatim(self, agent: KiroCli):
+        conversation = {
+            "history": [
+                {
+                    "user": {"content": {"Prompt": {"prompt": "hi"}}},
+                    "assistant": {
+                        "ToolUse": {"content": "", "tool_uses": [{"id": "t1", "name": "x"}]}
+                    },
+                },
+                {
+                    "user": {
+                        "content": {
+                            "ToolUseResults": {
+                                "tool_use_results": [
+                                    {"tool_use_id": "t1", "content": [{"Text": "hello world"}]}
+                                ]
+                            }
+                        }
+                    },
+                    "assistant": {"Response": {"content": "done"}},
+                },
+            ]
+        }
+        traj = agent._convert_conversation_to_trajectory(conversation)
+        assert traj is not None
+        assert _obs_text(traj.steps[1]) == "hello world"

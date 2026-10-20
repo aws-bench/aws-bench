@@ -130,6 +130,11 @@ AWS_MANAGED_FILTERS: dict[str, Callable[[str, dict], bool]] = {
     # KB → Redshift link), surfacing it as a "new" resource. Customer/agent
     # secrets carry a plain name with no "!" and are NOT filtered.
     "AWS::SecretsManager::Secret": lambda id, _: _is_service_managed_secret(id),
+    # AWS-managed GameLift locations (the Regions / Local Zones GameLift can host in, e.g.
+    # ``us-east-1``, ``us-east-1-atl-2``) are AWS-owned and undeletable. CCAPI callers only;
+    # fast-scan output goes through the ``Filters=["CUSTOM"]`` custom lister instead.
+    # Customer-created custom locations must carry the ``custom-`` prefix and are NOT filtered.
+    "AWS::GameLift::Location": lambda id, _: not id.startswith("custom-"),
 }
 
 

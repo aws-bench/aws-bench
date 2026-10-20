@@ -33,6 +33,7 @@ from aws_bench.resource_management.cleanup.models import (
     is_infra_identifier,
     to_ccapi_resources,
 )
+from aws_bench.resource_management.utils.cloudformation import disable_termination_protection
 from aws_bench.utils.concurrent import build_client, interruptible_executor
 
 logger = get_logger(__name__)
@@ -42,9 +43,13 @@ LOG_SAMPLE_SIZE = 3
 
 # Native CloudFormation DeleteStack fallback (see _delete_failed_cfn_stacks).
 _CFN_STACK_TYPE = "AWS::CloudFormation::Stack"
-# Bounded wait for the fallback delete: ~3 minutes (18 attempts * 10s).
+# Bounded wait for the fallback delete: 30 minutes (180 attempts * 10s), aligned
+# with StackDeleter's STACK_DELETE_TIMEOUT. The previous ~3-minute bound (18 * 10s)
+# was far too short for large stacks still in DELETE_IN_PROGRESS, prematurely
+# declaring the fallback failed and failing the reset on a stack that was in fact
+# deleting normally.
 _STACK_DELETE_WAITER_DELAY = 10
-_STACK_DELETE_WAITER_MAX_ATTEMPTS = 18
+_STACK_DELETE_WAITER_MAX_ATTEMPTS = 180
 # Resource types whose custom deletion must finish before any general prepare
 # handler runs. An EKS-managed Auto Scaling group is prepared by suspending its
 # ReplaceUnhealthy process; if that happens while the owning nodegroup is still
@@ -391,6 +396,11 @@ class ResourceCleaner:
         its own dependency order, catching the residual the per-resource handlers
         leave behind.
 
+        Agents also create stacks with ``EnableTerminationProtection`` on, and
+        CloudFormation refuses ``DeleteStack`` on those with a ``ValidationError``.
+        Protection is turned off first, as ``StackDeleter`` does for ``env cleanup``,
+        so a protected stack no longer survives the reset and contaminates the account.
+
         Only stacks CCAPI already failed on are retried, and CDK bootstrap/toolkit
         infrastructure stacks (``CDKToolkit``, ``cdk-hnb659fds-*``) are never
         touched. A stack that lands in ``DELETE_FAILED`` is retried once with
@@ -420,6 +430,7 @@ class ResourceCleaner:
         for resource in stacks:
             stack_name = resource.identifier
             try:
+                disable_termination_protection(client, stack_name)
                 client.delete_stack(StackName=stack_name)
                 try:
                     waiter.wait(
@@ -447,10 +458,9 @@ class ResourceCleaner:
                         },
                     )
             except (ClientError, WaiterError, BotoCoreError) as e:
+                # Logged in full: truncating the error hid why DeleteStack was refused.
                 logger.warning(
-                    "Native DeleteStack fallback failed for stack '%s': %s",
-                    truncate_for_log(stack_name, LOG_TRUNCATE_SHORT),
-                    truncate_for_log(str(e), LOG_TRUNCATE_LONG),
+                    "Native DeleteStack fallback failed for stack '%s': %s", stack_name, e
                 )
                 continue
             logger.debug("Native DeleteStack fallback deleted stack '%s'", stack_name)

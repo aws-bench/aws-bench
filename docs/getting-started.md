@@ -62,7 +62,7 @@ A run does **not** tear anything down. When `aws-bench run` finishes, aws-bench 
 
 | Phase | Command | What happens | Typical duration |
 |-------|---------|--------------|------------------|
-| **Init** | `aws-bench env init` | Creates the Organization, OU, and test accounts; submits service-quota requests | ≤ 5 min (up to ~60 min if you opt to wait for quota approvals) |
+| **Init** | `aws-bench env init` | Creates the Organization, OU, and test accounts; enables declared regions and submits service-quota requests | Usually ≤ 5 min with regions already enabled; opt-in and quota approvals take longer |
 | **Setup** | `aws-bench env setup` | Builds scenario containers and deploys CDK stacks into the test accounts | 10–30 min |
 | **Run** | `aws-bench run` | Executes agent trials, runs verifiers, collects rewards | 30 min to ~6 h, depending on the size and complexity of the selected dataset |
 | **Cleanup** | `aws-bench env cleanup` | Removes deployed resources (keeps the accounts) | 5–180 min, depending on the resources deployed |
@@ -142,7 +142,7 @@ uv run aws-bench env cleanup --env-name awsbench-env -d aws-bench-quickstart
 
 If step 4 produces per-trial rewards (see [Checking results](#checking-results)), your environment is configured correctly.
 
-> **Note:** `env init` can take a while the first time because service-quota increases may need approval. `--wait-for-quotas` blocks until they're ready; without it, check status later with `aws-bench env show`.
+> **Note:** `env init` opts managed accounts into their declared opt-in regions from the management account and waits up to 30 minutes; AWS enablement can take hours, so after a timeout rerun `env init` to resume. Only scenarios that declare an opt-in region make these calls; for them the management-account credentials need `organizations:EnableAWSServiceAccess`, `account:GetRegionOptStatus`, and `account:EnableRegion`. Pre-existing accounts must have their regions enabled already. Service-quota increases may also need approval: `--wait-for-quotas` blocks until they're ready; without it, check status later with `aws-bench env show`.
 
 ### Example agent and model IDs
 
@@ -170,7 +170,7 @@ The agents below have an aws-bench-specific adapter that integrates them with th
 |--------------|-------------------|----------------------|-------|
 | `claude-code` | Anthropic API or Amazon Bedrock | `ANTHROPIC_API_KEY`, or Bedrock auto-detected from a non-empty `AWS_BEARER_TOKEN_BEDROCK` | Can install Claude Code plugins (each bundling MCP servers + skills) per trial — e.g. `--ak marketplaces='["owner/repo"]' --ak plugins='["name@owner/repo"]'`. |
 | `codex` | OpenAI or Amazon Bedrock | `OPENAI_API_KEY`, or Bedrock auto-detected from a non-empty `AWS_BEARER_TOKEN_BEDROCK` | |
-| `kiro-cli` | Kiro | `KIRO_API_KEY` (`ksk_…`) exported on the host | |
+| `kiro-cli` | Kiro | `KIRO_API_KEY` (`ksk_…`) exported on the host | Defaults to `--agent-engine v3` (pinned because kiro-cli otherwise picks an engine per session; v2 currently ignores `--model`). Override with `--ak agent_engine=v1\|v2\|v3` or `KIRO_CLI_AGENT_ENGINE`. |
 | `mini-swe-agent` | Any LiteLLM provider (incl. Amazon Bedrock) | Provider-specific; Bedrock uses `bedrock/<model-id>` and `AWS_BEARER_TOKEN_BEDROCK` | |
 | `aws-bench-baseline-agent` | Amazon Bedrock (Strands Agent SDK) | `AWS_BEARER_TOKEN_BEDROCK` | aws-bench's baseline evaluation agent (see note below). |
 | `oracle` | *(none)* | *(none)* | Replays a task's reference solution (`solution/solve.sh`) instead of calling a model. Reference solutions are provided for **mutation** tasks, so the oracle validates that a mutation scenario and its verifier work end-to-end. |

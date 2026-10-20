@@ -65,6 +65,7 @@ SUPERSEDED_BY_CUSTOM_LISTER: frozenset[tuple[str, str]] = frozenset(
         # the CustomLister runs the caller-scoped API instead.
         ("ec2", "DescribeManagedPrefixLists"),  # → AWS::EC2::PrefixList
         ("ec2", "DescribeVpcEndpointServiceConfigurations"),  # → AWS::EC2::VPCEndpointService
+        ("gamelift", "list_locations"),  # → AWS::GameLift::Location
         ("lexv2-models", "ListBots"),  # → AWS::Lex::Bot
         ("mq", "ListBrokers"),  # → AWS::AmazonMQ::Broker
         ("mq", "ListConfigurations"),  # → AWS::AmazonMQ::Configuration
@@ -107,6 +108,11 @@ DISABLED_LISTERS: frozenset[tuple[str, str]] = frozenset(
         # parallel multi-region snapshot and aborts the whole capture (observed in
         # ap-northeast-3). Not a benchmark resource, so disabling the lister is safe.
         ("sagemaker", "ListPartnerApps"),
+        # Telco Network Builder: deprecated service and not part of dataset resources.
+        ("tnb", "ListSolFunctionInstances"),
+        ("tnb", "ListSolFunctionPackages"),
+        ("tnb", "ListSolNetworkInstances"),
+        ("tnb", "ListSolNetworkPackages"),
     }
 )
 

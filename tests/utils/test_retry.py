@@ -1,16 +1,16 @@
-"""Tests for the shared git-fetch retry policy (``retrying_git_fetch``).
-
-The backoff is neutralized by the autouse ``_no_git_fetch_backoff`` fixture (in
-the tests' conftest) so these assert retry *behavior* without sleeping through
-the real 5-60s exponential waits.
-"""
+"""Retry policy tests; conftest's autouse ``_no_git_fetch_backoff`` skips git-fetch waits."""
 
 import subprocess
 
 import pytest
 from botocore.exceptions import BotoCoreError, ClientError
 
-from aws_bench.utils.retry import is_fresh_account_transient, retrying_git_fetch
+from aws_bench.utils.retry import (
+    is_fresh_account_transient,
+    is_region_access_transient,
+    is_scp_access_denied,
+    retrying_git_fetch,
+)
 
 
 def _client_error(code: str) -> ClientError:
@@ -103,3 +103,45 @@ async def test_does_not_retry_other_exceptions():
     with pytest.raises(FileNotFoundError):
         await retrying_git_fetch(hard_fail)
     assert calls["n"] == 1
+
+
+@pytest.mark.parametrize("code", ["AccessDenied", "AccessDeniedException", "UnauthorizedOperation"])
+@pytest.mark.parametrize(
+    ("message", "expected"),
+    [
+        ("with an explicit deny in a service control policy", True),
+        ("Denied by a SERVICE CONTROL POLICY", True),
+        ("no identity-based policy allows this action", False),
+        ("explicit deny in a permissions boundary", False),
+        ("", False),
+    ],
+)
+def test_scp_access_denied_is_precise(code: str, message: str, expected: bool) -> None:
+    exc = ClientError({"Error": {"Code": code, "Message": message}}, "ListStacks")
+    assert is_scp_access_denied(exc) is expected
+    assert is_region_access_transient(exc) is expected
+    assert not is_fresh_account_transient(exc)
+
+
+@pytest.mark.parametrize(
+    ("exc", "expected"),
+    [
+        (_client_error("OptInRequired"), True),
+        (_client_error("SubscriptionRequiredException"), True),
+        (_client_error("InvalidClientTokenId"), True),
+        (_client_error("AccessDenied"), False),
+        (ClientError({"Error": {"Code": "AccessDenied"}}, "ListStacks"), False),
+        (
+            ClientError(
+                {"Error": {"Code": "ValidationError", "Message": "service control policy"}},
+                "ListStacks",
+            ),
+            False,
+        ),
+        (BotoCoreError(), False),
+        (RuntimeError("service control policy"), False),
+    ],
+)
+def test_region_access_transient_classifier(exc: BaseException, expected: bool) -> None:
+    assert is_region_access_transient(exc) is expected
+    assert not is_scp_access_denied(exc)

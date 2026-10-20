@@ -2,7 +2,10 @@
 
 from unittest.mock import MagicMock
 
+from botocore.exceptions import ClientError
+
 from aws_bench.resource_management.utils.cloudformation import (
+    disable_termination_protection,
     get_stack_resource_drifts,
     is_stack_not_found,
 )
@@ -112,3 +115,61 @@ def test_is_stack_not_found_returns_false_for_other_errors():
     )
 
     assert not is_stack_not_found(error)
+
+
+# -- disable_termination_protection --
+
+
+def _client_with_protection(enabled: bool) -> MagicMock:
+    client = MagicMock()
+    client.describe_stacks.return_value = {"Stacks": [{"EnableTerminationProtection": enabled}]}
+    return client
+
+
+def test_disable_termination_protection_turns_protection_off():
+    """A protected stack gets UpdateTerminationProtection(False); reports it did."""
+    client = _client_with_protection(enabled=True)
+
+    assert disable_termination_protection(client, "my-stack") is True
+    client.update_termination_protection.assert_called_once_with(
+        EnableTerminationProtection=False, StackName="my-stack"
+    )
+
+
+def test_disable_termination_protection_noop_when_off():
+    """An unprotected stack is left alone."""
+    client = _client_with_protection(enabled=False)
+
+    assert disable_termination_protection(client, "my-stack") is False
+    client.update_termination_protection.assert_not_called()
+
+
+def test_disable_termination_protection_swallows_access_denied():
+    """Permission errors are logged, not raised; DeleteStack surfaces the real failure."""
+    client = MagicMock()
+    client.describe_stacks.side_effect = ClientError(
+        {"Error": {"Code": "AccessDenied", "Message": "forbidden"}}, "DescribeStacks"
+    )
+
+    assert disable_termination_protection(client, "my-stack") is False
+    client.update_termination_protection.assert_not_called()
+
+
+def test_disable_termination_protection_swallows_stack_not_found():
+    client = MagicMock()
+    client.describe_stacks.side_effect = ClientError(
+        {"Error": {"Code": "ValidationError", "Message": "Stack with id my-stack does not exist"}},
+        "DescribeStacks",
+    )
+
+    assert disable_termination_protection(client, "my-stack") is False
+
+
+def test_disable_termination_protection_swallows_update_error():
+    client = _client_with_protection(enabled=True)
+    client.update_termination_protection.side_effect = ClientError(
+        {"Error": {"Code": "ValidationError", "Message": "Stack is in DELETE_IN_PROGRESS"}},
+        "UpdateTerminationProtection",
+    )
+
+    assert disable_termination_protection(client, "my-stack") is False

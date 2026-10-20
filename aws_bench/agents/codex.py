@@ -1,4 +1,4 @@
-"""Bedrock-aware Codex agent for aws-bench.
+"""Bedrock-aware, plugin-capable Codex agent for aws-bench.
 
 Harbor's built-in ``Codex`` agent only knows how to talk to OpenAI: it writes
 ``OPENAI_API_KEY`` into the container and runs ``codex exec`` with no provider
@@ -17,12 +17,24 @@ Codex (OpenAI auth).
 
 Region: pass it with ``-ae AWS_REGION=us-east-2`` (API-key auth requires a
 Region). The host ``AWS_REGION`` is auto-forwarded as a fallback.
+
+Like Claude Code, marketplaces and plugins can be supplied via agent kwargs::
+
+    -a codex \
+      --ak marketplaces='["owner/repo"]' \
+      --ak plugins='["plugin-name@marketplace-name"]'
+
+The marketplace name comes from its manifest, not necessarily the repo name.
+Requires a Codex version supporting ``codex plugin add``. With no plugins,
+plugin setup is skipped.
 """
 
 from __future__ import annotations
 
 import os
 import shlex
+from pathlib import Path
+from typing import Any
 
 from harbor.agents.installed.codex import Codex as _HarborCodex
 from harbor.environments.base import BaseEnvironment
@@ -70,7 +82,52 @@ def _toml_basic_string(value: str) -> str:
 
 
 class Codex(_HarborCodex):
-    """Codex agent that can target Amazon Bedrock in addition to OpenAI."""
+    """Codex with Bedrock auth and per-trial marketplace plugin installation."""
+
+    def __init__(
+        self,
+        logs_dir: Path,
+        marketplaces: list[str] | None = None,
+        plugins: list[str] | None = None,
+        *args: Any,
+        **kwargs: Any,
+    ) -> None:
+        """Store marketplace sources and ``<plugin>@<marketplace>`` selectors."""
+        self._marketplaces = list(marketplaces) if marketplaces else []
+        self._plugins = list(plugins) if plugins else []
+        if self._marketplaces and not self._plugins:
+            raise ValueError(
+                "marketplaces were given without plugins; a marketplace is only "
+                "added when a plugin from it is installed"
+            )
+        super().__init__(logs_dir, *args, **kwargs)
+
+    async def install(self, environment: BaseEnvironment) -> None:
+        """Install Codex and, when plugins are requested, Git for cloning."""
+        await super().install(environment)
+        if not self._plugins:
+            return
+
+        await self.exec_as_root(
+            environment,
+            command=(
+                "if ! command -v git >/dev/null 2>&1; then "
+                "if command -v apt-get >/dev/null 2>&1; then "
+                "apt-get update && apt-get install -y git; "
+                "elif command -v apk >/dev/null 2>&1; then "
+                "apk add --no-cache git; "
+                "elif command -v yum >/dev/null 2>&1; then "
+                "yum install -y git; "
+                "else echo 'Git is required for Codex plugins' >&2; exit 1; "
+                "fi; fi && command -v git >/dev/null"
+            ),
+            env={"DEBIAN_FRONTEND": "noninteractive"},
+        )
+        # Trial containers have no GitHub SSH key; use HTTPS for public repos.
+        await self.exec_as_agent(
+            environment,
+            command='git config --global url."https://github.com/".insteadOf "git@github.com:"',
+        )
 
     @staticmethod
     def _is_bedrock_mode() -> bool:
@@ -129,6 +186,20 @@ class Codex(_HarborCodex):
         )
 
     def _build_register_mcp_servers_command(self) -> str | None:
+        """Write MCP config, then install plugins in Harbor's trial CODEX_HOME."""
+        base_cmd = self._build_mcp_config_command()
+        if not self._plugins:
+            return base_cmd
+
+        parts = [base_cmd] if base_cmd else []
+        parts.append('if [ -s "$HOME/.nvm/nvm.sh" ]; then . "$HOME/.nvm/nvm.sh"; fi')
+        for source in self._marketplaces:
+            parts.append(f"codex plugin marketplace add {shlex.quote(source)}")
+        for spec in self._plugins:
+            parts.append(f"codex plugin add {shlex.quote(spec)}")
+        return " && ".join(parts)
+
+    def _build_mcp_config_command(self) -> str | None:
         r"""Write MCP server config to ``$CODEX_HOME/config.toml`` with correct keys.
 
         Harbor's base implementation collapses a stdio server's ``command`` and

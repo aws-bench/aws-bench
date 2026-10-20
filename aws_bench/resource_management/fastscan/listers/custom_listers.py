@@ -83,6 +83,22 @@ def list_bedrock_prompt_routers(session: SessionLike) -> list[str]:
     ]
 
 
+def list_gamelift_custom_locations(session: SessionLike) -> list[str]:
+    """Customer-created GameLift custom locations (AWS-managed locations filtered server-side).
+
+    ``ListLocations`` also returns every AWS Region / Local Zone GameLift can host in
+    (``us-east-1``, ``us-east-1-atl-2``, …); those are AWS-owned and undeletable, so
+    ``Filters=["CUSTOM"]`` keeps only the account's own (``custom-*``) locations.
+    """
+    client = session.client("gamelift", config=RETRY_CONFIG)
+    return [
+        loc["LocationName"]
+        for page in client.get_paginator("list_locations").paginate(Filters=["CUSTOM"])
+        for loc in page.get("Locations", [])
+        if loc.get("LocationName")
+    ]
+
+
 def list_cloudformation_stacks(session: SessionLike) -> list[str]:
     """Stack ids in any non-deleted status."""
     client = session.client("cloudformation", config=RETRY_CONFIG)
@@ -3111,6 +3127,8 @@ _LISTERS: tuple[Lister, ...] = (
         describe_ec2_vpc_endpoint_services,
         "AWS::EC2::VPCEndpointService",
     ),
+    # Reuses the simple row's op key so the generated region-skip entry still applies.
+    Lister("gamelift", "list_locations", list_gamelift_custom_locations, "AWS::GameLift::Location"),
     # Supplementary listers pinned to their exact CFN type.
     Lister(
         "cloudfront",

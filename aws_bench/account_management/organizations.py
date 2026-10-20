@@ -1,7 +1,7 @@
 """Thin wrapper around the boto3 Organizations client.
 
 Manages AWS Organizations resources including Organizational Units (OUs),
-member accounts, and tagging.
+member accounts, tagging, and member-account region opt-in.
 """
 
 from __future__ import annotations
@@ -32,6 +32,7 @@ from aws_bench.account_management.exceptions import (
 )
 from aws_bench.account_management.models import OrgInfo
 from aws_bench.account_management.utils import raise_account_creation_timeout
+from aws_bench.constants import DEFAULT_REGION
 from aws_bench.logging.logger import get_logger
 from aws_bench.utils.credentials_provider import CredentialProvider
 
@@ -65,6 +66,9 @@ class OrganizationsClient:
         """Initialize the organizations client."""
         self._credentials_provider = CredentialProvider.get()
         self._client = self._credentials_provider.session.client("organizations")
+        self._account_client = self._credentials_provider.session.client(
+            "account", region_name=DEFAULT_REGION
+        )
 
     # ── Org info ──
 
@@ -435,11 +439,7 @@ class OrganizationsClient:
     def ensure_region_restriction_scp(
         self, scenario_name: str, allowed_regions: list[str], account_ids: list[str]
     ) -> None:
-        """Create a per-scenario SCP and attach it to each account.
-
-        Idempotent — reuses existing policy by name, updates content if
-        regions changed, and skips accounts that already have it attached.
-        """
+        """Create or update the per-scenario SCP and attach it to each account; idempotent."""
         scp_name = f"{self.REGION_RESTRICTION_SCP_PREFIX}-{scenario_name}"
         self._enable_scp_policy_type()
 
@@ -454,7 +454,7 @@ class OrganizationsClient:
             current = self._client.describe_policy(PolicyId=policy_id)
             if json.loads(current["Policy"]["Content"]) != json.loads(desired_content):
                 self._client.update_policy(PolicyId=policy_id, Content=desired_content)
-                logger.info(f"Updated SCP '{scp_name}' with new regions")
+                logger.info(f"Updated SCP '{scp_name}' policy content")
 
         for account_id in account_ids:
             if self._is_policy_attached(policy_id, account_id):
@@ -464,30 +464,25 @@ class OrganizationsClient:
             logger.info(f"Attached SCP {policy_id} to account {account_id}")
 
     def _build_region_restriction_policy(self, allowed_regions: list[str]) -> str:
-        """Return the JSON string of the region restriction policy document."""
         policy_doc = {
             "Version": "2012-10-17",
             "Statement": [
                 {
                     "Sid": "DenyOutOfScopeRegions",
                     "Effect": "Deny",
-                    # This is mostly to unblock data plane APIs of some global services
+                    # Global-endpoint calls carry the endpoint's region as aws:RequestedRegion.
                     "NotAction": [
-                        # Identity & access (global, always us-east-1)
                         "iam:*",
                         "sts:*",
                         "organizations:*",
-                        # Edge / network (global, fixed region endpoints)
                         "route53:*",
                         "route53domains:*",
                         "cloudfront:*",
                         "globalaccelerator:*",
                         "networkmanager:*",
-                        # Security (global, always us-east-1)
                         "shield:*",
                         "wafv2:*",
                         "waf:*",
-                        # Billing & observability (global, always us-east-1)
                         "budgets:*",
                         "ce:*",
                         "support:*",
@@ -499,7 +494,19 @@ class OrganizationsClient:
                             "aws:RequestedRegion": sorted(allowed_regions),
                         }
                     },
-                }
+                },
+                # SCPs do not bind the management account, which makes aws-bench's opt-in calls.
+                {
+                    "Sid": "DenyAccountSettingChanges",
+                    "Effect": "Deny",
+                    "Action": [
+                        "account:EnableRegion",
+                        "account:DisableRegion",
+                        "account:Put*",
+                        "account:Delete*",
+                    ],
+                    "Resource": "*",
+                },
             ],
         }
         return json.dumps(policy_doc)
@@ -513,6 +520,27 @@ class OrganizationsClient:
             Type="SERVICE_CONTROL_POLICY",
         )
         return response["Policy"]["PolicySummary"]["Id"]
+
+    # ── Region opt-in ──
+
+    def enable_account_management_access(self) -> None:
+        """Enable trusted access for AWS Account Management. Idempotent.
+
+        The management account needs it to read or change a member account's regions.
+        """
+        self._client.enable_aws_service_access(ServicePrincipal="account.amazonaws.com")
+
+    def get_region_opt_status(self, account_id: str, region: str) -> str:
+        """Return a member account's ``RegionOptStatus`` for ``region``."""
+        response = self._account_client.get_region_opt_status(
+            AccountId=account_id, RegionName=region
+        )
+        return response["RegionOptStatus"]
+
+    def enable_region(self, account_id: str, region: str) -> None:
+        """Request opt-in of ``region`` for a member account; AWS completes it asynchronously."""
+        self._account_client.enable_region(AccountId=account_id, RegionName=region)
+        logger.info(f"Requested opt-in of region {region} for account {account_id}")
 
     # ── Terminate / Teardown ──
 
