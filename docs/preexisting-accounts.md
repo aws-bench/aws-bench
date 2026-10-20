@@ -30,7 +30,7 @@ Pass the file as a global option, before the command:
 
 ```bash
 uv run aws-bench --account-config ./accounts.yaml env init \
-  --env-name acme-benchmark -d aws-bench-quickstart@0.7.0
+  --env-name acme-benchmark -d aws-bench-quickstart
 ```
 
 `AWSBENCH_ACCOUNT_CONFIG=/path/to/accounts.yaml` is equivalent. A config is an

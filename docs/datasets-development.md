@@ -312,7 +312,7 @@ my-task/
 
 ### Writing `solution/solve.sh` (optional)
 
-A reference solution that demonstrates how to complete the task correctly. Used for validation during development — you can run it to confirm the verifier produces a passing score. Not executed during benchmark runs.
+A reference solution that completes the task correctly. The `oracle` agent (`-a oracle`) replays it instead of calling a model, so you can confirm the verifier awards a passing score. It is not executed when a real agent runs. Every task published so far ships one.
 
 ### Writing `task.toml`
 

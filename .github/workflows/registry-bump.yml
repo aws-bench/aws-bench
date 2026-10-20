@@ -1,0 +1,50 @@
+name: Registry Bump
+
+on:
+  workflow_dispatch:
+    inputs:
+      datasets-ref:
+        description: aws-bench-datasets ref to pin (branch, tag or commit)
+        default: main
+  schedule:
+    - cron: "0 6 * * 1"
+
+permissions: {}
+
+jobs:
+  registry-bump:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    env:
+      DATASETS_REF: ${{ inputs.datasets-ref || 'main' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: aws-bench/aws-bench-datasets
+          ref: ${{ env.DATASETS_REF }}
+          path: aws-bench-datasets
+          # update_registry.py pins each entry to the last commit that touched its path;
+          # a shallow clone would pin everything to HEAD.
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+      - name: Regenerate registry.json
+        run: python3 scripts/update_registry.py --datasets-path aws-bench-datasets --add-unified --output registry.json
+      - uses: peter-evans/create-pull-request@5f6978faf089d4d20b00c7766989d076bb2fc7f1 # v8.1.1
+        with:
+          # Same token as release-please.yml: the default token cannot start CI on the PR it opens.
+          token: ${{ secrets.RELEASE_PLEASE_TOKEN || secrets.GITHUB_TOKEN }}
+          add-paths: registry.json
+          branch: chore/registry-bump
+          delete-branch: true
+          commit-message: "chore(registry): pin datasets to ${{ env.DATASETS_REF }}"
+          title: "chore(registry): pin datasets to ${{ env.DATASETS_REF }}"
+          body: |
+            Regenerated `registry.json` against `aws-bench/aws-bench-datasets@${{ env.DATASETS_REF }}`.

@@ -83,7 +83,7 @@ Each scenario is published as a standalone dataset, so you can run just one envi
 Run any of them by name, for example:
 
 ```bash
-uv run aws-bench run -d ec2-multiregion@latest --env-name my-bench -a claude-code -m <model-id>
+uv run aws-bench run -d ec2-multiregion --env-name my-bench -a claude-code -m <model-id>
 ```
 
 For the complete list of agents, models, and datasets you can pass to `-a` / `-m` / `-d`, see [Supported agents, models, and datasets](docs/getting-started.md#supported-agents-models-and-datasets).

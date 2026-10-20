@@ -155,6 +155,19 @@ This requires a local checkout of `aws-bench-datasets` at `../aws-bench-datasets
 
 Contributors can run this locally, for example to make sure the framework picks up local dataset changes in a private live run. The release of new datasets versions in the registry will be usually driven by the project maintainers.
 
+The same regeneration runs in GitHub Actions as the **Registry Bump** workflow: on a manual dispatch (with the datasets ref to pin, default `main`) and weekly. When pins change, it opens a pull request with the new `registry.json`, using the `RELEASE_PLEASE_TOKEN` secret described under Releases.
+
+## Maintainer: Releases
+
+Releases are cut by [release-please](https://github.com/googleapis/release-please-action). A maintainer starts a release by running the Release Please workflow by hand (Actions > Release Please > Run workflow). The run opens or updates one release pull request that bumps the version in `pyproject.toml` and adds the next `CHANGELOG.md` section, computed from the conventional commits since the last tag. Merging that pull request creates the tag and the GitHub Release: the workflow run on that push publishes the merged release and never opens pull requests on its own.
+
+- Re-pin the registry to the dataset release first, then run the workflow again to refresh the release pull request with the new commits. New merges to `main` do not refresh an open release pull request on their own, and a refresh dismisses earlier approvals.
+- Do not hand-edit `CHANGELOG.md` sections that release-please generates, and do not run `cz bump`; version, changelog, tag and release come from the release pull request.
+- `release-please-config.json` and `.release-please-manifest.json` hold the configuration and the current version. A `release-as` entry forces the next version; remove it once that release ships.
+- Store a fine-grained personal access token (contents, pull requests and issues: read and write, on both repositories) as the `RELEASE_PLEASE_TOKEN` secret. GitHub starts no workflow for pull requests opened with the default `GITHUB_TOKEN`, so CI would not run on the release pull request and the required status checks would stay missing. The same secret serves the Registry Bump workflow. A GitHub App token cannot be stored as a secret, because it expires after one hour.
+- The token owner cannot approve the pull requests opened in their name; another team member reviews the release and registry pull requests.
+- The release pull request does not touch `uv.lock`. Run `uv lock` right after the merge, in the same pull request that removes `release-as`. Do not commit to the release branch; release-please force-pushes it on every run.
+
 ## Troubleshooting
 
 | Problem | Solution |
