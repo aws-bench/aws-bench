@@ -730,6 +730,7 @@ def test_is_service_managed_studio_stack_matches_name_and_arn():
         "arn:aws:cloudformation:us-east-1:123456789012:stack/my-app/uuid"
     )
 
+
 # moto does not enforce termination protection on DeleteStack, so the protected-stack
 # path is exercised against a mocked CloudFormation client.
 _BUILD_CLIENT_PATH = "aws_bench.resource_management.cleanup.resource_cleaner.build_client"
