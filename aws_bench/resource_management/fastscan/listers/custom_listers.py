@@ -755,14 +755,16 @@ def list_ec2_describe_subnet_route_table_associations(session: SessionLike) -> l
 
 
 def list_ec2_describe_subnet_nacl_associations(session: SessionLike) -> list[str]:
-    """Subnet↔NACL associations (aclassoc-...), excluding each default VPC's default-NACL ones."""
+    """Subnet↔NACL associations (aclassoc-...), excluding every VPC's default-NACL ones."""
     client = session.client("ec2", config=RETRY_CONFIG)
-    default_ids = default_vpc_ids(client)
     out: list[str] = []
     for page in client.get_paginator("describe_network_acls").paginate():
         for n in page.get("NetworkAcls", []):
-            # Skip the default VPC's default-NACL associations (undeletable, regenerating).
-            if n.get("IsDefault") and n.get("VpcId") in default_ids:
+            # Skip default-NACL associations in any VPC: an association can only be replaced, never
+            # deleted, so a subnet on its default NACL is already reset. Moving it back there gives
+            # it a new id that reset could never remove. A task-created VPC's subnets are still
+            # reported as resources, and deleting them removes their associations.
+            if n.get("IsDefault"):
                 continue
             for a in n.get("Associations", []):
                 if a.get("NetworkAclAssociationId"):

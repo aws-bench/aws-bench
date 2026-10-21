@@ -782,16 +782,15 @@ def test_ec2_subnet_nacl_associations_all_ids():
     ]
 
 
-def test_ec2_subnet_nacl_associations_excludes_default_vpc():
-    """The default VPC's default-NACL associations are dropped; everything else is kept.
+def test_ec2_subnet_nacl_associations_excludes_default_nacls():
+    """Every VPC's default-NACL associations are dropped; custom-NACL ones are kept.
 
-    Kept: a custom (non-default) NACL's association in the default VPC, and a NON-default
-    VPC's default-NACL association (a task-created VPC's NACL is real drift). Dropped: only
-    the default VPC's default-NACL associations, which are AWS-created and undeletable.
+    Dropped: default-NACL associations in the default VPC and in a NON-default VPC (e.g. a
+    subnet moved to a custom NACL and back, which gets a new id that reset cannot remove).
+    Kept: custom-NACL associations in either VPC, which reset undoes by moving the subnet back.
     """
     client = _FakeClient(
         paginated={
-            "describe_vpcs": [{"Vpcs": [{"VpcId": "vpc-default"}]}],
             "describe_network_acls": [
                 {
                     "NetworkAcls": [
@@ -816,6 +815,12 @@ def test_ec2_subnet_nacl_associations_excludes_default_vpc():
                             "VpcId": "vpc-app",
                             "Associations": [{"NetworkAclAssociationId": "aclassoc-app"}],
                         },
+                        {
+                            "NetworkAclId": "acl-app-custom",
+                            "IsDefault": False,
+                            "VpcId": "vpc-app",
+                            "Associations": [{"NetworkAclAssociationId": "aclassoc-app-custom"}],
+                        },
                     ]
                 }
             ],
@@ -823,7 +828,7 @@ def test_ec2_subnet_nacl_associations_excludes_default_vpc():
     )
     assert cl.list_ec2_describe_subnet_nacl_associations(_one_service("ec2", client)) == [
         "aclassoc-custom",
-        "aclassoc-app",
+        "aclassoc-app-custom",
     ]
 
 
