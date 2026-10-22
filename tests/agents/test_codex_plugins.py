@@ -108,7 +108,20 @@ def test_plugins_preserve_bedrock_and_mcp_config(tmp_path: Path, shell_env: dict
     assert code == 0
     assert tomllib.loads(config.read_text()) == {
         "model_provider": "amazon-bedrock",
-        "mcp_servers": {"tools": {"command": "uvx", "args": ["run"]}},
+        "mcp_servers": {
+            "tools": {
+                "command": "uvx",
+                "args": ["run"],
+                "env_vars": [
+                    "AWS_PROFILE",
+                    "AWS_DEFAULT_PROFILE",
+                    "AWS_REGION",
+                    "AWS_DEFAULT_REGION",
+                    "AWS_CONFIG_FILE",
+                    "AWS_SHARED_CREDENTIALS_FILE",
+                ],
+            }
+        },
     }
 
 
