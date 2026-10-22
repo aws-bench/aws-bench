@@ -135,7 +135,7 @@ class ResetManager:
 
             async def _reset_region_bounded(
                 region: str,
-            ) -> tuple[list[str], dict[str, list[dict]]]:
+            ) -> tuple[list[str], list[str], dict[str, list[dict]]]:
                 async with region_sem:
                     return await self._reset_region(
                         env_name,
@@ -156,14 +156,16 @@ class ResetManager:
             # Log every region's failure before raising the first, so a second
             # broken region isn't hidden until the operator re-runs.
             deleted_stacks: list[str] = []
+            deleted_baseline_stacks: list[str] = []
             global_resources: dict[str, list[dict]] = {}
             failures: list[tuple[str, BaseException]] = []
             for region, result in zip(regions, region_results):
                 if isinstance(result, BaseException):
                     failures.append((region, result))
                 else:
-                    region_deleted, region_globals = result
+                    region_deleted, region_baseline_deleted, region_globals = result
                     deleted_stacks.extend(region_deleted)
+                    deleted_baseline_stacks.extend(region_baseline_deleted)
                     for rtype, items in region_globals.items():
                         global_resources.setdefault(rtype, []).extend(items)
             for region, exc in failures:
@@ -184,22 +186,32 @@ class ResetManager:
             # region's dependent (e.g. a Bedrock KB) still needs mid-teardown.
             await self._delete_global_resources(global_resources, regions)
 
-            # Stacks that couldn't be reverted were deleted; they are recreated
-            # by re-running setup (idempotent deploy.sh recreates only the
-            # missing stack). Skip final verify — the stack is intentionally
-            # gone — and signal the CLI to redeploy.
+            # Stacks were deleted (and their region ran the fail-closed orphan
+            # census instead of Phase-4). Redeploy is needed ONLY when a BASELINE
+            # stack was deleted — re-running setup recreates it. A new (agent-
+            # created) stack is not in the CDK app, so deleting it needs no
+            # redeploy and no baseline recapture; the baseline is unchanged.
             if deleted_stacks:
-                logger.info(
-                    f"{len(deleted_stacks)} stack(s) deleted for re-setup: "
-                    f"{', '.join(deleted_stacks)}"
-                )
+                needs_redeploy = bool(deleted_baseline_stacks)
+                if needs_redeploy:
+                    logger.info(
+                        f"{len(deleted_baseline_stacks)} baseline stack(s) deleted for "
+                        f"re-setup: {', '.join(deleted_baseline_stacks)}"
+                    )
+                    reason = "Drift reverted; deleted stacks will be recreated by setup"
+                else:
+                    logger.info(
+                        f"{len(deleted_stacks)} new (agent-created) stack(s) deleted; no "
+                        f"redeploy needed (not in the baseline): {', '.join(deleted_stacks)}"
+                    )
+                    reason = "New (agent-created) stacks deleted; no redeploy needed"
                 return ResetResult(
                     account_id=account_id,
                     scenario_name=env_name,
                     success=True,
-                    reason="Drift reverted; deleted stacks will be recreated by setup",
+                    reason=reason,
                     details={"deleted_stacks": deleted_stacks},
-                    needs_redeploy=True,
+                    needs_redeploy=needs_redeploy,
                 )
 
             logger.info("Account successfully reset to baseline state")
@@ -264,7 +276,7 @@ class ResetManager:
         *,
         enumerable_elsewhere: set[str] | None = None,
         diagnosis_scan: ScanResult | None = None,
-    ) -> tuple[list[str], dict[str, list[dict]]]:
+    ) -> tuple[list[str], list[str], dict[str, list[dict]]]:
         """Reset one region against its slice of the baseline.
 
         Args:
@@ -283,9 +295,18 @@ class ResetManager:
                 later re-checks re-scan (state changes after deletes).
 
         Returns:
-            ``(deleted_stacks, global_resources)`` — the names of stacks deleted
-            for re-setup (revert impossible), and the global (account-wide) new
-            resources this region saw but deferred to the account-level pass.
+            ``(deleted_stacks, deleted_baseline_stacks, global_resources)``:
+            - ``deleted_stacks`` — ALL stacks deleted for re-setup (new +
+              baseline). Drives this region's own fail-closed path (skip Phase-4,
+              run the orphan census instead); must stay the full union.
+            - ``deleted_baseline_stacks`` — the subset that were BASELINE stacks
+              (status / drift remediation), i.e. the ones a DEPLOY-phase redeploy
+              actually recreates. New agent-created stacks are excluded: re-running
+              ``deploy.sh`` does not recreate them and the baseline is unchanged, so
+              a new-only deletion needs no redeploy. Used by ``reset_account`` to
+              set ``needs_redeploy``.
+            - ``global_resources`` — the global (account-wide) new resources this
+              region saw but deferred to the account-level pass.
 
         Raises:
             ResetFailure: On unrecoverable mismatch, restore failure, or if the
@@ -319,7 +340,7 @@ class ResetManager:
 
             if verify_result.success:
                 logger.debug("Already in baseline state, nothing to reset")
-                return [], {}
+                return [], [], {}
 
             self._check_recoverable(verify_result)
             # Stacks-first: delete new (agent-created) CloudFormation stacks WHOLE and
@@ -349,6 +370,11 @@ class ResetManager:
                 + status_outcome.deleted_stacks
                 + drift_outcome.deleted_stacks
             )
+            # BASELINE stacks only (status/drift remediation) — the ones a DEPLOY
+            # redeploy actually recreates. New agent-created stacks are excluded:
+            # they drive this region's fail-closed path below (via deleted_stacks)
+            # but must NOT trigger a redeploy (setup does not recreate them).
+            deleted_baseline_stacks = status_outcome.deleted_stacks + drift_outcome.deleted_stacks
 
             if deleted_stacks:
                 # Deleted stacks are intentionally absent (setup recreates them), so skip the
@@ -384,7 +410,7 @@ class ResetManager:
                         suggestion=(orphan_result.suggestion if orphan_result else None)
                         or "Run 'aws-bench env cleanup' for full reset",
                     )
-                return deleted_stacks, global_resources
+                return deleted_stacks, deleted_baseline_stacks, global_resources
 
             logger.debug("Phase 4: final verification")
             # Aggregate here too: if reset did not fully converge, report every
@@ -409,7 +435,7 @@ class ResetManager:
                         final_verify.suggestion or "Run 'aws-bench env cleanup' for full reset"
                     ),
                 )
-            return [], global_resources
+            return [], [], global_resources
 
     def _check_recoverable(self, verify_result: VerifyResult) -> None:
         """Check if account state can be recovered via reset."""

@@ -234,7 +234,7 @@ def test_reset_account_threads_cross_region_corroboration(temp_output_dir, sampl
 
     async def fake_reset_region(env_name, account_id, snapshot, region, scenario_dir, **kwargs):
         captured[region] = kwargs
-        return [], {}
+        return [], [], {}
 
     with (
         patch(
@@ -274,7 +274,7 @@ def test_reset_account_corroboration_empty_when_scans_fail(temp_output_dir, samp
 
     async def fake_reset_region(env_name, account_id, snapshot, region, scenario_dir, **kwargs):
         captured[region] = kwargs
-        return [], {}
+        return [], [], {}
 
     with (
         patch(
@@ -737,6 +737,171 @@ def test_reset_account_fails_closed_on_force_abandoned_even_when_scan_clean(
     mock_orphan.assert_called_once()
     assert result.success is False
     assert result.needs_redeploy is False
+    assert result.unresolved_orphans == abandoned
+
+
+# ===========================================================================
+# reset_account — redeploy optimization (new-stack deletion needs no redeploy)
+# ===========================================================================
+
+
+@mock_aws
+def test_reset_account_new_only_stack_deletion_skips_redeploy(temp_output_dir, sample_snapshot):
+    """Deleting only NEW (agent-created) stacks succeeds WITHOUT needs_redeploy.
+
+    A new stack is not in the baseline/CDK app, so re-running setup would not
+    recreate it and the baseline is unchanged — redeploy is wasted. The reset
+    still runs the fail-closed orphan census (here clean), but needs_redeploy
+    stays False so the trial skips the DEPLOY phase + baseline recapture.
+    """
+    session = boto3.Session(region_name="us-east-1")
+    manager = ResetManager(session, output_dir=temp_output_dir)
+
+    # A new agent-created CFN stack drives the stacks-first path.
+    new_resources = {"AWS::CloudFormation::Stack": [{"Identifier": "agent-stack-abc"}]}
+
+    with (
+        patch(
+            "aws_bench.resource_management.verify.manager.SnapshotManager.load_snapshot"
+        ) as mock_load,
+        patch(
+            "aws_bench.resource_management.verify.manager.VerifyManager.verify_account_state"
+        ) as mock_verify,
+        patch(
+            "aws_bench.resource_management.verify.manager.VerifyManager.find_orphan_resources",
+            return_value=None,
+        ),
+        patch(
+            "aws_bench.resource_management.reset.stack_restorer.StackRestorer._delete_for_resetup"
+        ) as mock_del,
+    ):
+        mock_load.return_value = sample_snapshot
+        mock_verify.return_value = VerifyResult(
+            success=False, reason="1 new stack", new_resources=new_resources
+        )
+
+        async def _del(stack_name):
+            return ResetupDeletion(RestoreOutcome.DELETED_NEEDS_REDEPLOY)
+
+        mock_del.side_effect = _del
+
+        result = asyncio.run(manager.reset_account("test-env", "123456789012"))
+
+    assert result.success
+    # New-stack-only deletion: the stack was removed, but NO redeploy is needed.
+    assert result.needs_redeploy is False
+    assert result.details is not None
+    assert result.details["deleted_stacks"] == ["agent-stack-abc"]
+
+
+@mock_aws
+def test_reset_account_new_plus_baseline_stack_deletion_needs_redeploy(
+    temp_output_dir, sample_snapshot
+):
+    """A mix of new + baseline stack deletion DOES need redeploy (for the baseline one)."""
+    session = boto3.Session(region_name="us-east-1")
+    manager = ResetManager(session, output_dir=temp_output_dir)
+
+    # A new stack AND a baseline stack with undetectable-drift (deleted for re-setup).
+    new_resources = {"AWS::CloudFormation::Stack": [{"Identifier": "agent-stack-abc"}]}
+    drift_differences = {
+        "baseline-stack": {
+            "baseline": [{"LogicalResourceId": "R", "StackResourceDriftStatus": "IN_SYNC"}],
+            "current": [{"LogicalResourceId": "R", "StackResourceDriftStatus": "MODIFIED"}],
+        }
+    }
+
+    with (
+        patch(
+            "aws_bench.resource_management.verify.manager.SnapshotManager.load_snapshot"
+        ) as mock_load,
+        patch(
+            "aws_bench.resource_management.verify.manager.VerifyManager.verify_account_state"
+        ) as mock_verify,
+        patch(
+            "aws_bench.resource_management.verify.manager.VerifyManager.find_orphan_resources",
+            return_value=None,
+        ),
+        patch(
+            "aws_bench.resource_management.reset.stack_restorer.StackRestorer._delete_for_resetup"
+        ) as mock_del_new,
+        patch(
+            "aws_bench.resource_management.reset.stack_restorer.StackRestorer.restore_stack"
+        ) as mock_restore,
+    ):
+        mock_load.return_value = sample_snapshot
+        mock_verify.return_value = VerifyResult(
+            success=False,
+            reason="new stack + drift",
+            new_resources=new_resources,
+            drift_differences=drift_differences,
+        )
+
+        async def _del(stack_name):
+            return ResetupDeletion(RestoreOutcome.DELETED_NEEDS_REDEPLOY)
+
+        async def _restore(*args, **kwargs):
+            return ResetupDeletion(RestoreOutcome.DELETED_NEEDS_REDEPLOY)
+
+        mock_del_new.side_effect = _del
+        mock_restore.side_effect = _restore
+
+        result = asyncio.run(manager.reset_account("test-env", "123456789012"))
+
+    assert result.success
+    # A baseline stack was deleted -> redeploy IS needed.
+    assert result.needs_redeploy is True
+    # Both the new and the baseline stack are recorded as deleted.
+    assert result.details is not None
+    assert set(result.details["deleted_stacks"]) == {"agent-stack-abc", "baseline-stack"}
+
+
+@mock_aws
+def test_reset_account_new_only_still_fails_closed_on_force_abandoned(
+    temp_output_dir, sample_snapshot
+):
+    """Skipping redeploy for new-only deletion must NOT skip the fail-closed check.
+
+    A new stack force-deleted with an abandoned resource must still fail the reset
+    (the orphan/abandoned verification runs regardless of the redeploy decision).
+    """
+    session = boto3.Session(region_name="us-east-1")
+    manager = ResetManager(session, output_dir=temp_output_dir)
+
+    new_resources = {"AWS::CloudFormation::Stack": [{"Identifier": "agent-stack-abc"}]}
+    abandoned = {"AWS::EC2::InternetGateway": [{"Identifier": "igw-abandoned"}]}
+
+    with (
+        patch(
+            "aws_bench.resource_management.verify.manager.SnapshotManager.load_snapshot"
+        ) as mock_load,
+        patch(
+            "aws_bench.resource_management.verify.manager.VerifyManager.verify_account_state"
+        ) as mock_verify,
+        patch(
+            "aws_bench.resource_management.verify.manager.VerifyManager.find_orphan_resources",
+            return_value=None,
+        ) as mock_orphan,
+        patch(
+            "aws_bench.resource_management.reset.stack_restorer.StackRestorer._delete_for_resetup"
+        ) as mock_del,
+    ):
+        mock_load.return_value = sample_snapshot
+        mock_verify.return_value = VerifyResult(
+            success=False, reason="1 new stack", new_resources=new_resources
+        )
+
+        async def _del(stack_name):
+            return ResetupDeletion(RestoreOutcome.DELETED_NEEDS_REDEPLOY, abandoned=abandoned)
+
+        mock_del.side_effect = _del
+
+        result = asyncio.run(manager.reset_account("test-env", "123456789012"))
+
+    # Redeploy was skipped (new-only), but the fail-closed check still ran and the
+    # abandoned resource fails the reset by name.
+    mock_orphan.assert_called_once()
+    assert result.success is False
     assert result.unresolved_orphans == abandoned
 
 
