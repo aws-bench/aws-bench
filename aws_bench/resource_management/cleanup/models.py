@@ -81,6 +81,24 @@ def _stack_name_from_identifier(identifier: str) -> str:
     return identifier
 
 
+def stack_region_and_name(identifier: str, default_region: str) -> tuple[str, str]:
+    """Return ``(region, stack_name)`` for a CloudFormation identifier (ARN or name).
+
+    The region is read from a stack ARN
+    (``arn:aws:cloudformation:<region>:<account>:stack/<name>/<id>``); a bare name
+    has no region, so ``default_region`` is used. The stack id (UUID) is dropped on
+    purpose: a stack deleted and recreated under the same name gets a new id, but
+    ``(region, name)`` still identifies it as the same logical stack.
+    """
+    name = _stack_name_from_identifier(identifier)
+    region = default_region
+    if identifier.startswith("arn:") and ":stack/" in identifier:
+        parts = identifier.split(":")
+        if len(parts) > 3 and parts[3]:
+            region = parts[3]
+    return region, name
+
+
 def is_service_managed_studio_stack(identifier: str) -> bool:
     """Return True for a Managed Service for Apache Flink "Studio" backing stack.
 

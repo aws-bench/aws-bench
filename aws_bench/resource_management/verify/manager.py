@@ -457,6 +457,23 @@ class VerifyManager:
             enumerable_elsewhere=enumerable_elsewhere,
         )
 
+    def check_baseline_stack_status(self, snapshot: Snapshot) -> VerifyResult | None:
+        """Re-run only the (name-keyed) baseline stack-status check.
+
+        Reset's backstop when it deleted stacks but decided no redeploy is needed:
+        every baseline stack must then still exist in its baseline status. One
+        ``list_stacks`` call per region — no template or drift checks.
+
+        Args:
+            snapshot: The (region-filtered) baseline snapshot.
+
+        Returns:
+            None if every baseline stack is present and in its baseline status;
+            otherwise a failed VerifyResult (``stack_status_failures`` populated for
+            mismatches such as ``MISSING``, absent for a list-API error).
+        """
+        return self._check_stack_status(snapshot.stack_metadata)
+
     def scan_baseline_types(self, snapshot: Snapshot) -> ScanResult:
         """Fast-scan this region for the snapshot's baseline resource types.
 
