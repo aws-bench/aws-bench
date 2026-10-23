@@ -1758,6 +1758,7 @@ def test_reset_account_global_recheck_fails_closed_on_throttle(temp_output_dir):
 # ===========================================================================
 
 
+@mock_aws
 def test_reset_account_stack_cascade_removes_global_child_no_race(temp_output_dir):
     """Stack cascade removing a global child composes with the deferred global pass.
 
@@ -1834,6 +1835,8 @@ def test_reset_account_stack_cascade_removes_global_child_no_race(temp_output_di
             return_value=None,
         ),
         patch("aws_bench.resource_management.reset.manager.CloudControlManager") as mock_ccm,
+        # Skip Phase 0's fast-scan Lambda invoke (retries + backoff); no corroboration.
+        patch.object(manager, "_scan_baseline_types", return_value=None),
     ):
         mock_cleaner_cls.return_value.cleanup = _cleanup
         # Authoritative existence re-check in the account-level global pass: the
@@ -1841,13 +1844,14 @@ def test_reset_account_stack_cascade_removes_global_child_no_race(temp_output_di
         mock_ccm.return_value.resource_exists.return_value = False
         result = asyncio.run(manager.reset_account("test-env", "123456789012"))
 
-    # Composition holds: the stack was deleted whole and the reset succeeds with
-    # needs_redeploy. The global role is deferred OUT of the per-region sweep (so a
+    # Composition holds: the stack was deleted whole and the reset succeeds, reporting
+    # it as deleted. The global role is deferred OUT of the per-region sweep (so a
     # region never race-deletes it); the account-level pass then attempts it and
     # the authoritative existence re-check finds it already gone (the cascade
     # removed it) -> no double-delete failure, no false orphan.
     assert result.success
-    assert result.needs_redeploy
+    assert result.details is not None
+    assert result.details["deleted_stacks"] == ["agent-stack-abc"]
     assert deleted_stacks == ["agent-stack-abc"]
     # The new CFN stack is never swept as an individual resource (it is deleted
     # whole by stacks-first, excluded from _delete_new_resources).
@@ -1861,6 +1865,7 @@ def test_reset_account_stack_cascade_removes_global_child_no_race(temp_output_di
     assert len(role_calls) <= 1  # at most the single account-level pass, never per-region
 
 
+@mock_aws
 def test_reset_account_global_pass_fails_closed_if_cascade_left_global(temp_output_dir):
     """If a stack cascade did NOT actually remove the global child, reset fails closed.
 
@@ -1911,6 +1916,8 @@ def test_reset_account_global_pass_fails_closed_if_cascade_left_global(temp_outp
         patch("aws_bench.resource_management.reset.manager.ResourceCleaner") as mock_cleaner_cls,
         patch.object(manager._verify_mgr.__class__, "find_orphan_resources", return_value=None),
         patch("aws_bench.resource_management.reset.manager.CloudControlManager") as mock_ccm,
+        # Skip Phase 0's fast-scan Lambda invoke (retries + backoff); no corroboration.
+        patch.object(manager, "_scan_baseline_types", return_value=None),
     ):
         mock_cleaner_cls.return_value.cleanup = _cleanup
         # The cascade did NOT remove the role — it is still present at re-check.
