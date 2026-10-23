@@ -7,11 +7,15 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import boto3
 import pytest
+from botocore.exceptions import EndpointConnectionError
 from moto import mock_aws
 
 from aws_bench.account_management.models import ScenarioAccount
 from aws_bench.resource_management import deferred
 from aws_bench.resource_management.ccapi.models import Resource
+from aws_bench.resource_management.fastscan.listers.custom_listers import (
+    list_cloudformation_stacks,
+)
 from aws_bench.resource_management.reset.manager import ResetManager
 from aws_bench.resource_management.reset.models import (
     ResetFailure,
@@ -25,6 +29,7 @@ from aws_bench.resource_management.snapshot.models import (
     Snapshot,
     StackMetadata,
 )
+from aws_bench.resource_management.verify.comparators import find_new_resources
 from aws_bench.resource_management.verify.models import VerifyResult
 
 
@@ -771,6 +776,12 @@ def test_reset_account_new_only_stack_deletion_skips_redeploy(temp_output_dir, s
             "aws_bench.resource_management.verify.manager.VerifyManager.find_orphan_resources",
             return_value=None,
         ),
+        # The fixture's baseline stack isn't deployed in moto; the backstop is
+        # covered by the moto-backed tests below.
+        patch(
+            "aws_bench.resource_management.verify.manager.VerifyManager.check_baseline_stack_status",
+            return_value=None,
+        ),
         patch(
             "aws_bench.resource_management.reset.stack_restorer.StackRestorer._delete_for_resetup"
         ) as mock_del,
@@ -903,6 +914,359 @@ def test_reset_account_new_only_still_fails_closed_on_force_abandoned(
     mock_orphan.assert_called_once()
     assert result.success is False
     assert result.unresolved_orphans == abandoned
+
+
+def _stack_arn(region: str, name: str, stack_uuid: str) -> str:
+    return f"arn:aws:cloudformation:{region}:123456789012:stack/{name}/{stack_uuid}"
+
+
+def _run_reset_with_new_stacks(manager, snapshot, new_stack_ids: list[str]):
+    """Run reset_account where the census reports ``new_stack_ids`` as new stacks."""
+    new_resources = {"AWS::CloudFormation::Stack": [{"Identifier": s} for s in new_stack_ids]}
+    deleted: list[str] = []
+
+    async def _del(stack_name):
+        deleted.append(stack_name)
+        return ResetupDeletion(RestoreOutcome.DELETED_NEEDS_REDEPLOY)
+
+    with (
+        patch(
+            "aws_bench.resource_management.verify.manager.SnapshotManager.load_snapshot",
+            return_value=snapshot,
+        ),
+        patch(
+            "aws_bench.resource_management.verify.manager.VerifyManager.verify_account_state",
+            return_value=VerifyResult(success=False, reason="new", new_resources=new_resources),
+        ),
+        patch(
+            "aws_bench.resource_management.verify.manager.VerifyManager.find_orphan_resources",
+            return_value=None,
+        ),
+        patch(
+            "aws_bench.resource_management.reset.stack_restorer.StackRestorer._delete_for_resetup",
+            side_effect=_del,
+        ),
+    ):
+        result = asyncio.run(manager.reset_account("test-env", "123456789012"))
+    return result, deleted
+
+
+@mock_aws
+def test_reset_account_recreated_baseline_stack_still_redeploys(temp_output_dir):
+    """A baseline stack recreated under the same name (new StackId) is redeployed.
+
+    The census flags it as new by exact StackId, and the stacks-first pass deletes
+    it. It is still a baseline stack (same region + name), so the reset must set
+    needs_redeploy so setup recreates it — otherwise later trials run without it.
+    """
+    session = boto3.Session(region_name="us-east-1")
+    manager = ResetManager(session, output_dir=temp_output_dir)
+    old_arn = _stack_arn("us-east-1", "test-stack", "00000000-old")
+    new_arn = _stack_arn("us-east-1", "test-stack", "105d049b-new")
+    snapshot = Snapshot(
+        timestamp=datetime(2026, 4, 22, 10, 30, 0, tzinfo=timezone.utc),
+        account_id="123456789012",
+        environment_id="env-test",
+        scenario_hash="abc123",
+        drift_baseline={},
+        stack_metadata={
+            "test-stack": StackMetadata(
+                status="CREATE_COMPLETE", template_hash="sha256:x", region="us-east-1"
+            )
+        },
+        resource_ids={"AWS::CloudFormation::Stack": [{"Identifier": old_arn}]},
+        regions=["us-east-1"],
+    )
+
+    result, deleted = _run_reset_with_new_stacks(manager, snapshot, [new_arn])
+
+    assert deleted == [new_arn]
+    assert result.success
+    assert result.needs_redeploy is True
+
+
+@mock_aws
+def test_reset_account_recreated_per_region_stack_matches_via_arns(temp_output_dir):
+    """A per-region baseline stack (CDKToolkit) is matched from the snapshot's ARNs.
+
+    The multi-region merge keeps one stack_metadata entry per name (last region
+    wins), here us-west-2. A CDKToolkit recreated in us-east-1 must still count as a
+    baseline stack, which only the per-region stack ARNs in resource_ids can show.
+    """
+    session = boto3.Session(region_name="us-east-1")
+    manager = ResetManager(session, output_dir=temp_output_dir)
+    snapshot = Snapshot(
+        timestamp=datetime(2026, 4, 22, 10, 30, 0, tzinfo=timezone.utc),
+        account_id="123456789012",
+        environment_id="env-test",
+        scenario_hash="abc123",
+        drift_baseline={},
+        # Merge collapsed CDKToolkit to the us-west-2 entry.
+        stack_metadata={
+            "CDKToolkit": StackMetadata(
+                status="CREATE_COMPLETE", template_hash="sha256:x", region="us-west-2"
+            )
+        },
+        resource_ids={
+            "AWS::CloudFormation::Stack": [
+                {"Identifier": _stack_arn("us-east-1", "CDKToolkit", "aaaa-old")},
+                {"Identifier": _stack_arn("us-west-2", "CDKToolkit", "bbbb-old")},
+            ]
+        },
+        regions=["us-east-1"],
+    )
+    recreated = _stack_arn("us-east-1", "CDKToolkit", "cccc-new")
+
+    result, deleted = _run_reset_with_new_stacks(manager, snapshot, [recreated])
+
+    assert deleted == [recreated]
+    assert result.success
+    assert result.needs_redeploy is True
+
+
+def test_recreated_baseline_stacks_classification():
+    """Only same (region, name) stacks count as recreated baseline stacks."""
+    snapshot = Snapshot(
+        timestamp=datetime(2026, 4, 22, 10, 30, 0, tzinfo=timezone.utc),
+        account_id="123456789012",
+        environment_id="env-test",
+        scenario_hash="abc123",
+        drift_baseline={},
+        stack_metadata={},
+        resource_ids={
+            "AWS::CloudFormation::Stack": [
+                {"Identifier": _stack_arn("us-east-1", "test-stack", "old")},
+            ]
+        },
+        regions=["us-east-1"],
+    )
+    same_name_new_id = _stack_arn("us-east-1", "test-stack", "new")
+    other_name = _stack_arn("us-east-1", "agent-stack", "new")
+    same_name_other_region = _stack_arn("us-west-2", "test-stack", "new")
+
+    got = ResetManager._recreated_baseline_stacks(
+        [same_name_new_id, other_name, same_name_other_region], snapshot, "us-east-1"
+    )
+
+    assert got == [same_name_new_id]
+
+
+# ===========================================================================
+# reset_account — backstop + moto end-to-end (real CFN, lister, and diff)
+# ===========================================================================
+
+_TOPIC_TEMPLATE = '{"Resources": {"Topic": {"Type": "AWS::SNS::Topic", "Properties": {}}}}'
+
+
+def _deploy_stack(name: str) -> str:
+    """Create a one-topic stack in moto (us-east-1) and return its StackId ARN."""
+    cfn = boto3.client("cloudformation", region_name="us-east-1")
+    return cfn.create_stack(StackName=name, TemplateBody=_TOPIC_TEMPLATE)["StackId"]
+
+
+def _moto_snapshot(stacks: dict[str, tuple[str, str]]) -> Snapshot:
+    """Baseline snapshot of ``{name: (stack_arn, status)}`` in us-east-1."""
+    return Snapshot(
+        timestamp=datetime(2026, 4, 22, 10, 30, 0, tzinfo=timezone.utc),
+        account_id="123456789012",
+        environment_id="env-test",
+        scenario_hash="abc123",
+        drift_baseline={},
+        stack_metadata={
+            name: StackMetadata(status=status, template_hash="sha256:x", region="us-east-1")
+            for name, (_, status) in stacks.items()
+        },
+        resource_ids={
+            "AWS::CloudFormation::Stack": [{"Identifier": arn} for arn, _ in stacks.values()]
+        },
+        regions=["us-east-1"],
+    )
+
+
+def _run_reset_deleting_in_moto(manager, snapshot, new_resources: dict[str, list[dict]]):
+    """Run reset_account; the stacks-first pass really deletes the stacks in moto.
+
+    Only the census (verify_account_state / find_orphan_resources) is stubbed; the
+    backstop's stack-status check runs for real against moto.
+    """
+    cfn = boto3.client("cloudformation", region_name="us-east-1")
+    deleted: list[str] = []
+
+    async def _del(stack_name):
+        cfn.delete_stack(StackName=stack_name)
+        deleted.append(stack_name)
+        return ResetupDeletion(RestoreOutcome.DELETED_NEEDS_REDEPLOY)
+
+    with (
+        patch(
+            "aws_bench.resource_management.verify.manager.SnapshotManager.load_snapshot",
+            return_value=snapshot,
+        ),
+        patch(
+            "aws_bench.resource_management.verify.manager.VerifyManager.verify_account_state",
+            return_value=VerifyResult(success=False, reason="new", new_resources=new_resources),
+        ),
+        patch(
+            "aws_bench.resource_management.verify.manager.VerifyManager.find_orphan_resources",
+            return_value=None,
+        ),
+        patch(
+            "aws_bench.resource_management.reset.stack_restorer.StackRestorer._delete_for_resetup",
+            side_effect=_del,
+        ),
+    ):
+        result = asyncio.run(manager.reset_account("test-env", "123456789012"))
+    return result, deleted
+
+
+@mock_aws
+def test_reset_account_new_only_backstop_passes_when_baseline_intact(temp_output_dir):
+    """Deleting a genuinely new stack leaves the baseline intact: backstop passes, no redeploy."""
+    baseline_arn = _deploy_stack("baseline-stack")
+    agent_arn = _deploy_stack("agent-stack")
+    snapshot = _moto_snapshot({"baseline-stack": (baseline_arn, "CREATE_COMPLETE")})
+    manager = ResetManager(boto3.Session(region_name="us-east-1"), output_dir=temp_output_dir)
+
+    result, deleted = _run_reset_deleting_in_moto(
+        manager, snapshot, {"AWS::CloudFormation::Stack": [{"Identifier": agent_arn}]}
+    )
+
+    assert deleted == [agent_arn]
+    assert result.success
+    assert result.needs_redeploy is False
+
+
+@mock_aws
+def test_reset_account_backstop_redeploys_baseline_stack_classifier_missed(temp_output_dir):
+    """A baseline stack the classifier misses is caught by the backstop and redeployed.
+
+    Simulates a classifier gap (``_recreated_baseline_stacks`` returns nothing), so
+    reset first concludes "new stacks only". The stack really is gone in moto, so the
+    backstop's live status check reports it MISSING and upgrades to a redeploy.
+    """
+    _deploy_stack("baseline-stack")
+    old_arn = "arn:aws:cloudformation:us-east-1:123456789012:stack/baseline-stack/old"
+    # The live stack is the recreated one (new StackId), reported as new by the census.
+    live_arn = boto3.client("cloudformation", region_name="us-east-1").describe_stacks(
+        StackName="baseline-stack"
+    )["Stacks"][0]["StackId"]
+    snapshot = _moto_snapshot({"baseline-stack": (old_arn, "CREATE_COMPLETE")})
+    manager = ResetManager(boto3.Session(region_name="us-east-1"), output_dir=temp_output_dir)
+
+    with patch.object(ResetManager, "_recreated_baseline_stacks", return_value=[]):
+        result, deleted = _run_reset_deleting_in_moto(
+            manager, snapshot, {"AWS::CloudFormation::Stack": [{"Identifier": live_arn}]}
+        )
+
+    assert deleted == [live_arn]
+    assert result.success
+    assert result.needs_redeploy is True
+
+
+@mock_aws
+def test_reset_account_backstop_fails_closed_on_status_mismatch(temp_output_dir):
+    """A baseline stack present but not in its baseline status fails the reset closed."""
+    baseline_arn = _deploy_stack("baseline-stack")
+    agent_arn = _deploy_stack("agent-stack")
+    # Baseline recorded UPDATE_COMPLETE; moto reports CREATE_COMPLETE.
+    snapshot = _moto_snapshot({"baseline-stack": (baseline_arn, "UPDATE_COMPLETE")})
+    manager = ResetManager(boto3.Session(region_name="us-east-1"), output_dir=temp_output_dir)
+
+    result, _ = _run_reset_deleting_in_moto(
+        manager, snapshot, {"AWS::CloudFormation::Stack": [{"Identifier": agent_arn}]}
+    )
+
+    assert result.success is False
+    assert result.needs_redeploy is False
+    assert "baseline-stack" in result.reason
+    assert "not in baseline status" in result.reason
+
+
+@pytest.mark.parametrize(
+    "backstop_patch",
+    [
+        # list_stacks ClientError (e.g. AccessDenied) -> StackInspector's API-error result.
+        {
+            "return_value": VerifyResult(
+                success=False,
+                reason="Failed to list CloudFormation stacks",
+                details={"error": "AccessDenied"},
+            )
+        },
+        # Network-level error StackInspector doesn't convert.
+        {"side_effect": EndpointConnectionError(endpoint_url="https://cloudformation")},
+    ],
+    ids=["client-error", "network-error"],
+)
+@mock_aws
+def test_reset_account_backstop_falls_back_to_redeploy_on_list_error(
+    temp_output_dir, backstop_patch
+):
+    """If the backstop cannot list stacks, the reset redeploys instead of skipping it.
+
+    An inconclusive check must not skip the redeploy (the bug it guards against),
+    nor fail a reset that may be clean: it falls back to the pre-optimization
+    behaviour, redeploying the region's baseline stacks.
+    """
+    baseline_arn = _deploy_stack("baseline-stack")
+    agent_arn = _deploy_stack("agent-stack")
+    snapshot = _moto_snapshot({"baseline-stack": (baseline_arn, "CREATE_COMPLETE")})
+    manager = ResetManager(boto3.Session(region_name="us-east-1"), output_dir=temp_output_dir)
+
+    with patch(
+        "aws_bench.resource_management.verify.manager.VerifyManager.check_baseline_stack_status",
+        **backstop_patch,
+    ):
+        result, deleted = _run_reset_deleting_in_moto(
+            manager, snapshot, {"AWS::CloudFormation::Stack": [{"Identifier": agent_arn}]}
+        )
+
+    assert deleted == [agent_arn]
+    assert result.success
+    assert result.needs_redeploy is True
+
+
+@mock_aws
+def test_reset_account_recreated_baseline_stack_end_to_end(temp_output_dir):
+    """End to end: a same-name recreate flows through the real lister + diff and redeploys.
+
+    Uses the real fast-scan stack lister (StackId ARNs) to capture the baseline and
+    the real ``find_new_resources`` diff to build the census, so the ARN-vs-name
+    identity mismatch behind the original bug is exercised, not hand-built.
+    """
+    session = boto3.Session(region_name="us-east-1")
+    cfn = session.client("cloudformation")
+
+    old_arn = _deploy_stack("test-stack")
+    baseline_ids = {
+        "AWS::CloudFormation::Stack": [
+            {"Identifier": a} for a in list_cloudformation_stacks(session)
+        ]
+    }
+    assert baseline_ids["AWS::CloudFormation::Stack"] == [{"Identifier": old_arn}]
+    snapshot = _moto_snapshot({"test-stack": (old_arn, "CREATE_COMPLETE")})
+    assert snapshot.resource_ids == baseline_ids
+
+    # Agent: delete + recreate under the same name -> new StackId.
+    cfn.delete_stack(StackName="test-stack")
+    new_arn = _deploy_stack("test-stack")
+    assert new_arn != old_arn
+
+    current_ids = {
+        "AWS::CloudFormation::Stack": [
+            {"Identifier": a} for a in list_cloudformation_stacks(session)
+        ]
+    }
+    new_resources = find_new_resources(current_ids, snapshot.resource_ids)
+    # The census sees the recreated baseline stack as "new" (exact StackId diff).
+    assert new_resources == {"AWS::CloudFormation::Stack": [{"Identifier": new_arn}]}
+
+    manager = ResetManager(session, output_dir=temp_output_dir)
+    result, deleted = _run_reset_deleting_in_moto(manager, snapshot, new_resources)
+
+    assert deleted == [new_arn]
+    assert result.success
+    assert result.needs_redeploy is True
 
 
 # ===========================================================================

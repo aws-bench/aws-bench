@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 import boto3
+import botocore.exceptions
 
 from aws_bench.account_management.constants import ORG_ACCESS_ROLE
 from aws_bench.account_management.models import ScenarioAccount
@@ -21,6 +22,7 @@ from aws_bench.resource_management.cleanup.manager import CleanupManager
 from aws_bench.resource_management.cleanup.models import (
     StackResource,
     is_service_managed_studio_stack,
+    stack_region_and_name,
 )
 from aws_bench.resource_management.cleanup.resource_cleaner import ResourceCleaner
 from aws_bench.resource_management.deferred import deferred_scope, mark_deferred
@@ -370,11 +372,23 @@ class ResetManager:
                 + status_outcome.deleted_stacks
                 + drift_outcome.deleted_stacks
             )
-            # BASELINE stacks only (status/drift remediation) — the ones a DEPLOY
-            # redeploy actually recreates. New agent-created stacks are excluded:
-            # they drive this region's fail-closed path below (via deleted_stacks)
-            # but must NOT trigger a redeploy (setup does not recreate them).
-            deleted_baseline_stacks = status_outcome.deleted_stacks + drift_outcome.deleted_stacks
+            # BASELINE stacks only — the ones a DEPLOY redeploy actually recreates.
+            # Status/drift remediation always targets baseline stacks. A stack from
+            # the stacks-first pass is usually agent-created (no redeploy needed),
+            # BUT "new" there is an exact StackId diff: a baseline stack that was
+            # deleted and recreated under the same name (cdk destroy + deploy, a
+            # CDKToolkit re-bootstrap, or a prior redeploy whose recapture failed)
+            # gets a new StackId and lands in new_resources even though it is a
+            # baseline stack. Classify those by (region, name) so they still
+            # trigger the redeploy that recreates them.
+            recreated_baseline_stacks = self._recreated_baseline_stacks(
+                new_stack_outcome.deleted_stacks, snapshot, region
+            )
+            deleted_baseline_stacks = (
+                recreated_baseline_stacks
+                + status_outcome.deleted_stacks
+                + drift_outcome.deleted_stacks
+            )
 
             if deleted_stacks:
                 # Deleted stacks are intentionally absent (setup recreates them), so skip the
@@ -409,6 +423,13 @@ class ResetManager:
                         details={"unresolved_orphans": unresolved},
                         suggestion=(orphan_result.suggestion if orphan_result else None)
                         or "Run 'aws-bench env cleanup' for full reset",
+                    )
+                if not deleted_baseline_stacks and region_snapshot.stack_metadata:
+                    # Backstop for the "no redeploy needed" decision: the census above
+                    # skipped the stack checks, so a misclassified baseline stack would
+                    # otherwise silently stay deleted. One list_stacks call, name-keyed.
+                    deleted_baseline_stacks = await self._backstop_baseline_stacks(
+                        region_verify, region_snapshot
                     )
                 return deleted_stacks, deleted_baseline_stacks, global_resources
 
@@ -505,6 +526,131 @@ class ResetManager:
             )
 
         return StackResetOutcome(deleted_stacks=deleted_stacks, abandoned=abandoned)
+
+    @staticmethod
+    def _recreated_baseline_stacks(
+        deleted_new_stacks: list[str], snapshot: Snapshot, region: str
+    ) -> list[str]:
+        """Return the stacks-first deletions that are really recreated BASELINE stacks.
+
+        The census flags a stack as new by exact ``StackId``, so a baseline stack that
+        was deleted and recreated under the same name looks new. Matching on
+        ``(region, stack_name)`` against the baseline catches it, so its deletion is
+        treated as a baseline deletion and still triggers the redeploy that recreates
+        it.
+
+        Baseline keys come from the FULL snapshot's stack ARNs in ``resource_ids``,
+        which keep every region's stack. ``stack_metadata`` alone is not enough: the
+        multi-region merge keeps one entry per stack name (the last region wins), so
+        a per-region stack like ``CDKToolkit`` would be missed in the other regions.
+        ``stack_metadata`` is still added to cover bare-name identifiers and legacy
+        snapshots that record no region (treated as this region).
+
+        Args:
+            deleted_new_stacks: Identifiers (ARN or name) deleted by the stacks-first pass.
+            snapshot: The full, all-region baseline snapshot (not region-filtered).
+            region: The region being reset (default for bare names).
+
+        Returns:
+            The subset of ``deleted_new_stacks`` whose ``(region, name)`` is a baseline stack.
+        """
+        if not deleted_new_stacks:
+            return []
+        baseline_keys = {
+            stack_region_and_name(ident, region)
+            for r in snapshot.resource_ids.get(CFN_STACK_TYPE, [])
+            if (ident := r.get("Identifier", ""))
+        }
+        baseline_keys |= {
+            (meta.region or region, name) for name, meta in snapshot.stack_metadata.items()
+        }
+        recreated = [
+            s for s in deleted_new_stacks if stack_region_and_name(s, region) in baseline_keys
+        ]
+        if recreated:
+            logger.info(
+                "Stacks-first deleted %d recreated baseline stack(s) (same name, new "
+                "StackId); counting them as baseline deletions so setup recreates them: %s",
+                len(recreated),
+                ", ".join(recreated),
+            )
+        return recreated
+
+    @staticmethod
+    async def _backstop_baseline_stacks(
+        region_verify: VerifyManager, region_snapshot: Snapshot
+    ) -> list[str]:
+        """Confirm every baseline stack survived a reset that decided no redeploy is needed.
+
+        Re-runs only the name-keyed stack-status check (one ``list_stacks`` call). A
+        baseline stack that is MISSING here was deleted by a pass whose classification
+        missed it, so it is upgraded to a baseline deletion — the redeploy recreates it,
+        the same remediation a MISSING stack gets in Phase 2. If the stacks can't be
+        listed (API or network error), the check is inconclusive, so it falls back to
+        a redeploy — the pre-optimization behaviour, which recreates any stack that is
+        really missing — rather than failing a reset that may well be clean. Any other
+        status mismatch fails closed: a redeploy cannot vouch for a stack that exists
+        in the wrong state.
+
+        Args:
+            region_verify: The region's VerifyManager.
+            region_snapshot: The region-filtered baseline snapshot.
+
+        Returns:
+            Baseline stacks that need the redeploy: those found MISSING, or every
+            baseline stack in the region when the check was inconclusive. Empty when
+            all are intact.
+
+        Raises:
+            ResetFailure: On a non-MISSING status mismatch.
+        """
+        try:
+            result = await asyncio.to_thread(
+                region_verify.check_baseline_stack_status, region_snapshot
+            )
+        except botocore.exceptions.BotoCoreError as e:
+            # Network-level errors (EndpointConnectionError, ReadTimeoutError) aren't
+            # ClientErrors, so StackInspector doesn't convert them; treat them alike.
+            result = VerifyResult(
+                success=False,
+                reason="Failed to list CloudFormation stacks",
+                details={"error": str(e)},
+            )
+        if result is None:
+            return []
+        failures = result.stack_status_failures
+        if failures is None:
+            unconfirmed = sorted(region_snapshot.stack_metadata)
+            details = result.details
+            error = details.get("error", details) if isinstance(details, dict) else details
+            logger.warning(
+                "Could not confirm baseline stacks after a new-stacks-only reset (%s: %s); "
+                "redeploying to be safe: %s",
+                result.reason,
+                error,
+                ", ".join(unconfirmed),
+            )
+            return unconfirmed
+        unexpected = {n: i for n, i in failures.items() if i.get("actual") != "MISSING"}
+        if unexpected:
+            raise ResetFailure(
+                reason=(
+                    "Baseline stack(s) not in baseline status after reset: "
+                    + ", ".join(
+                        f"{n} (expected {i.get('expected')}, actual {i.get('actual')})"
+                        for n, i in unexpected.items()
+                    )
+                ),
+                details={"stack_status_failures": unexpected},
+                suggestion="Run 'aws-bench env cleanup' for full reset",
+            )
+        missing = sorted(failures)
+        logger.warning(
+            "Baseline stack(s) missing after a reset classified as new-stacks-only "
+            "(classifier missed them); scheduling redeploy: %s",
+            ", ".join(missing),
+        )
+        return missing
 
     async def _delete_new_resources(
         self, verify_result: VerifyResult, session: boto3.Session, region: str
