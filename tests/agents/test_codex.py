@@ -8,10 +8,11 @@ be escaped so it produces valid TOML.
 
 from __future__ import annotations
 
+import shlex
 import tomllib
 from pathlib import Path
 from typing import cast
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from harbor.models.task.config import MCPServerConfig
@@ -189,3 +190,58 @@ class TestCodexMcpServersMixed:
             "args": ["proxy@latest", "--skip-auth"],
         }
         assert parsed["mcp_servers"]["remote"] == {"url": "https://mcp.example.test/mcp"}
+
+
+async def _provider_toml(agent: Codex) -> str:
+    """Run the Bedrock provider-config step and return the TOML it appends."""
+    with patch.object(agent, "exec_as_agent", new_callable=AsyncMock) as exec_as_agent:
+        await agent._write_bedrock_provider_config(MagicMock())
+    command = exec_as_agent.call_args.kwargs["command"]
+    return shlex.split(command.split(" && ", 1)[1])[1]
+
+
+async def _written_provider_config(agent: Codex) -> dict:
+    return tomllib.loads(await _provider_toml(agent))
+
+
+@pytest.mark.asyncio
+class TestCodexBedrockRegion:
+    async def test_agent_env_region_survives_trial_override(
+        self, logs_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        monkeypatch.delenv("AWS_REGION", raising=False)
+        agent = Codex(logs_dir=logs_dir, extra_env={"AWS_REGION": "us-east-2"})
+        # An aws-bench trial sets the agent's AWS_REGION to the task's Region.
+        agent._extra_env["AWS_REGION"] = "us-west-2"
+
+        parsed = await _written_provider_config(agent)
+
+        assert parsed["model_provider"] == "amazon-bedrock"
+        assert parsed["model_providers"]["amazon-bedrock"]["aws"]["region"] == "us-east-2"
+
+    async def test_host_region_is_the_fallback(
+        self, logs_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        monkeypatch.setenv("AWS_REGION", "us-east-1")
+        parsed = await _written_provider_config(Codex(logs_dir=logs_dir))
+
+        assert parsed["model_providers"]["amazon-bedrock"]["aws"]["region"] == "us-east-1"
+
+    async def test_default_region(self, logs_dir: Path, monkeypatch: pytest.MonkeyPatch):
+        monkeypatch.delenv("AWS_REGION", raising=False)
+        parsed = await _written_provider_config(Codex(logs_dir=logs_dir))
+
+        assert parsed["model_providers"]["amazon-bedrock"]["aws"]["region"] == "us-east-2"
+
+    async def test_region_pin_stays_above_appended_tables(self, logs_dir: Path):
+        agent = Codex(logs_dir=logs_dir)
+        agent.mcp_servers = [_stdio_server("aws-mcp", "uvx", ["proxy@latest"])]
+        mcp_command = agent._build_register_mcp_servers_command()
+        assert mcp_command is not None
+        mcp_toml = mcp_command[mcp_command.index("'") + 1 : mcp_command.rindex("'")]
+
+        # config.toml is the provider block, then the tables harbor appends.
+        parsed = tomllib.loads(await _provider_toml(agent) + mcp_toml)
+
+        assert parsed["model_providers"]["amazon-bedrock"]["aws"]["region"]
+        assert "model_providers" not in parsed["mcp_servers"]["aws-mcp"]
