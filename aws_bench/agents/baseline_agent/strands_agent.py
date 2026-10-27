@@ -131,7 +131,7 @@ class StrandsAgent(BaseInstalledAgent):
             'export PATH="$HOME/.local/bin:$PATH"; '
             "uv run --python 3.13 "
             "--with strands-agents --with strands-agents-tools "
-            "--with boto3 --with botocore --with mcp "
+            "--with boto3 --with botocore --with 'mcp<2' "
             f"/installed-agent/main.py "
             f"2>&1 | tee /logs/agent/{_OUTPUT_FILENAME}"
         )
