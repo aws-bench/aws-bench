@@ -487,6 +487,13 @@ class OrganizationsClient:
                         "ce:*",
                         "support:*",
                         "health:*",
+                        # AWS MCP Server is only deployed in a handful of regions, so an
+                        # agent in a scenario pinned to e.g. ap-south-1 must reach the
+                        # endpoint in another region. The exemption covers only the MCP
+                        # envelope: the server forwards the wrapped call to the target
+                        # service with that service's own aws:RequestedRegion, so the
+                        # region fence still applies to everything the agent actually does.
+                        "aws-mcp:*",
                     ],
                     "Resource": "*",
                     "Condition": {
