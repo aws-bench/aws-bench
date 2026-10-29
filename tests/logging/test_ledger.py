@@ -120,6 +120,16 @@ def test_finalize_error_status(tmp_path, monkeypatch):
     assert data["error_type"] == "ValueError"
 
 
+def test_record_failures_written_to_command_json(tmp_path, monkeypatch):
+    entry = _open(tmp_path, monkeypatch)
+    failures: list[dict[str, str | None]] = [
+        {"scenario": "s1", "unit": "t1", "error_type": "CleanupFailedError", "message": "orphans"}
+    ]
+    entry.record_failures(failures)
+    data = json.loads(entry.command_json_path.read_text())
+    assert data["failures"] == failures
+
+
 def test_finalize_interrupted_status(tmp_path, monkeypatch):
     entry = _open(tmp_path, monkeypatch)
     entry.finalize(KeyboardInterrupt())
@@ -200,5 +210,6 @@ def test_current_ledger_returns_noop_when_absent():
     # Every recording method must be a safe no-op and finalize must not raise.
     entry.set_resolved(job_id=None, job_dir=None, is_resuming=False, resolved_config=None)
     entry.register_job_dir(Path("/nope"))
+    entry.record_failures([])
     entry.finalize(None)
     assert entry.run_log_path is None

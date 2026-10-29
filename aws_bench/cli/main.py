@@ -118,6 +118,8 @@ def _root(
         exc = sys.exc_info()[1]
         if isinstance(exc, typer.Exit) and exc.exit_code == 0:
             exc = None
+        elif isinstance(exc, typer.Exit) and exc.__cause__ is not None:
+            exc = exc.__cause__
         entry.finalize(exc)
 
     ctx.call_on_close(_finalize)
