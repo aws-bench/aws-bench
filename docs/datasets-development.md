@@ -350,6 +350,8 @@ Key sections:
 - **`agent_role_name`** — the IAM role the framework assumes on behalf of the agent. This role must be created by your scenario's CDK code.
 - **`agent_account_tags`** — optional: the scenario's account tags the agent gets credentials for, the first as its default profile. Unset means all of them. Use it to keep the agent out of an account, e.g. one that injects faults: `agent_account_tags = ["PRIMARY"]`. It limits only the agent phase: the verifier, `pre_invoke` and `post_invoke` run in the same container and always get every account, and processes the agent leaves running are not stopped before them.
 - **Placeholders with several accounts** — every account's values are in scope, so name the account: `{{PRIMARY::BucketName}}` in text and env blocks, and `PRIMARY::BucketName` as a key in `pre_invoke`'s `placeholder.json`. With several accounts a bare `{{BucketName}}` (including `{{aws-bench-scenario-allowed-regions}}`) or a bare `placeholder.json` key fails with `PlaceholderAmbiguousError`. This holds for the agent too, even when `agent_account_tags` lists one tag.
+- **`[concurrency]`** — `mode = "mutating"` (default) gives each trial the scenario account to itself and resets the account after it; `"read-only"` trials share the account and skip the reset.
+- **`skip_framework_reset`** — a mutating task can set `skip_framework_reset = true` under `[concurrency]` to skip the framework reset (account scan, drift check and cleanup) after a trial whose `post_invoke` ran and exited 0. If `post_invoke` fails, times out, is interrupted or never runs, the framework reset is not skipped. The scenario's `reset.sh`, if present, still runs. The framework trusts the exit status and does not check the account before the next trial, so set the flag only if your `post_invoke` reverts *and* verifies everything the trial changed, and exits non-zero when it cannot. The flag is rejected at load on a `"read-only"` task.
 - **`[verifier.env]`** — env vars passed to the test script. Use `{{placeholder}}` syntax for values resolved from CloudFormation outputs at runtime. Other stages (`[pre_invoke.env]`, `[post_invoke.env]`, `[reset.env]`, `[solution.env]`) also support placeholders.
 
 ### Writing `instruction.md`
@@ -438,7 +440,7 @@ Both hooks:
 Per-task data-plane reset logic lives in `shared/tasks/<scenario-id>/<task-name>/reset.py`. These scripts:
 - Handle cleanup of agent-created resources (e.g., EKS clusters, S3 objects, DynamoDB items).
 - Are shared across both `pre_invoke` and `post_invoke` — the same `reset.py` is imported by both hooks to ensure consistent cleanup logic.
-- Follow a best-effort pattern: return a list of error strings rather than raising exceptions.
+- Follow a best-effort pattern: return a list of error strings rather than raising exceptions. A `post_invoke` for a task that sets `skip_framework_reset` must exit non-zero when that list is not empty.
 - Must be kept in sync with the copies in each task's directory. Run `bash shared/tasks/scripts/sync.sh` to propagate changes from `shared/` into the task directories — the script also verifies that all copies are up to date and will flag drift.
 
 Placeholder environment variables can be defined in the `[reset.env]` section of `task.toml` (e.g., `REGION = "{{my-placeholder}}"`) and will be resolved at runtime for the reset script. All placeholders used must also be declared in `scenario.toml`. Since multiple tasks share a scenario, placeholder names must not collide.
@@ -507,7 +509,7 @@ aws-bench env cleanup --env-name my-test-env --scenario-path /path/to/my-dataset
 ### Code Standards
 
 - **TypeScript (CDK)**: Follow existing stack patterns. Many resource types default to `RemovalPolicy.RETAIN`, which prevents stack deletion. Explicitly set `RemovalPolicy.DESTROY` and `autoDeleteObjects: true` for all S3 buckets, DynamoDB tables, and log groups to ensure proper cleanup after benchmark runs.
-- **Shell scripts**: Use `set -euo pipefail`. Scripts must be idempotent and best-effort (exit 0).
+- **Shell scripts**: Use `set -euo pipefail`. Scripts must be idempotent and best-effort (exit 0), except the `post_invoke` of a task that sets `skip_framework_reset`, which must exit non-zero when its revert or check fails.
 - **Python (hooks)**: Format with `ruff`. No `.pyc` or `__pycache__` in committed files.
 - **Commit messages**: Follow [Conventional Commits](https://www.conventionalcommits.org/) — `feat(scenario-id): description` or `fix(scenario-id): description`.
 

@@ -23,7 +23,7 @@ from harbor.models.task.verifier_mode import (
 from harbor.models.trial.config import TaskConfig
 from harbor.tasks.client import TaskClient
 from harbor.utils.scripts import discover_script
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from aws_bench.constants import TASK_CACHE_DIR
 from aws_bench.dataset.models import RoleType, ScriptType
@@ -45,6 +45,16 @@ class ConcurrencyConfig(BaseModel):
     """task.toml ``[concurrency]`` — the per-task concurrency declaration."""
 
     mode: ConcurrencyMode = ConcurrencyMode.MUTATING
+    # Skip the framework reset (account scan, drift check, cleanup) after a trial whose
+    # post_invoke ran and exited 0; the scenario's reset.sh still runs. post_invoke must
+    # revert and verify the task's changes.
+    skip_framework_reset: bool = False
+
+    @model_validator(mode="after")
+    def _reject_skip_on_read_only(self) -> ConcurrencyConfig:
+        if self.skip_framework_reset and self.mode is ConcurrencyMode.READ_ONLY:
+            raise ValueError("skip_framework_reset applies to mutating tasks only")
+        return self
 
 
 class ScenarioRef(BaseModel):

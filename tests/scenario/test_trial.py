@@ -234,6 +234,24 @@ def test_reset_redeploy_starts_container_when_reset_had_no_script(
     assert result.exception_info is None
 
 
+def test_reset_skip_framework_reset_runs_reset_sh_only(tmp_path, fake_container, fake_creds):
+    """With skip_framework_reset, RESET runs reset.sh but not the framework reset."""
+    trial = _build_trial(tmp_path, fake_container, fake_creds)
+    trial._config.skip_framework_reset = True
+    with (
+        patch.object(trial._scenario, "has_phase_script", return_value=True),
+        patch(
+            "aws_bench.resource_management.manager.ResourceManager.reset_scenarios",
+            new_callable=AsyncMock,
+        ) as framework_reset,
+    ):
+        result = asyncio.run(trial.run(ScenarioPhase.RESET))
+
+    assert result.success
+    assert fake_container.run_phase.await_args.args[0] == ScenarioPhase.RESET
+    framework_reset.assert_not_awaited()
+
+
 async def trial_for_reset(tmp_path, fake_container, fake_creds):
     trial = _build_trial(tmp_path, fake_container, fake_creds)
     return await trial.run(ScenarioPhase.RESET)
