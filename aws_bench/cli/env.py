@@ -183,6 +183,58 @@ def _build_env_dataset_config(
     return cfg
 
 
+_FAILURE_MESSAGE_LIMIT = 500
+
+
+def _truncate(message: str | None) -> str | None:
+    return message[:_FAILURE_MESSAGE_LIMIT] if message else None
+
+
+def _trial_failures(result: ScenarioJobResult) -> list[dict[str, str | None]]:
+    """Per-trial failure records for the ledger, one per trial that did not succeed."""
+    return [
+        {
+            "scenario": trial.scenario_name,
+            "unit": trial.trial_name,
+            "error_type": trial.exception_info.exception_type if trial.exception_info else None,
+            "message": _truncate(
+                trial.exception_info.exception_message if trial.exception_info else None
+            ),
+        }
+        for trial in result.trial_results
+        if not trial.success
+    ]
+
+
+def _provisioning_failures(summary: ProvisioningSummary) -> list[dict[str, str | None]]:
+    """Failure records for the ledger, one per error on each account that did not provision."""
+    failures: list[dict[str, str | None]] = []
+    for account in summary.accounts:
+        if account.provisioned:
+            continue
+        errors = [account.error] if account.error is not None else []
+        errors.extend(account.submit_failures)
+        for error in errors:
+            failures.append(
+                {
+                    "scenario": account.scenario_name,
+                    "unit": account.account_tag,
+                    "error_type": type(error).__name__,
+                    "message": _truncate(str(error)),
+                }
+            )
+        if account.snapshot_result is not None and not account.snapshot_result.success:
+            failures.append(
+                {
+                    "scenario": account.scenario_name,
+                    "unit": account.account_tag,
+                    "error_type": None,
+                    "message": _truncate(account.snapshot_result.error_message),
+                }
+            )
+    return failures
+
+
 def _run_phase_command(
     job_cfg: ScenarioJobConfig,
     phase: ScenarioPhase,
@@ -224,7 +276,9 @@ def _run_phase_command(
         plugins = preflight_docker_daemon()
         preflight_docker_plugins(plugins)
         preflight_aws_credentials(CredentialProvider.get(), ou_name=job_cfg.ou_name)
-        return asyncio.run(_run_job_phase(job_cfg, phase, CredentialProvider.get(), quiet=quiet))
+        result = asyncio.run(_run_job_phase(job_cfg, phase, CredentialProvider.get(), quiet=quiet))
+    ledger.record_failures(_trial_failures(result))
+    return result
 
 
 @env_app.command()
@@ -359,6 +413,7 @@ def init(
         print_exception(console, debug=debug)
         raise typer.Exit(code=1) from exc
 
+    current_ledger(ctx.meta).record_failures(_provisioning_failures(summary))
     display_provisioning_summary(summary)
     if not summary.all_succeeded:
         raise typer.Exit(code=1)

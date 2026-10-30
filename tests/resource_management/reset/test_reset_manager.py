@@ -1753,6 +1753,181 @@ def test_reset_account_global_recheck_fails_closed_on_throttle(temp_output_dir):
     assert "still present" in (result.reason or "")
 
 
+# ===========================================================================
+# reset_account — stacks-first cascade composes with the regional/global split
+# ===========================================================================
+
+
+@mock_aws
+def test_reset_account_stack_cascade_removes_global_child_no_race(temp_output_dir):
+    """Stack cascade removing a global child composes with the deferred global pass.
+
+    No double-delete, no false failure.
+
+    Scenario (the pending composition concern): an agent-created CFN stack owns a
+    global IAM role. Stacks-first deletes the stack WHOLE and waits; the cascade
+    removes the role. The role ALSO surfaces in new_resources under its global
+    type (AWS::IAM::Role), so _delete_new_resources defers it to the account-level
+    pass. By the time that pass runs (after the all-region gather barrier), the
+    cascade has already removed it, so the authoritative existence re-check
+    reports it gone and the reset succeeds — the global pass must not fail on, or
+    re-delete, a child the cascade already removed.
+    """
+    session = boto3.Session(region_name="us-east-1")
+    manager = ResetManager(session, output_dir=temp_output_dir)
+
+    snapshot = Snapshot(
+        timestamp=datetime(2026, 4, 22, 10, 30, 0, tzinfo=timezone.utc),
+        account_id="123456789012",
+        environment_id="env-test",
+        scenario_hash="abc123",
+        drift_baseline={},
+        stack_metadata={},
+        resource_ids={},
+        regions=["us-east-1"],
+    )
+    # Diagnosis: a new agent-created stack AND the global role it owns both appear.
+    new_resources = {
+        "AWS::CloudFormation::Stack": [{"Identifier": "agent-stack-abc"}],
+        "AWS::IAM::Role": [{"Identifier": "StackOwnedGlobalRole"}],
+    }
+
+    deleted_stacks: list[str] = []
+
+    async def _delete_for_resetup(stack_name):
+        # The whole-stack delete waits for the cascade; the cascade removes the
+        # stack's children, including the global IAM role.
+        deleted_stacks.append(stack_name)
+        return ResetupDeletion(RestoreOutcome.DELETED_NEEDS_REDEPLOY)
+
+    # The individual sweep must NOT be handed the global role (it is deferred to
+    # the account-level pass); capture what the sweep's cleaner receives.
+    swept: list[list[str]] = []
+
+    async def _cleanup(stack_resources, *args, **kwargs):
+        swept.append([r.physical_id for r in stack_resources])
+        return {}
+
+    def _verify(*args, **kwargs):
+        # One diagnosis pass returning the new stack + global role; the stack
+        # delete then drives the needs_redeploy branch (no further verify).
+        return VerifyResult(success=False, reason="new", new_resources=new_resources)
+
+    with (
+        patch(
+            "aws_bench.resource_management.verify.manager.SnapshotManager.load_snapshot",
+            return_value=snapshot,
+        ),
+        patch(
+            "aws_bench.resource_management.verify.manager.VerifyManager.verify_account_state",
+            side_effect=_verify,
+        ),
+        patch(
+            "aws_bench.resource_management.reset.stack_restorer.StackRestorer._delete_for_resetup",
+            side_effect=_delete_for_resetup,
+        ),
+        patch("aws_bench.resource_management.reset.manager.ResourceCleaner") as mock_cleaner_cls,
+        # The stack was deleted, so the needs_redeploy branch runs the orphan
+        # re-check; return clean (the cascade removed everything).
+        patch.object(
+            manager._verify_mgr.__class__,
+            "find_orphan_resources",
+            return_value=None,
+        ),
+        patch("aws_bench.resource_management.reset.manager.CloudControlManager") as mock_ccm,
+        # Skip Phase 0's fast-scan Lambda invoke (retries + backoff); no corroboration.
+        patch.object(manager, "_scan_baseline_types", return_value=None),
+    ):
+        mock_cleaner_cls.return_value.cleanup = _cleanup
+        # Authoritative existence re-check in the account-level global pass: the
+        # cascade already removed the role, so it is gone.
+        mock_ccm.return_value.resource_exists.return_value = False
+        result = asyncio.run(manager.reset_account("test-env", "123456789012"))
+
+    # Composition holds: the stack was deleted whole and the reset succeeds, reporting
+    # it as deleted. The global role is deferred OUT of the per-region sweep (so a
+    # region never race-deletes it); the account-level pass then attempts it and
+    # the authoritative existence re-check finds it already gone (the cascade
+    # removed it) -> no double-delete failure, no false orphan.
+    assert result.success
+    assert result.details is not None
+    assert result.details["deleted_stacks"] == ["agent-stack-abc"]
+    assert deleted_stacks == ["agent-stack-abc"]
+    # The new CFN stack is never swept as an individual resource (it is deleted
+    # whole by stacks-first, excluded from _delete_new_resources).
+    for call in swept:
+        assert "agent-stack-abc" not in call
+    # The global role is NOT deleted on the per-region path. The ONLY cleanup call
+    # that may carry it is the account-level global pass ("Final pass"), which runs
+    # after the gather barrier — never a per-region sweep. Here, with a single
+    # region, the role appears only in that one deferred account-level pass.
+    role_calls = [c for c in swept if "StackOwnedGlobalRole" in c]
+    assert len(role_calls) <= 1  # at most the single account-level pass, never per-region
+
+
+@mock_aws
+def test_reset_account_global_pass_fails_closed_if_cascade_left_global(temp_output_dir):
+    """If a stack cascade did NOT actually remove the global child, reset fails closed.
+
+    Mirror of the happy path: the account-level global pass is the authoritative
+    gate. If the role is still present at re-check time (cascade did not remove
+    it), the reset must fail rather than false-pass — the deferral must never
+    swallow a genuinely-surviving global.
+    """
+    session = boto3.Session(region_name="us-east-1")
+    manager = ResetManager(session, output_dir=temp_output_dir)
+
+    snapshot = Snapshot(
+        timestamp=datetime(2026, 4, 22, 10, 30, 0, tzinfo=timezone.utc),
+        account_id="123456789012",
+        environment_id="env-test",
+        scenario_hash="abc123",
+        drift_baseline={},
+        stack_metadata={},
+        resource_ids={},
+        regions=["us-east-1"],
+    )
+    new_resources = {
+        "AWS::CloudFormation::Stack": [{"Identifier": "agent-stack-abc"}],
+        "AWS::IAM::Role": [{"Identifier": "StackOwnedGlobalRole"}],
+    }
+
+    async def _delete_for_resetup(stack_name):
+        return ResetupDeletion(RestoreOutcome.DELETED_NEEDS_REDEPLOY)
+
+    async def _cleanup(stack_resources, *args, **kwargs):
+        return {}
+
+    with (
+        patch(
+            "aws_bench.resource_management.verify.manager.SnapshotManager.load_snapshot",
+            return_value=snapshot,
+        ),
+        patch(
+            "aws_bench.resource_management.verify.manager.VerifyManager.verify_account_state",
+            side_effect=lambda *a, **k: VerifyResult(
+                success=False, reason="new", new_resources=new_resources
+            ),
+        ),
+        patch(
+            "aws_bench.resource_management.reset.stack_restorer.StackRestorer._delete_for_resetup",
+            side_effect=_delete_for_resetup,
+        ),
+        patch("aws_bench.resource_management.reset.manager.ResourceCleaner") as mock_cleaner_cls,
+        patch.object(manager._verify_mgr.__class__, "find_orphan_resources", return_value=None),
+        patch("aws_bench.resource_management.reset.manager.CloudControlManager") as mock_ccm,
+        # Skip Phase 0's fast-scan Lambda invoke (retries + backoff); no corroboration.
+        patch.object(manager, "_scan_baseline_types", return_value=None),
+    ):
+        mock_cleaner_cls.return_value.cleanup = _cleanup
+        # The cascade did NOT remove the role — it is still present at re-check.
+        mock_ccm.return_value.resource_exists.return_value = True
+        result = asyncio.run(manager.reset_account("test-env", "123456789012"))
+
+    assert result.success is False
+    assert "still present" in (result.reason or "")
+
+
 # -- ResetManager._surviving_globals — existence-check retry (F4 Change B) --
 
 
