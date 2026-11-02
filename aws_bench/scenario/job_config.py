@@ -189,6 +189,8 @@ class ScenarioTrialConfig(BaseModel):
     # Phase-specific resource management parameters
     verify_region: str | None = None
     reset_max_concurrent: int = 10
+    # Skip the framework reset (scan, drift check, cleanup) in RESET; reset.sh, if any, still runs.
+    skip_framework_reset: bool = False
     cleanup_max_concurrent: int = 10
     cleanup_all_regions: bool = False
 
