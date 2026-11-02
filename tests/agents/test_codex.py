@@ -202,7 +202,7 @@ class TestCodexAwsMcpHardening:
     """Codex MCP startup workarounds.
 
     Every stdio server gets the AWS selector ``env_vars``. When an AWS MCP
-    proxy is configured, a bounded top-level startup grace and a per-proxy
+    proxy is configured, the shared top-level startup grace is turned off and a per-proxy
     cold-start timeout are added. The proxy's version spec is never rewritten.
     """
 
@@ -227,8 +227,9 @@ class TestCodexAwsMcpHardening:
         assert command is not None
         parsed = _parse_written_toml(command)
 
-        # Bounded grace so the proxy's 2-4s uvx cold start is waited for.
-        assert parsed["mcp_optional_startup_grace_ms"] == 30_000
+        # Shared grace off: Codex waits for the proxy's 2-4s uvx cold start up to its
+        # own startup_timeout_sec instead of a fixed 30s that still dropped it.
+        assert parsed["mcp_optional_startup_grace_ms"] == 0
 
         block = parsed["mcp_servers"]["aws-mcp"]
         # The user-supplied args (including the version spec) are untouched.
@@ -252,7 +253,7 @@ class TestCodexAwsMcpHardening:
         command = agent._build_register_mcp_servers_command()
         assert command is not None
         parsed = _parse_written_toml(command)
-        assert parsed["mcp_optional_startup_grace_ms"] == 30_000
+        assert parsed["mcp_optional_startup_grace_ms"] == 0
         payload = command[command.index("'") + 1 : command.rindex("'")]
         assert payload.index("mcp_optional_startup_grace_ms") < payload.index("[mcp_servers.")
 
@@ -275,7 +276,7 @@ class TestCodexAwsMcpHardening:
         agent.mcp_servers = [_stdio_server("aws-mcp", server_command, args)]
         parsed = _parse_written_toml(agent._build_register_mcp_servers_command() or "")
         block = parsed["mcp_servers"]["aws-mcp"]
-        assert parsed["mcp_optional_startup_grace_ms"] == 30_000
+        assert parsed["mcp_optional_startup_grace_ms"] == 0
         assert block["command"] == server_command
         assert block["args"] == args
         assert block["startup_timeout_sec"] == 120

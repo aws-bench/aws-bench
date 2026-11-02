@@ -56,11 +56,13 @@ _DEFAULT_AWS_REGION = "us-east-2"
 #   1. Codex only waits a small default grace (~1s) for optional MCP servers
 #      before its first model request. ``uvx`` cold start for the proxy is
 #      2-4s, so the proxy's tools are frequently missing. When a proxy server
-#      is configured, ``mcp_optional_startup_grace_ms`` (a top-level key, which
-#      MUST sit above every ``[mcp_servers.*]`` table) raises that grace to a
-#      bounded 30s, and a per-server ``startup_timeout_sec`` gives the proxy's
-#      cold start room to finish. The grace is bounded rather than unlimited
-#      so a stalled server cannot hold up the first request indefinitely.
+#      is configured, ``mcp_optional_startup_grace_ms = 0`` (a top-level key,
+#      which MUST sit above every ``[mcp_servers.*]`` table) turns the shared
+#      grace off, so Codex waits for each server up to its own
+#      ``startup_timeout_sec``; the proxy gets 120s for its cold start. A
+#      shared 30s grace still intermittently dropped the proxy under
+#      parallel load. The wait stays bounded by ``startup_timeout_sec``: a
+#      stalled server delays the first request by at most that, then is left out.
 #   2. Codex starts stdio MCP servers with a minimal environment, so a
 #      boto3-based server does not inherit the shell's AWS account/profile and
 #      falls back to container/IMDS credentials -> the wrong identity ->
@@ -75,7 +77,7 @@ _AWS_MCP_PROXY_PACKAGES = ("mcp-proxy-for-aws", "mcp-proxy-for-aws-cli")
 _AWS_MCP_PROXY_TOKEN = re.compile(
     r"^(?:" + "|".join(re.escape(p) for p in _AWS_MCP_PROXY_PACKAGES) + r")(?:$|[@=<>~!\[;\s])"
 )
-_MCP_OPTIONAL_STARTUP_GRACE_MS = 30_000
+_MCP_OPTIONAL_STARTUP_GRACE_MS = 0
 _AWS_MCP_STARTUP_TIMEOUT_SEC = 120
 _AWS_MCP_ENV_VARS = (
     "AWS_PROFILE",
@@ -296,10 +298,11 @@ class Codex(_HarborCodex):
           credentials. Only variable names are written, never values.
         * When an AWS MCP proxy server is configured (detected by the
           ``mcp-proxy-for-aws`` / ``mcp-proxy-for-aws-cli`` package name), a
-          top-level ``mcp_optional_startup_grace_ms`` is emitted *above* every
-          ``[mcp_servers.*]`` table to wait up to 30s for optional servers, and
-          the proxy gets ``startup_timeout_sec`` so its uvx cold start can
-          finish. Configs without a proxy keep Codex's default startup grace.
+          top-level ``mcp_optional_startup_grace_ms = 0`` is emitted *above*
+          every ``[mcp_servers.*]`` table so Codex waits for each optional
+          server up to its ``startup_timeout_sec``, and the proxy gets
+          ``startup_timeout_sec`` so its uvx cold start can finish. Configs without a
+          proxy keep Codex's default startup grace.
 
         ``MCPServerConfig`` carries no timeout/env field, so these are emitted
         here rather than modeled.
