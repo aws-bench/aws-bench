@@ -23,7 +23,7 @@ from harbor.models.task.verifier_mode import (
 from harbor.models.trial.config import TaskConfig
 from harbor.tasks.client import TaskClient
 from harbor.utils.scripts import discover_script
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from aws_bench.constants import TASK_CACHE_DIR
 from aws_bench.dataset.models import RoleType, ScriptType
@@ -50,8 +50,11 @@ class ConcurrencyConfig(BaseModel):
 class ScenarioRef(BaseModel):
     """task.toml ``[scenario]`` — the scenario reference + per-phase IAM roles."""
 
+    model_config = ConfigDict(extra="forbid")
+
     scenario_id: str
     agent_role_name: str | None = None
+    agent_account_tags: list[str] | None = Field(default=None, min_length=1)
     verifier_role_name: str | None = None
     pre_invoke_role_name: str | None = None
     post_invoke_role_name: str | None = None

@@ -1,7 +1,5 @@
 """Account models are Pydantic and round-trip through JSON."""
 
-import pytest
-
 from aws_bench.account_management.models import (
     OrgInfo,
     ScenarioAccount,
@@ -37,16 +35,6 @@ def test_test_environment_round_trips_through_json():
     assert TestEnvironment.model_validate_json(env.model_dump_json()) == env
 
 
-def test_account_for_returns_single_account_id():
-    env = TestEnvironment(
-        org=_org(),
-        ou_id="ou-1",
-        ou_name="my-env",
-        accounts={"lambda-x": {"PRIMARY": _acct("lambda-x", "PRIMARY", "222222222222")}},
-    )
-    assert env.account_for("lambda-x") == "222222222222"
-
-
 def test_to_scenario_account_mappings_shape():
     env = TestEnvironment(
         org=_org(),
@@ -77,9 +65,3 @@ def test_mapping_for_returns_tag_to_account_id():
     )
     assert env.mapping_for("lambda-x") == {"PRIMARY": "222222222222", "SECONDARY": "444444444444"}
     assert env.mapping_for("nope") == {}
-
-
-def test_account_for_raises_when_scenario_absent():
-    env = TestEnvironment(org=_org(), ou_id="ou-1", ou_name="my-env", accounts={})
-    with pytest.raises(KeyError):
-        env.account_for("nope")

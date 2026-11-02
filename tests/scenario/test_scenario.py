@@ -137,7 +137,7 @@ def test_is_valid_dir_returns_true_for_schema_violation(tmp_path):
 schema_version = "1.0"
 [scenario]
 name = "bad"
-account_tags = ["A", "B"]
+account_tags = ["A", "A"]
 regions = ["us-east-1"]
 """
     d = _make_layout(tmp_path / "s", config=bad)
@@ -164,7 +164,7 @@ def test_scenario_constructor_still_raises_on_schema_violation(tmp_path):
 schema_version = "1.0"
 [scenario]
 name = "bad"
-account_tags = ["A", "B"]
+account_tags = ["A", "A"]
 regions = ["us-east-1"]
 """
     d = _make_layout(tmp_path / "s", config=bad)

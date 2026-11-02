@@ -182,6 +182,11 @@ def test_scenario_ref_role_name_none_when_unset():
     assert all(ref.role_name(rt) is None for rt in RoleType)
 
 
+def test_scenario_ref_agent_account_tags_reject_empty():
+    with pytest.raises(ValidationError):
+        ScenarioRef(scenario_id="ec2-small", agent_account_tags=[])
+
+
 # ── AwsBenchTask construction ──
 
 
@@ -315,3 +320,9 @@ def test_is_valid_dir_false_for_loose_file(tmp_path):
     loose = tmp_path / "loose.txt"
     loose.write_text("stray\n")
     assert AwsBenchTask.is_valid_dir(loose) is False
+
+
+def test_scenario_ref_rejects_unknown_keys():
+    """A misspelled key must fail, not silently give the agent every account."""
+    with pytest.raises(ValidationError, match="agent_account_tag"):
+        ScenarioRef.model_validate({"scenario_id": "ec2-small", "agent_account_tag": ["PRIMARY"]})

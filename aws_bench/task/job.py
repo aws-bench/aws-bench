@@ -149,6 +149,18 @@ class AwsBenchJob(Job):
                 f"Tasks reference scenarios not present in the selected dataset: "
                 f"{sorted(unknown)}. Available scenarios: {sorted(pairs_by_name)}."
             )
+        undeclared_tags = []
+        for _, task in task_pairs:
+            ref = task.config.scenario
+            declared = pairs_by_name[ref.scenario_id][1].manifest.scenario.account_tags
+            undeclared = set(ref.agent_account_tags or ()) - set(declared)
+            if undeclared:
+                undeclared_tags.append(
+                    f"Task '{task.name}' agent_account_tags {sorted(undeclared)} are not "
+                    f"account_tags of scenario '{ref.scenario_id}' (declared: {declared})."
+                )
+        if undeclared_tags:
+            raise ScenarioReferenceError("\n".join(undeclared_tags))
         # Sorted so the downstream account-export fetch order and the persisted
         # config are stable across runs (set iteration order is not).
         run_pairs = {name: pairs_by_name[name] for name in sorted(referenced)}
@@ -257,6 +269,8 @@ class AwsBenchJob(Job):
             raise ScenarioReferenceError(
                 f"No account mapping for scenario '{scenario_id}' in the resolved test environment."
             )
+        # The resolver sorts tags; keep scenario.toml order so the first tag is the default profile.
+        mapping = {tag: mapping[tag] for tag in scenario.manifest.scenario.account_tags}
         exports = {tag: dict(self._account_exports.get(acct, {})) for tag, acct in mapping.items()}
         # regions is validated non-empty, so the joined value is never blank.
         regions = scenario.manifest.scenario.regions

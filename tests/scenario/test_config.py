@@ -125,12 +125,11 @@ class TestScenarioManifest:
         assert cfg.quotas[0].region == "us-east-1"
         assert cfg.quotas[1].service_code == "vpc"
 
-    def test_account_tags_must_be_length_one(self):
+    def test_account_tags_allow_several(self):
         data = _minimal_data()
-        data["scenario"]["account_tags"] = ["A", "B"]
-        with pytest.raises(ValidationError) as exc:
-            ScenarioManifest.model_validate(data)
-        assert "account_tags must have exactly one entry" in str(exc.value)
+        data["scenario"]["account_tags"] = ["PRIMARY", "INJECTOR"]
+        cfg = ScenarioManifest.model_validate(data)
+        assert cfg.scenario.account_tags == ["PRIMARY", "INJECTOR"]
 
     def test_account_tags_empty_list_rejected(self):
         data = _minimal_data()

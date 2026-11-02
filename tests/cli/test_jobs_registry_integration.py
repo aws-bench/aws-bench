@@ -149,7 +149,7 @@ def stub_external_deps(mocker):
 
     # AccountManager.resolve_test_environment → a real TestEnvironment with one
     # ACTIVE account per (scenario, tag). AwsBenchJob.create reads
-    # test_env.account_for(...) and assigns the object to config.test_environment
+    # test_env.mapping_for(...) and assigns the object to config.test_environment
     # (it rides the resume identity), so a real Pydantic model is required.
     from aws_bench.account_management.models import OrgInfo, ScenarioAccount, TestEnvironment
 

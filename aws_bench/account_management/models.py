@@ -43,17 +43,6 @@ class TestEnvironment(BaseModel):
     ou_name: str
     accounts: dict[str, dict[str, ScenarioAccount]] = Field(default_factory=dict)
 
-    def account_for(self, scenario_name: str) -> str:
-        """Return the single account id for ``scenario_name``.
-
-        Each scenario carries exactly one account_tag, so it maps to one
-        account. Raises ``KeyError`` if no account matches.
-        """
-        tag_map = self.accounts.get(scenario_name)
-        if not tag_map:
-            raise KeyError(scenario_name)
-        return next(iter(tag_map.values())).account_id
-
     def to_scenario_account_mappings(self) -> dict[str, dict[str, str]]:
         """Return ``{scenario_name: {account_tag: account_id}}``."""
         return {

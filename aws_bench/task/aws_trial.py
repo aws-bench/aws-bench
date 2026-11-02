@@ -71,11 +71,16 @@ _RAW_CRED_VARS = (
 )
 
 
-def _creds_write_command(payloads: dict[str, dict[str, object]]) -> str:
-    """Write private process credentials, replacing each file atomically."""
+def _creds_write_command(payloads: dict[str, dict[str, object]], *, clear_dir: bool = False) -> str:
+    """Write private process credentials, replacing each file atomically.
+
+    ``clear_dir`` first deletes the folder, so a phase never sees files an earlier
+    phase left behind when its cleanup failed.
+    """
     lines = [
         "set -e",
         "umask 077",
+        *([f'rm -rf -- "{_CREDS_DIR}"'] if clear_dir else []),
         f'mkdir -p "{_CREDS_DIR}"',
         f'chmod 700 "{_CREDS_DIR}"',
     ]
@@ -194,6 +199,16 @@ class AwsBenchSingleStepTrial(SingleStepTrial):
         except Exception as exc:  # noqa: BLE001 — reset must not fail a finished benchmark
             self.logger.error("Post-trial reset raised for %s: %s", self.config.scenario_id, exc)
 
+    def _account_mapping(self, role_type: RoleType) -> dict[str, str]:
+        """The tags the phase gets credentials for: the agent's ``agent_account_tags``, else all.
+
+        The first key becomes the phase's default profile.
+        """
+        tags = self.task.config.scenario.agent_account_tags
+        if role_type is not RoleType.AGENT or tags is None:
+            return self.config.account_mapping
+        return {tag: self.config.account_mapping[tag] for tag in tags}
+
     def _mint_all_tags(self, role_type: RoleType) -> dict[str, dict[str, object]]:
         """Snapshot the phase's role credentials and their exact STS expiry."""
         role_name = self.task.config.scenario.role_name(role_type)
@@ -207,16 +222,18 @@ class AwsBenchSingleStepTrial(SingleStepTrial):
                     job_id=self.config.job_id,
                 )
             )
-            for tag, account_id in self.config.account_mapping.items()
+            for tag, account_id in self._account_mapping(role_type).items()
         }
 
     async def _write_stage_credentials(
-        self, role_type: RoleType, user: str | int | None
+        self, role_type: RoleType, user: str | int | None, *, clear_dir: bool = False
     ) -> datetime:
         """Mint off-loop, publish the files, and return their soonest expiry."""
         payloads = await asyncio.to_thread(self._mint_all_tags, role_type)
         await self._exec_checked(
-            command=_creds_write_command(payloads), user=user, action="write credential files"
+            command=_creds_write_command(payloads, clear_dir=clear_dir),
+            user=user,
+            action="write credential files",
         )
         return min(datetime.fromisoformat(str(value["Expiration"])) for value in payloads.values())
 
@@ -225,15 +242,18 @@ class AwsBenchSingleStepTrial(SingleStepTrial):
         self, role_type: RoleType, *, user: str | int | None = None
     ) -> AsyncGenerator[dict[str, str], None]:
         """Refresh this phase's credentials, then finish its writer before cleanup."""
-        if not self.config.account_mapping:
+        mapping = self._account_mapping(role_type)
+        if not mapping:
             raise RuntimeError(
                 f"trial {self.config.trial_name}: empty account_mapping; cannot stage credentials"
             )
+        self.logger.info("Staging %s credentials for account tags %s", role_type, list(mapping))
         refresher: asyncio.Task[None] | None = None
         try:
-            expires_at = await self._write_stage_credentials(role_type, user)
+            # Clear files a failed cleanup left behind; refreshes keep the folder in place.
+            expires_at = await self._write_stage_credentials(role_type, user, clear_dir=True)
             await self._exec_checked(
-                command=_aws_config_write_command(self.config.account_mapping),
+                command=_aws_config_write_command(mapping),
                 user=user,
                 action="write AWS config",
             )
@@ -243,7 +263,7 @@ class AwsBenchSingleStepTrial(SingleStepTrial):
                 )
             )
             cred_env: dict[str, str] = dict.fromkeys(_RAW_CRED_VARS, "")
-            tag = next(iter(self.config.account_mapping))
+            tag = next(iter(mapping))
             cred_env["AWS_PROFILE"] = tag
             cred_env["AWS_DEFAULT_PROFILE"] = tag
             # Script and verifier regions remain task-configured.

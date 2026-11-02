@@ -159,6 +159,13 @@ class LedgerEntry:
         self._record["resolved_config"] = redact_config(resolved_config)
         self._flush()
 
+    def record_failures(self, failures: list[dict[str, str | None]]) -> None:
+        """Record per-unit failures (scenario trials, provisioned accounts) of the run."""
+        if not self._active:
+            return
+        self._record["failures"] = failures
+        self._flush()
+
     def register_job_dir(self, job_dir: Path) -> None:
         """Mark ``job_dir`` to be tarred into the entry at finalize."""
         self._job_dir = job_dir

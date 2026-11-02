@@ -32,6 +32,9 @@ class RegistryValidationError(DatasetError):
 class ScenarioReferenceError(DatasetError):
     """A task's scenario_id does not match any scenario's manifest name.
 
+    Also raised when a task's ``agent_account_tags`` names a tag its scenario's
+    ``account_tags`` does not declare.
+
     Distinct from RegistryValidationError, which means the registry
     JSON is structurally broken or the dataset@version doesn't exist.
     Operator action for this error is to fix either task.toml's

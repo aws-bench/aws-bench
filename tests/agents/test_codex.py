@@ -19,6 +19,15 @@ from harbor.models.task.config import MCPServerConfig
 
 from aws_bench.agents.codex import Codex
 
+AWS_ENV_VARS = [
+    "AWS_PROFILE",
+    "AWS_DEFAULT_PROFILE",
+    "AWS_REGION",
+    "AWS_DEFAULT_REGION",
+    "AWS_CONFIG_FILE",
+    "AWS_SHARED_CREDENTIALS_FILE",
+]
+
 
 @pytest.fixture
 def logs_dir(tmp_path: Path) -> Path:
@@ -71,30 +80,20 @@ class TestCodexMcpServersEmpty:
 
 class TestCodexStdioRendering:
     def test_stdio_renders_command_and_args_separately(self, agent: Codex):
-        agent.mcp_servers = [
-            _stdio_server(
-                "aws-mcp",
-                "uvx",
-                ["mcp-proxy-for-aws-cli@latest", "https://example.test/mcp", "--skip-auth"],
-            )
-        ]
+        # A non-proxy stdio server renders command/args separately (the base
+        # bug fix) and gets env_vars, but no proxy timeout or global grace.
+        agent.mcp_servers = [_stdio_server("plain", "some-server", ["--flag", "value", "sub"])]
 
         command = agent._build_register_mcp_servers_command()
         assert command is not None
         parsed = _parse_written_toml(command)
 
-        assert parsed == {
-            "mcp_servers": {
-                "aws-mcp": {
-                    "command": "uvx",
-                    "args": [
-                        "mcp-proxy-for-aws-cli@latest",
-                        "https://example.test/mcp",
-                        "--skip-auth",
-                    ],
-                }
-            }
+        assert parsed["mcp_servers"]["plain"] == {
+            "command": "some-server",
+            "args": ["--flag", "value", "sub"],
+            "env_vars": AWS_ENV_VARS,
         }
+        assert "mcp_optional_startup_grace_ms" not in parsed
 
     def test_command_has_no_space_for_multi_arg_server(self, agent: Codex):
         # The precise failure being fixed: the base flattened command+args into
@@ -118,7 +117,11 @@ class TestCodexStdioRendering:
         assert command is not None
         parsed = _parse_written_toml(command)
 
-        assert parsed["mcp_servers"]["solo"] == {"command": "run-server", "args": []}
+        assert parsed["mcp_servers"]["solo"] == {
+            "command": "run-server",
+            "args": [],
+            "env_vars": AWS_ENV_VARS,
+        }
 
 
 class TestCodexTomlEscaping:
@@ -163,6 +166,7 @@ class TestCodexUrlRendering:
         assert parsed["mcp_servers"]["remote"] == {"url": "https://mcp.example.test/sse"}
         assert "args" not in parsed["mcp_servers"]["remote"]
         assert "command" not in parsed["mcp_servers"]["remote"]
+        assert "mcp_optional_startup_grace_ms" not in parsed
 
     def test_url_with_quote_stays_parseable(self, agent: Codex):
         agent.mcp_servers = [_url_server("remote", 'https://mcp.example.test/"weird"')]
@@ -188,8 +192,122 @@ class TestCodexMcpServersMixed:
         assert parsed["mcp_servers"]["aws-mcp"] == {
             "command": "uvx",
             "args": ["proxy@latest", "--skip-auth"],
+            "env_vars": AWS_ENV_VARS,
         }
         assert parsed["mcp_servers"]["remote"] == {"url": "https://mcp.example.test/mcp"}
+        assert "mcp_optional_startup_grace_ms" not in parsed
+
+
+class TestCodexAwsMcpHardening:
+    """Codex MCP startup workarounds.
+
+    Every stdio server gets the AWS selector ``env_vars``. When an AWS MCP
+    proxy is configured, a bounded top-level startup grace and a per-proxy
+    cold-start timeout are added. The proxy's version spec is never rewritten.
+    """
+
+    @staticmethod
+    def _aws_mcp_server() -> MCPServerConfig:
+        return _stdio_server(
+            "aws-mcp",
+            "uvx",
+            [
+                "mcp-proxy-for-aws-cli@latest",
+                "aws-mcp.us-east-1.api.aws/mcp",
+                "--skip-auth",
+                "--metadata",
+                "INSTALL_SOURCE=agent-toolkit-core",
+            ],
+        )
+
+    def test_aws_mcp_proxy_hardened(self, agent: Codex):
+        agent.mcp_servers = [self._aws_mcp_server()]
+
+        command = agent._build_register_mcp_servers_command()
+        assert command is not None
+        parsed = _parse_written_toml(command)
+
+        # Bounded grace so the proxy's 2-4s uvx cold start is waited for.
+        assert parsed["mcp_optional_startup_grace_ms"] == 30_000
+
+        block = parsed["mcp_servers"]["aws-mcp"]
+        # The user-supplied args (including the version spec) are untouched.
+        assert block["args"] == [
+            "mcp-proxy-for-aws-cli@latest",
+            "aws-mcp.us-east-1.api.aws/mcp",
+            "--skip-auth",
+            "--metadata",
+            "INSTALL_SOURCE=agent-toolkit-core",
+        ]
+        assert block["startup_timeout_sec"] == 120
+        assert block["env_vars"] == AWS_ENV_VARS
+
+    def test_grace_key_precedes_server_tables(self, agent: Codex):
+        # The top-level grace key MUST appear before any [mcp_servers.*] header,
+        # else TOML parses it as part of the last table.
+        agent.mcp_servers = [
+            _stdio_server("first", "run-server", []),
+            self._aws_mcp_server(),
+        ]
+        command = agent._build_register_mcp_servers_command()
+        assert command is not None
+        parsed = _parse_written_toml(command)
+        assert parsed["mcp_optional_startup_grace_ms"] == 30_000
+        payload = command[command.index("'") + 1 : command.rindex("'")]
+        assert payload.index("mcp_optional_startup_grace_ms") < payload.index("[mcp_servers.")
+
+    @pytest.mark.parametrize(
+        ("server_command", "args"),
+        [
+            ("uvx", ["mcp-proxy-for-aws@latest", "https://aws-mcp.us-east-1.api.aws/mcp"]),
+            ("uvx", ["mcp-proxy-for-aws-cli==1.6.6", "--skip-auth"]),
+            ("uvx", ["mcp-proxy-for-aws-cli>=1.7"]),
+            ("uvx", ["mcp-proxy-for-aws-cli~=1.7"]),
+            ("uvx", ["mcp-proxy-for-aws-cli"]),
+            ("uvx", ["--from", "mcp-proxy-for-aws-cli", "mcp-proxy-for-aws"]),
+            ("mcp-proxy-for-aws-cli", ["https://aws-mcp.us-east-1.api.aws/mcp"]),
+            ("/opt/venv/bin/mcp-proxy-for-aws", ["https://aws-mcp.us-east-1.api.aws/mcp"]),
+        ],
+    )
+    def test_proxy_variants_detected_and_args_untouched(
+        self, agent: Codex, server_command: str, args: list[str]
+    ):
+        agent.mcp_servers = [_stdio_server("aws-mcp", server_command, args)]
+        parsed = _parse_written_toml(agent._build_register_mcp_servers_command() or "")
+        block = parsed["mcp_servers"]["aws-mcp"]
+        assert parsed["mcp_optional_startup_grace_ms"] == 30_000
+        assert block["command"] == server_command
+        assert block["args"] == args
+        assert block["startup_timeout_sec"] == 120
+        assert block["env_vars"] == AWS_ENV_VARS
+
+    @pytest.mark.parametrize(
+        "args",
+        [
+            ["some-other-proxy@latest"],
+            ["mcp-proxy-for-aws-extras"],
+            ["awslabs.aws-api-mcp-server@latest"],
+        ],
+    )
+    def test_non_proxy_stdio_server_gets_env_only(self, agent: Codex, args: list[str]):
+        # Any boto3-based stdio server needs the AWS env, so env_vars is emitted
+        # for every stdio server. The proxy timeout and the global grace key off
+        # the proxy package name, not the server name.
+        agent.mcp_servers = [_stdio_server("aws-mcp", "uvx", args)]
+        command = agent._build_register_mcp_servers_command()
+        assert command is not None
+        parsed = _parse_written_toml(command)
+        assert parsed["mcp_servers"]["aws-mcp"] == {
+            "command": "uvx",
+            "args": args,
+            "env_vars": AWS_ENV_VARS,
+        }
+        assert "mcp_optional_startup_grace_ms" not in parsed
+
+    def test_url_server_gets_no_env_vars(self, agent: Codex):
+        agent.mcp_servers = [self._aws_mcp_server(), _url_server("remote", "https://x.test/mcp")]
+        parsed = _parse_written_toml(agent._build_register_mcp_servers_command() or "")
+        assert parsed["mcp_servers"]["remote"] == {"url": "https://x.test/mcp"}
 
 
 async def _provider_toml(agent: Codex) -> str:

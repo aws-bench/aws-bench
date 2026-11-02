@@ -202,7 +202,7 @@ desired_value = 8
 ```
 
 Field rules:
-- **`account_tags`** — exactly one entry in v1. Becomes the AWS profile name inside the container.
+- **`account_tags`** — one or more entries, one account each. Each becomes an AWS profile name. In a task's `pre_invoke`, agent, verifier and `post_invoke` phases, the first is the default `AWS_PROFILE` (an agent with `agent_account_tags` uses the first of that list); scenario scripts get no default and select a profile themselves.
 - **`regions`** — must be non-empty. Every `[[quotas]]` region must appear here.
 - **`[[quotas]]`** — one entry per (account, region, quota). Each is an idempotent service-quota request submitted by `aws-bench env init`.
 
@@ -348,6 +348,8 @@ The TOML file also specifies environment variables for different stages (e.g., `
 Key sections:
 - **`[scenario]`** — links this task to its scenario. `scenario_id` must match a scenario's `[scenario].name`.
 - **`agent_role_name`** — the IAM role the framework assumes on behalf of the agent. This role must be created by your scenario's CDK code.
+- **`agent_account_tags`** — optional: the scenario's account tags the agent gets credentials for, the first as its default profile. Unset means all of them. Use it to keep the agent out of an account, e.g. one that injects faults: `agent_account_tags = ["PRIMARY"]`. It limits only the agent phase: the verifier, `pre_invoke` and `post_invoke` run in the same container and always get every account, and processes the agent leaves running are not stopped before them.
+- **Placeholders with several accounts** — every account's values are in scope, so name the account: `{{PRIMARY::BucketName}}` in text and env blocks, and `PRIMARY::BucketName` as a key in `pre_invoke`'s `placeholder.json`. With several accounts a bare `{{BucketName}}` (including `{{aws-bench-scenario-allowed-regions}}`) or a bare `placeholder.json` key fails with `PlaceholderAmbiguousError`. This holds for the agent too, even when `agent_account_tags` lists one tag.
 - **`[verifier.env]`** — env vars passed to the test script. Use `{{placeholder}}` syntax for values resolved from CloudFormation outputs at runtime. Other stages (`[pre_invoke.env]`, `[post_invoke.env]`, `[reset.env]`, `[solution.env]`) also support placeholders.
 
 ### Writing `instruction.md`
@@ -416,7 +418,7 @@ Runs **before** the agent starts. Common uses:
 - Generate runtime placeholders resolved from live account state.
 - Mutate the environment to create the "broken" state the agent must fix.
 
-Credentials are injected as environment variables — use the AWS CLI and SDKs without `--profile`.
+Credentials are staged as one AWS profile per account tag, and `AWS_PROFILE` is preset to the first, so a single-account scenario needs no `--profile`. With several accounts, pass `--profile <TAG>` to reach the others.
 
 #### `post_invoke/` (optional)
 
@@ -425,7 +427,7 @@ Runs **after** the agent finishes (regardless of pass/fail). Common uses:
 - Clean up resources created during `pre_invoke` that shouldn't persist.
 
 Both hooks:
-- Run inside the scenario container with AWS credentials for the scenario account.
+- Run inside the agent container with AWS credentials for every account tag of the scenario.
 - Must be idempotent (may run multiple times across retries).
 - Have a configurable timeout. If your task creates resources that take time to delete (e.g., ElastiCache clusters, EKS clusters), ensure the timeout is sufficient and delete resources in dependency order.
 - Are copied into the container at runtime — they are isolated from the host filesystem. Any scripts or dependencies they call must be included within the same folder or already present in the container image.

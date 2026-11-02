@@ -100,7 +100,9 @@ def _job_skeleton(tmp_path, *, test_environment, exports, task_pairs, n_attempts
             SimpleNamespace(
                 name=task.config.scenario.scenario_id,
                 manifest=SimpleNamespace(
-                    scenario=SimpleNamespace(regions=task.config.scenario.regions)
+                    scenario=SimpleNamespace(
+                        regions=task.config.scenario.regions, account_tags=["PRIMARY"]
+                    )
                 ),
             ),
         )
@@ -147,7 +149,6 @@ def test_init_trial_configs_gives_each_trial_only_its_account_slice(tmp_path, mo
 
     _accounts = {"scenario-a": "111", "scenario-b": "222"}
     test_env = SimpleNamespace(
-        account_for=lambda name: _accounts[name],
         mapping_for=lambda name: {"PRIMARY": _accounts[name]},
     )
     exports = {"111": {"BucketA": "a"}, "222": {"BucketB": "b"}}
@@ -185,7 +186,6 @@ def test_init_trial_configs_empty_slice_when_account_has_no_exports(tmp_path, mo
     """An account absent from the exports ledger yields an empty slice (not a KeyError)."""
     tc = SimpleNamespace(get_task_id=lambda: "id-a")
     test_env = SimpleNamespace(
-        account_for=lambda name: "111",
         mapping_for=lambda name: {"PRIMARY": "111"},
     )
     job = _job_skeleton(
@@ -217,7 +217,6 @@ def test_build_trial_config_injects_allowed_regions_per_scenario(tmp_path, mocke
     ]
     _accounts = {"scenario-a": "111", "scenario-b": "222"}
     test_env = SimpleNamespace(
-        account_for=lambda name: _accounts[name],
         mapping_for=lambda name: {"PRIMARY": _accounts[name]},
     )
     job = _job_skeleton(
@@ -248,7 +247,6 @@ def test_build_trial_config_rejects_reserved_key_collision(tmp_path, mocker):
 
     tc = SimpleNamespace(get_task_id=lambda: "id-a")
     test_env = SimpleNamespace(
-        account_for=lambda name: "111",
         mapping_for=lambda name: {"PRIMARY": "111"},
     )
     job = _job_skeleton(
@@ -273,7 +271,6 @@ def test_build_trial_config_rejects_unmapped_scenario(tmp_path, mocker):
     tc = SimpleNamespace(get_task_id=lambda: "id-a")
     # mapping_for returns {} for an unknown scenario; the guard must catch it.
     test_env = SimpleNamespace(
-        account_for=lambda name: "111",
         mapping_for=lambda name: {},
     )
     job = _job_skeleton(
@@ -335,7 +332,9 @@ def test_build_trial_config_sets_scenario_descriptor():
             descriptor,
             SimpleNamespace(
                 name="ec2-small",
-                manifest=SimpleNamespace(scenario=SimpleNamespace(regions=["us-east-1"])),
+                manifest=SimpleNamespace(
+                    scenario=SimpleNamespace(regions=["us-east-1"], account_tags=["PRIMARY"])
+                ),
             ),
         )
     }
@@ -345,7 +344,6 @@ def test_build_trial_config_sets_scenario_descriptor():
         jobs_dir=Path("jobs"),
         job_name="run-0",
         test_environment=SimpleNamespace(
-            account_for=lambda name: "111111111111",
             mapping_for=lambda name: {"PRIMARY": "111111111111"},
         ),
         timeout_multiplier=1.0,
@@ -397,7 +395,9 @@ def test_build_trial_config_produces_tag_keyed_export_slice():
             descriptor,
             SimpleNamespace(
                 name="ec2-small",
-                manifest=SimpleNamespace(scenario=SimpleNamespace(regions=["us-east-1"])),
+                manifest=SimpleNamespace(
+                    scenario=SimpleNamespace(regions=["us-east-1"], account_tags=["PRIMARY"])
+                ),
             ),
         )
     }
@@ -407,7 +407,6 @@ def test_build_trial_config_produces_tag_keyed_export_slice():
         jobs_dir=Path("jobs"),
         job_name="run-0",
         test_environment=SimpleNamespace(
-            account_for=lambda name: "111111111111",
             mapping_for=lambda name: {"PRIMARY": "111111111111"},
         ),
         timeout_multiplier=1.0,
@@ -469,7 +468,9 @@ def test_init_trial_configs_deep_copies_verifier_per_trial(tmp_path):
             ScenarioConfig(name="scenario-a", path=Path("scenarios/scenario-a")),
             SimpleNamespace(
                 name="scenario-a",
-                manifest=SimpleNamespace(scenario=SimpleNamespace(regions=["us-east-1"])),
+                manifest=SimpleNamespace(
+                    scenario=SimpleNamespace(regions=["us-east-1"], account_tags=["PRIMARY"])
+                ),
             ),
         )
     }
@@ -478,7 +479,6 @@ def test_init_trial_configs_deep_copies_verifier_per_trial(tmp_path):
         jobs_dir=tmp_path,
         job_name="job",
         test_environment=SimpleNamespace(
-            account_for=lambda _name: "111",
             mapping_for=lambda _name: {"PRIMARY": "111"},
         ),
         n_attempts=2,  # two trials of the same task → distinct configs
@@ -664,6 +664,7 @@ def _stub_create_aws_seams(mocker):
     )
     mocker.patch("aws_bench.task.job.AccountManager", return_value=account_manager_instance)
     mocker.patch("aws_bench.task.job.collect_account_exports", return_value={})
+    return account_manager_instance
 
 
 @pytest.mark.asyncio
@@ -712,9 +713,8 @@ async def test_create_collects_exports_from_every_scenario_account(tmp_path, moc
     A scenario maps to one account per tag. ``create`` must build the
     ``collect_account_exports`` targets from all of them (``mapping_for``), so the
     per-tag export slice in ``_build_trial_config`` is populated for every tag.
-    Stubs the resolved environment to map the scenario to TWO accounts (the
-    manifest still validates a single tag; the stub bypasses that gate to exercise
-    the multi-account collection path) and asserts both account ids are queried.
+    Stubs the resolved environment to map the scenario to TWO accounts and asserts
+    both account ids are queried.
     """
     from aws_bench.account_management.models import OrgInfo, ScenarioAccount, TestEnvironment
     from aws_bench.cli.job_config import AwsBenchJobConfig
@@ -839,6 +839,25 @@ def test_close_logger_handlers_detaches_the_bridge(tmp_path):
     assert aws_console not in logging.getLogger(_HARBOR_LOGGER_NAME).handlers
 
 
+def test_init_trial_configs_keep_scenario_tag_order(tmp_path, mocker):
+    """The resolver sorts tags; trials keep scenario.toml order, so the first is the default."""
+    test_env = SimpleNamespace(
+        mapping_for=lambda name: {"INJECTOR": "222222222222", "PRIMARY": "111111111111"}
+    )
+    tc = SimpleNamespace(get_task_id=lambda: "id-a")
+    job = _job_skeleton(
+        tmp_path, test_environment=test_env, exports={}, task_pairs=[(tc, _aws_task("s"))]
+    )
+    job._run_pairs["s"][1].manifest.scenario.account_tags = ["PRIMARY", "INJECTOR"]
+    built = []
+    mocker.patch(
+        "aws_bench.task.job.AwsBenchTrialConfig",
+        side_effect=lambda **k: built.append(k) or MagicMock(),
+    )
+    job._init_trial_configs()
+    assert list(built[0]["account_mapping"]) == ["PRIMARY", "INJECTOR"]
+
+
 def test_init_logger_quiet_still_logs_console(tmp_path):
     """--quiet does not silence the log stream: the console handler is still installed.
 
@@ -863,3 +882,40 @@ def test_init_logger_debug_sets_console_to_debug(tmp_path):
         assert job._aws_console_handler.level == logging.DEBUG
     finally:
         job._close_logger_handlers()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("agent_tags", "undeclared"),
+    [('["PRIMARY"]', None), ('["INJECTOR"]', "['INJECTOR']"), ('["PRIMARY", "TYPO"]', "['TYPO']")],
+)
+async def test_create_checks_agent_account_tags_against_scenario(
+    tmp_path, mocker, agent_tags, undeclared
+):
+    """agent_account_tags naming a tag the scenario doesn't declare fails before any AWS call."""
+    from aws_bench.cli.job_config import AwsBenchJobConfig
+    from aws_bench.dataset.config import AwsBenchDatasetConfig
+    from aws_bench.dataset.exceptions import ScenarioReferenceError
+
+    account_manager = _stub_create_aws_seams(mocker)
+    tasks_root = tmp_path / "tasks"
+    task_dir = _make_task_dir(tasks_root / "t1", task_name="aws-bench/t1", scenario_id="ec2-small")
+    toml = task_dir / "task.toml"
+    toml.write_text(toml.read_text() + f"agent_account_tags = {agent_tags}\n")
+    scenario_root = tmp_path / "scenarios"
+    _make_scenario_dir(scenario_root / "ec2-small", "ec2-small")
+
+    config = AwsBenchJobConfig(
+        env_name="awsbench-ou",
+        jobs_dir=tmp_path / "jobs",
+        job_name="run-0",
+        dataset=AwsBenchDatasetConfig(path=tasks_root, scenarios_path=scenario_root),
+    )
+    if undeclared is None:
+        await AwsBenchJob.create(config)
+        account_manager.resolve_test_environment.assert_called_once()
+        return
+    with pytest.raises(ScenarioReferenceError) as excinfo:
+        await AwsBenchJob.create(config)
+    assert f"agent_account_tags {undeclared} are not" in str(excinfo.value)
+    account_manager.resolve_test_environment.assert_not_called()

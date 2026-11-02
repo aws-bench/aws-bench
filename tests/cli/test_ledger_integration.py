@@ -66,6 +66,10 @@ def _build_app(monkeypatch, tmp_path):
         raise typer.Exit(code=1)
 
     @app.command()
+    def exit_wrapped():
+        raise typer.Exit(code=1) from ValueError("kaboom")
+
+    @app.command()
     def interrupt():
         raise KeyboardInterrupt
 
@@ -122,6 +126,15 @@ def test_nonzero_exit_finalizes_error(monkeypatch, tmp_path):
     data = json.loads((_only_entry(tmp_path) / "command.json").read_text())
     assert data["exit_status"] == "error"
     assert data["error_type"] == "Exit"
+
+
+def test_wrapped_exit_records_cause_type(monkeypatch, tmp_path):
+    app = _build_app(monkeypatch, tmp_path)
+    result = runner.invoke(app, ["exit-wrapped"])
+    assert result.exit_code == 1
+    data = json.loads((_only_entry(tmp_path) / "command.json").read_text())
+    assert data["exit_status"] == "error"
+    assert data["error_type"] == "ValueError"
 
 
 def test_interrupt_finalizes_interrupted(monkeypatch, tmp_path):
@@ -287,7 +300,7 @@ def test_run_records_resolved_config_when_create_fails(monkeypatch, tmp_path):
 # ---------------------------------------------------------------------------
 
 
-def _stub_env_phase_seams(monkeypatch, *, tmp_path):
+def _stub_env_phase_seams(monkeypatch, *, tmp_path, trial_results=None):
     """Stub the AWS/Docker seams of ``_run_phase_command`` (env cleanup path).
 
     Patches the three preflights, ``CredentialProvider.get``, and
@@ -307,14 +320,16 @@ def _stub_env_phase_seams(monkeypatch, *, tmp_path):
         classmethod(lambda cls: MagicMock()),
     )
 
+    trials = trial_results or []
+    n_failed = sum(1 for t in trials if not t.success)
     result = ScenarioJobResult(
         job_name="test",
         job_dir=tmp_path / "jobs" / "test",
         started_at=datetime.now(timezone.utc),
-        n_total=0,
-        n_succeeded=0,
-        n_failed=0,
-        trial_results=[],
+        n_total=len(trials),
+        n_succeeded=len(trials) - n_failed,
+        n_failed=n_failed,
+        trial_results=trials,
     )
     job = MagicMock()
     job.run = AsyncMock(return_value=result)
@@ -369,6 +384,119 @@ def test_env_phase_records_config_and_registers_snapshot(monkeypatch, tmp_path):
     assert data["resolved_config"]["dataset"]["scenarios_path"] == str(scenarios_dir)
     assert data["job_dir"] == str(jobs_dir / "phase-job")
     assert data["exit_status"] == "ok"
+
+
+def test_env_phase_records_trial_failures(monkeypatch, tmp_path):
+    from harbor.models.trial.result import ExceptionInfo
+
+    from aws_bench.scenario.results import ScenarioTrialResult
+
+    monkeypatch.setattr("aws_bench.logging.ledger.LOGS_DIR", tmp_path / "logs")
+    scenarios_dir = tmp_path / "scenarios"
+    scenarios_dir.mkdir(parents=True, exist_ok=True)
+    failed = ScenarioTrialResult(
+        scenario_name="compute-and-data",
+        trial_name="compute-and-data__abc",
+        exception_info=ExceptionInfo(
+            exception_type="CleanupFailedError",
+            exception_message="1 orphaned resource(s) remain",
+            exception_traceback="",
+            occurred_at=datetime.now(timezone.utc),
+        ),
+    )
+    passed = ScenarioTrialResult(scenario_name="serverless-apps", trial_name="serverless-apps__def")
+    _stub_env_phase_seams(monkeypatch, tmp_path=tmp_path, trial_results=[failed, passed])
+
+    from aws_bench.cli.main import app
+
+    result = runner.invoke(
+        app,
+        [
+            "env",
+            "cleanup",
+            "--env-name",
+            "awsbench-ou",
+            "--scenario-path",
+            str(scenarios_dir),
+            "--jobs-dir",
+            str(tmp_path / "jobs"),
+            "--job-name",
+            "phase-job",
+            "--yes",
+        ],
+    )
+
+    assert result.exit_code == 1, result.output
+    data = json.loads((_only_entry(tmp_path) / "command.json").read_text())
+    assert data["exit_status"] == "error"
+    assert data["failures"] == [
+        {
+            "scenario": "compute-and-data",
+            "unit": "compute-and-data__abc",
+            "error_type": "CleanupFailedError",
+            "message": "1 orphaned resource(s) remain",
+        }
+    ]
+
+
+def test_provisioning_failures_cover_each_failure_kind():
+    from aws_bench.cli.env import _provisioning_failures
+    from aws_bench.resource_management.snapshot.models import SnapshotResult
+    from aws_bench.scenario.exceptions import AccountLimitExceededError
+    from aws_bench.scenario.provisioning import ProvisionedAccount, ProvisioningSummary
+
+    limit_error = AccountLimitExceededError("limit hit")
+    summary = ProvisioningSummary(
+        accounts=[
+            ProvisionedAccount(scenario_name="ok", account_tag="PRIMARY", account_id="1"),
+            ProvisionedAccount(
+                scenario_name="backend",
+                account_tag="PRIMARY",
+                error=limit_error,
+            ),
+            ProvisionedAccount(
+                scenario_name="quota",
+                account_tag="PRIMARY",
+                account_id="2",
+                submit_failures=[RuntimeError("submit failed"), ValueError("bad quota code")],
+            ),
+            ProvisionedAccount(
+                scenario_name="snap",
+                account_tag="SECONDARY",
+                account_id="3",
+                snapshot_result=SnapshotResult(
+                    account_id="3", success=False, error_message="lister aborted"
+                ),
+            ),
+        ]
+    )
+
+    assert _provisioning_failures(summary) == [
+        {
+            "scenario": "backend",
+            "unit": "PRIMARY",
+            "error_type": "AccountLimitExceededError",
+            "message": str(limit_error),
+        },
+        {
+            "scenario": "quota",
+            "unit": "PRIMARY",
+            "error_type": "RuntimeError",
+            "message": "submit failed",
+        },
+        {
+            "scenario": "quota",
+            "unit": "PRIMARY",
+            "error_type": "ValueError",
+            "message": "bad quota code",
+        },
+        {
+            "scenario": "snap",
+            "unit": "SECONDARY",
+            "error_type": None,
+            "message": "lister aborted",
+        },
+    ]
 
 
 def test_env_init_records_config_without_snapshot(monkeypatch, tmp_path):

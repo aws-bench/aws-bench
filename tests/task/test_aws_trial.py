@@ -87,7 +87,9 @@ def _scenario_ref(**roles):
         RoleType.PRE_INVOKE: roles.get("pre_invoke"),
         RoleType.POST_INVOKE: roles.get("post_invoke"),
     }
-    return SimpleNamespace(role_name=lambda rt: role_map[rt])
+    return SimpleNamespace(
+        role_name=lambda rt: role_map[rt], agent_account_tags=roles.get("agent_account_tags")
+    )
 
 
 def _phase(timeout_sec=None, env=None):
@@ -352,6 +354,38 @@ async def test_run_agent_phase_sets_aws_profile_to_first_tag(tmp_path, fake_cred
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("role_type", "agent_tags", "profiles"),
+    [
+        (RoleType.AGENT, ["INJECTOR"], ["INJECTOR"]),
+        (RoleType.AGENT, ["INJECTOR", "PRIMARY"], ["INJECTOR", "PRIMARY"]),
+        (RoleType.AGENT, ["PRIMARY", "INJECTOR"], ["PRIMARY", "INJECTOR"]),
+        (RoleType.PRE_INVOKE, ["INJECTOR"], ["PRIMARY", "INJECTOR"]),
+        (RoleType.VERIFIER, ["INJECTOR"], ["PRIMARY", "INJECTOR"]),
+        (RoleType.POST_INVOKE, ["INJECTOR"], ["PRIMARY", "INJECTOR"]),
+    ],
+)
+async def test_agent_account_tags_limit_only_the_agent(
+    tmp_path, fake_creds, shell_environment, role_type, agent_tags, profiles
+):
+    """Only the agent is limited to agent_account_tags; a phase's first tag is its default."""
+    mapping = {"PRIMARY": "111111111111", "INJECTOR": "222222222222"}
+    trial = _make_trial(tmp_path)
+    trial.agent_environment = shell_environment
+    trial.config.account_mapping = mapping
+    trial.task.config.scenario = _scenario_ref(agent_account_tags=agent_tags)  # type: ignore[assignment]
+
+    async with trial._staged_credentials(role_type) as cred_env:
+        config = (tmp_path / ".aws/config").read_text().splitlines()
+        assert [line[9:-1] for line in config if line.startswith("[profile ")] == profiles
+        files = sorted(p.name for p in (tmp_path / ".aws/creds").iterdir())
+        assert files == sorted(f"{tag}.json" for tag in profiles)
+        assert cred_env["AWS_PROFILE"] == cred_env["AWS_DEFAULT_PROFILE"] == profiles[0]
+    minted = [call.kwargs["account_id"] for call in fake_creds.call_args_list]
+    assert minted == [mapping[tag] for tag in profiles]
+
+
+@pytest.mark.asyncio
 async def test_run_agent_phase_pins_region_to_first_scenario_region(tmp_path, fake_creds, mocker):
     """AWS_REGION/AWS_DEFAULT_REGION are pinned to the scenario's first region."""
     trial = _make_trial(tmp_path)
@@ -453,6 +487,34 @@ async def test_staged_credentials_cleanup_failure_does_not_mask_body_error(tmp_p
 
     # The cleanup ran (and failed) but the body's error surfaced, not the rm error.
     trial.logger.warning.assert_called()  # type: ignore[attr-defined]
+
+
+@pytest.mark.asyncio
+async def test_agent_does_not_see_files_left_by_a_failed_cleanup(
+    tmp_path, fake_creds, shell_environment
+):
+    """A failed end-of-phase removal must not leave another phase's tags for the agent."""
+    run_in_shell = shell_environment.exec.side_effect
+    failed_removals: list[str] = []
+
+    async def fail_first_removal(*, command, **kwargs):
+        if command.startswith("rm -rf") and not failed_removals:
+            failed_removals.append(command)
+            return SimpleNamespace(return_code=1, stdout="", stderr="rm: busy")
+        return await run_in_shell(command=command, **kwargs)
+
+    shell_environment.exec = AsyncMock(side_effect=fail_first_removal)
+    trial = _make_trial(tmp_path)
+    trial.agent_environment = shell_environment
+    trial.config.account_mapping = {"PRIMARY": "111111111111", "INJECTOR": "222222222222"}
+    trial.task.config.scenario = _scenario_ref(agent_account_tags=["PRIMARY"])  # type: ignore[assignment]
+
+    async with trial._staged_credentials(RoleType.PRE_INVOKE):
+        pass
+    assert (tmp_path / ".aws/creds/INJECTOR.json").exists()  # the removal failed
+
+    async with trial._staged_credentials(RoleType.AGENT):
+        assert sorted(p.name for p in (tmp_path / ".aws/creds").iterdir()) == ["PRIMARY.json"]
 
 
 @pytest.mark.asyncio

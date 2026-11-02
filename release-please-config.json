@@ -17,8 +17,7 @@
   ],
   "packages": {
     ".": {
-      "release-type": "python",
-      "release-as": "1.0.0"
+      "release-type": "python"
     }
   }
 }
