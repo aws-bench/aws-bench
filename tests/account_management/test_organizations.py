@@ -669,6 +669,20 @@ def test_build_region_restriction_policy_structure(org_client):
     }
 
 
+def test_build_region_restriction_policy_exempts_aws_mcp(org_client):
+    """AWS MCP Server is regional-but-sparse; the envelope call must bypass the region fence."""
+    import json
+
+    client, _ = org_client
+    policy = json.loads(client._build_region_restriction_policy(["ap-south-1"]))
+
+    stmt = policy["Statement"][0]
+    assert stmt["Sid"] == "DenyOutOfScopeRegions"
+    assert "aws-mcp:*" in stmt["NotAction"]
+    # The exemption is a NotAction carve-out, not a region widening: the fence itself is unchanged.
+    assert stmt["Condition"]["StringNotEquals"]["aws:RequestedRegion"] == ["ap-south-1"]
+
+
 # ── Region opt-in ──
 
 
