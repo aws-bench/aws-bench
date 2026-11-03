@@ -539,8 +539,9 @@ class ScenarioTrial:
 
         The deploy snapshot is skipped when the deploy script failed, so a
         half-deployed environment never becomes a baseline. Recovery phases
-        (verify/reset/cleanup) run regardless of script outcome; the framework
-        reset alone is skipped when ``skip_framework_reset`` is set.
+        (verify/reset/cleanup) run regardless of script outcome. With
+        ``skip_framework_reset`` set, the framework reset does not run: a failed
+        reset.sh marks every account contaminated, a successful one changes nothing.
         """
         if phase == ScenarioPhase.DEPLOY:
             if script_failed:
@@ -550,10 +551,13 @@ class ScenarioTrial:
         elif phase == ScenarioPhase.VERIFY:
             await self._run_verify()
         elif phase == ScenarioPhase.RESET:
-            if self._config.skip_framework_reset:
-                logger.info("Skipping the framework reset: post_invoke restored the account")
+            if not self._config.skip_framework_reset:
+                await self._run_reset(script_failed=script_failed)
+            elif script_failed:
+                for account_id in self._config.account_mapping.values():
+                    await self._mark_contaminated(account_id)
             else:
-                await self._run_reset()
+                logger.info("Skipping the framework reset: post_invoke restored the account")
         elif phase == ScenarioPhase.CLEANUP:
             await self._run_cleanup(script_failed=script_failed)
 
@@ -803,7 +807,7 @@ class ScenarioTrial:
                 ]
             )
 
-    async def _run_reset(self) -> None:
+    async def _run_reset(self, *, script_failed: bool = False) -> None:
         """Reset this scenario's accounts to baseline state.
 
         If any stacks were deleted during reset (couldn't be reverted in place),
@@ -860,7 +864,7 @@ class ScenarioTrial:
                         result.success = False
                         result.reason = "Stacks deleted but redeploy via setup failed"
 
-        clear_error = await self._apply_contamination_tags(results)
+        clear_error = await self._apply_contamination_tags(results, script_failed=script_failed)
 
         # Severity order: reset failure > clear failure.
         failed = [r for r in results if not r.success]
@@ -892,8 +896,13 @@ class ScenarioTrial:
                 idents.update(item["Identifier"] for item in ids if "Identifier" in item)
         return idents
 
-    async def _apply_contamination_tags(self, results: list[ResetResult]) -> Exception | None:
+    async def _apply_contamination_tags(
+        self, results: list[ResetResult], *, script_failed: bool
+    ) -> Exception | None:
         """SET the flag on accounts whose reset failed, CLEAR it on those that succeeded.
+
+        A failed reset.sh (``script_failed``) is a failed reset for every account:
+        SET on all of them and CLEAR on none, whatever the framework reset found.
 
         The ``AccountManager`` tag calls retry transient throttling internally.
 
@@ -901,26 +910,14 @@ class ScenarioTrial:
         cleared) for the caller to raise in severity order, or ``None``. It is
         returned rather than raised because a still-failing reset or a failed
         redeploy is the more severe outcome and must take precedence.
-
-        SET-failure is fail-dangerous but the reset already fails via
-        ``ResetFailedError`` (or a redeploy error), so it is logged as an error, not
-        raised. A succeeded account is never re-flagged contaminated.
         """
         clear_error: Exception | None = None
         for r in results:
             if not r.account_id:
                 logger.warning("Reset result missing account_id; cannot update flag: %s", r.reason)
                 continue
-            if not r.success:
-                try:
-                    await self._account_manager.mark_contaminated(r.account_id)
-                except Exception as exc:  # noqa: BLE001 — reset failure stays primary
-                    logger.error(
-                        "Failed to flag contaminated account %s after reset failure: %s. "
-                        "The account may be reused while dirty.",
-                        r.account_id,
-                        exc,
-                    )
+            if not r.success or script_failed:
+                await self._mark_contaminated(r.account_id)
             else:
                 try:
                     await self._account_manager.clear_contaminated(r.account_id)
@@ -934,6 +931,18 @@ class ScenarioTrial:
                     )
                     clear_error = exc
         return clear_error
+
+    async def _mark_contaminated(self, account_id: str) -> None:
+        """SET the contamination flag; log, do not raise, so the reset error stays primary."""
+        try:
+            await self._account_manager.mark_contaminated(account_id)
+        except Exception as exc:  # noqa: BLE001 — reset failure stays primary
+            logger.error(
+                "Failed to flag contaminated account %s after reset failure: %s. "
+                "The account may be reused while dirty.",
+                account_id,
+                exc,
+            )
 
     async def _redeploy_with_retry(self) -> None:
         """Run the post-reset DEPLOY redeploy, retrying transient failures.

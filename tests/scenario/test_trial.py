@@ -234,7 +234,9 @@ def test_reset_redeploy_starts_container_when_reset_had_no_script(
     assert result.exception_info is None
 
 
-def test_reset_skip_framework_reset_runs_reset_sh_only(tmp_path, fake_container, fake_creds):
+def test_reset_skip_framework_reset_runs_reset_sh_only(
+    tmp_path, fake_container, fake_creds, mock_account_manager
+):
     """With skip_framework_reset, RESET runs reset.sh but not the framework reset."""
     trial = _build_trial(tmp_path, fake_container, fake_creds)
     trial._config.skip_framework_reset = True
@@ -250,6 +252,62 @@ def test_reset_skip_framework_reset_runs_reset_sh_only(tmp_path, fake_container,
     assert result.success
     assert fake_container.run_phase.await_args.args[0] == ScenarioPhase.RESET
     framework_reset.assert_not_awaited()
+    mock_account_manager.mark_contaminated.assert_not_awaited()
+    mock_account_manager.clear_contaminated.assert_not_awaited()
+
+
+@pytest.mark.parametrize("skip_framework_reset", [False, True], ids=["setting-off", "setting-on"])
+@pytest.mark.parametrize(
+    ("run_phase", "exception_type"),
+    [
+        ({"return_value": ExecResult(exit_code=1, stdout="boom\n")}, "NonZeroExitCodeError"),
+        ({"side_effect": TimeoutError()}, "PhaseTimeoutError"),
+    ],
+    ids=["exit-1", "timeout"],
+)
+def test_failed_reset_sh_flags_the_account_and_never_clears_it(
+    tmp_path,
+    fake_container,
+    fake_creds,
+    mock_account_manager,
+    skip_framework_reset,
+    run_phase,
+    exception_type,
+):
+    """A failed reset.sh is a failed reset: every account is marked contaminated.
+
+    Setting off: the framework reset runs, but a clean scan must not clear the mark
+    the failed reset.sh earned. Setting on: the framework reset stays skipped and the
+    accounts are marked directly. A timeout leaves exit_code None, so the signal must
+    be the script failure, not the exit code.
+    """
+    accounts = {"PRIMARY": "111111111111", "INJECTOR": "222222222222"}
+    fake_container.run_phase = AsyncMock(**run_phase)
+    trial = _build_trial(tmp_path, fake_container, fake_creds)
+    trial._config.skip_framework_reset = skip_framework_reset
+    trial._config.account_mapping = accounts
+    with (
+        patch.object(trial._scenario, "has_phase_script", return_value=True),
+        patch(
+            "aws_bench.resource_management.manager.ResourceManager.reset_scenarios",
+            new_callable=AsyncMock,
+            return_value=[
+                ResetResult(success=True, reason="ok", account_id=a) for a in accounts.values()
+            ],
+        ) as framework_reset,
+    ):
+        result = asyncio.run(trial.run(ScenarioPhase.RESET))
+
+    assert not result.success
+    assert result.exception_info is not None
+    assert result.exception_info.exception_type == exception_type
+    if skip_framework_reset:
+        framework_reset.assert_not_awaited()
+    else:
+        framework_reset.assert_awaited_once()
+    marked = sorted(c.args[0] for c in mock_account_manager.mark_contaminated.await_args_list)
+    assert marked == sorted(accounts.values())
+    mock_account_manager.clear_contaminated.assert_not_awaited()
 
 
 async def trial_for_reset(tmp_path, fake_container, fake_creds):
