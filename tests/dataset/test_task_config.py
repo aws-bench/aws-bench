@@ -128,6 +128,19 @@ def test_config_concurrency_read_only():
     assert cfg.concurrency.mode is ConcurrencyMode.READ_ONLY
 
 
+def test_config_concurrency_skip_framework_reset():
+    cfg = _parse('[scenario]\nscenario_id = "s"\n\n[concurrency]\nskip_framework_reset = true\n')
+    assert cfg.concurrency.skip_framework_reset is True
+
+
+def test_config_concurrency_skip_framework_reset_rejected_on_read_only():
+    with pytest.raises(ValidationError, match="mutating tasks only"):
+        _parse(
+            '[scenario]\nscenario_id = "s"\n\n'
+            '[concurrency]\nmode = "read-only"\nskip_framework_reset = true\n'
+        )
+
+
 def test_config_concurrency_defaults_to_mutating_when_absent():
     """A task.toml with no [concurrency] section defaults to MUTATING."""
     cfg = _parse('[scenario]\nscenario_id = "ec2-small"\n')

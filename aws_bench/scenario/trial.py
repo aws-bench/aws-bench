@@ -237,8 +237,8 @@ class ScenarioTrial:
                     except Exception as exc:
                         script_error = exc
 
-                # Recovery phases run regardless; the deploy snapshot is gated
-                # on script success inside _run_resource_management.
+                # Recovery phases run regardless of script outcome; the deploy snapshot
+                # and the framework reset are gated inside _run_resource_management.
                 await self._run_resource_management(phase, script_failed=script_error is not None)
 
                 # Re-raise script error after resource management completes
@@ -539,7 +539,8 @@ class ScenarioTrial:
 
         The deploy snapshot is skipped when the deploy script failed, so a
         half-deployed environment never becomes a baseline. Recovery phases
-        (verify/reset/cleanup) run regardless of script outcome.
+        (verify/reset/cleanup) run regardless of script outcome; the framework
+        reset alone is skipped when ``skip_framework_reset`` is set.
         """
         if phase == ScenarioPhase.DEPLOY:
             if script_failed:
@@ -549,7 +550,10 @@ class ScenarioTrial:
         elif phase == ScenarioPhase.VERIFY:
             await self._run_verify()
         elif phase == ScenarioPhase.RESET:
-            await self._run_reset()
+            if self._config.skip_framework_reset:
+                logger.info("Skipping the framework reset: post_invoke restored the account")
+            else:
+                await self._run_reset()
         elif phase == ScenarioPhase.CLEANUP:
             await self._run_cleanup(script_failed=script_failed)
 
