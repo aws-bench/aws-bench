@@ -13,6 +13,16 @@ Marketplaces and plugins are supplied as constructor kwargs, so they flow from
       --ak plugins='["aws-core@claude-plugins-official"]'
 
 With no ``plugins``, no plugin install runs.
+
+The installed plugins' MCP configs can be pointed at another endpoint, for
+example a pre-production stage, without republishing the plugin::
+
+    --ak mcp_endpoint_from=https://prod.example/mcp \
+    --ak mcp_endpoint_to=https://preprod.example/mcp \
+    --ak mcp_endpoint_args='["--region", "us-east-1"]'
+
+Setup fails if any installed plugin config still names ``mcp_endpoint_from``
+afterwards, so a trial never silently runs against the original endpoint.
 """
 
 from __future__ import annotations
@@ -22,6 +32,11 @@ from pathlib import Path
 
 from harbor.agents.installed.claude_code import ClaudeCode as _HarborClaudeCode
 from harbor.environments.base import BaseEnvironment
+
+from aws_bench.agents.plugin_endpoint import (
+    build_endpoint_rewrite_command,
+    validate_endpoint_override,
+)
 
 # claude installs to ~/.local/bin, which is off the PATH for the non-interactive
 # exec shell; prepend it so `claude plugin install` resolves.
@@ -36,6 +51,9 @@ class ClaudeCode(_HarborClaudeCode):
         logs_dir: Path,
         marketplaces: list[str] | None = None,
         plugins: list[str] | None = None,
+        mcp_endpoint_from: str | None = None,
+        mcp_endpoint_to: str | None = None,
+        mcp_endpoint_args: list[str] | None = None,
         *args,
         **kwargs,
     ):
@@ -46,6 +64,11 @@ class ClaudeCode(_HarborClaudeCode):
             marketplaces: Marketplace git sources to add, each an ``owner/repo``
                 slug or a clone URL.
             plugins: Plugin specs to install, each ``<plugin>@<marketplace>``.
+            mcp_endpoint_from: MCP endpoint URL to replace in the installed
+                plugins' MCP configs.
+            mcp_endpoint_to: Replacement endpoint URL.
+            mcp_endpoint_args: Extra arguments inserted after the replacement
+                URL, for a proxy that cannot infer them from the new hostname.
             *args: Forwarded to the base agent.
             **kwargs: Forwarded to the base agent.
         """
@@ -56,6 +79,11 @@ class ClaudeCode(_HarborClaudeCode):
                 "marketplaces were given without plugins; a marketplace is only "
                 "added when a plugin from it is installed"
             )
+        self._mcp_endpoint_from = mcp_endpoint_from
+        self._mcp_endpoint_to = mcp_endpoint_to
+        self._mcp_endpoint_args = validate_endpoint_override(
+            mcp_endpoint_from, mcp_endpoint_to, mcp_endpoint_args, bool(self._plugins)
+        )
         super().__init__(logs_dir, *args, **kwargs)
 
     async def install(self, environment: BaseEnvironment) -> None:
@@ -110,7 +138,19 @@ class ClaudeCode(_HarborClaudeCode):
         for spec in self._plugins:
             parts.append(f"claude plugin install {shlex.quote(spec)} --scope user")
         plugin_cmd = "; ".join(parts)
+        if self._mcp_endpoint_to:
+            plugin_cmd = f"{plugin_cmd} && {self._build_endpoint_rewrite_command()}"
 
         if base_cmd:
             return f"{base_cmd} && {plugin_cmd}"
         return plugin_cmd
+
+    def _build_endpoint_rewrite_command(self) -> str:
+        """Rewrite the endpoint in the plugins ``claude plugin install`` just cached."""
+        assert self._mcp_endpoint_from and self._mcp_endpoint_to
+        return build_endpoint_rewrite_command(
+            self._mcp_endpoint_from,
+            self._mcp_endpoint_to,
+            self._mcp_endpoint_args,
+            "${CLAUDE_CONFIG_DIR:-$HOME/.claude}",
+        )

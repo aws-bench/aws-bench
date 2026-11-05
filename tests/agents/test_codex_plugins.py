@@ -138,3 +138,42 @@ async def test_setup_failure_prevents_task_execution(tmp_path: Path, monkeypatch
         with pytest.raises(RuntimeError, match="failed"):
             await agent.run("test instruction", MagicMock(), AgentContext())
     assert not any("codex exec " in c.kwargs["command"] for c in execute.call_args_list)
+
+
+# ── MCP endpoint override ──
+
+_FROM = "https://prod.example/mcp"
+_TO = "https://preprod.example/mcp"
+
+
+def _override_agent(tmp_path: Path) -> Codex:
+    return Codex(
+        logs_dir=tmp_path / "logs",
+        marketplaces=["owner/repo"],
+        plugins=["sample@market"],
+        mcp_endpoint_from=_FROM,
+        mcp_endpoint_to=_TO,
+    )
+
+
+def test_endpoint_override_is_off_by_default(tmp_path: Path):
+    agent = Codex(
+        logs_dir=tmp_path / "logs", marketplaces=["owner/repo"], plugins=["sample@market"]
+    )
+    cmd = agent._build_register_mcp_servers_command()
+    assert cmd is not None
+    assert "MCP_ENDPOINT_OK" not in cmd
+
+
+def test_endpoint_override_runs_after_the_plugin_install(tmp_path: Path):
+    """The rewrite must follow `codex plugin add`, which is what writes the cached config."""
+    cmd = _override_agent(tmp_path)._build_register_mcp_servers_command()
+    assert cmd is not None
+    assert cmd.index("codex plugin add") < cmd.index("MCP_ENDPOINT_OK")
+    assert "CODEX_HOME" in cmd
+    assert subprocess.run(["bash", "-n", "-c", cmd]).returncode == 0
+
+
+def test_endpoint_override_validates_its_arguments(tmp_path: Path):
+    with pytest.raises(ValueError, match="given together"):
+        Codex(logs_dir=tmp_path / "logs", plugins=["sample@market"], mcp_endpoint_to=_TO)

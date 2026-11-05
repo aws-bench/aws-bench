@@ -30,6 +30,15 @@ Like Claude Code, marketplaces and plugins can be supplied via agent kwargs::
 The marketplace name comes from its manifest, not necessarily the repo name.
 Requires a Codex version supporting ``codex plugin add``. With no plugins,
 plugin setup is skipped.
+
+The installed plugins' MCP configs can be pointed at another endpoint, for example a
+pre-production stage, without republishing the plugin::
+
+    --ak mcp_endpoint_from=https://prod.example/mcp \
+    --ak mcp_endpoint_to=https://preprod.example/mcp \
+    --ak mcp_endpoint_args='["--region", "us-east-1"]'
+
+Setup fails if any installed plugin config still names ``mcp_endpoint_from`` afterwards.
 """
 
 from __future__ import annotations
@@ -43,6 +52,11 @@ from typing import Any
 from harbor.agents.installed.codex import Codex as _HarborCodex
 from harbor.environments.base import BaseEnvironment
 from harbor.models.agent.context import AgentContext
+
+from aws_bench.agents.plugin_endpoint import (
+    build_endpoint_rewrite_command,
+    validate_endpoint_override,
+)
 
 _DEFAULT_AWS_REGION = "us-east-2"
 
@@ -133,10 +147,24 @@ class Codex(_HarborCodex):
         logs_dir: Path,
         marketplaces: list[str] | None = None,
         plugins: list[str] | None = None,
+        mcp_endpoint_from: str | None = None,
+        mcp_endpoint_to: str | None = None,
+        mcp_endpoint_args: list[str] | None = None,
         *args: Any,
         **kwargs: Any,
     ) -> None:
-        """Store marketplace sources and ``<plugin>@<marketplace>`` selectors."""
+        """Store marketplace sources, plugin selectors and the MCP endpoint override.
+
+        Args:
+            logs_dir: Trial logs directory, forwarded to the base agent.
+            marketplaces: Marketplace sources to add.
+            plugins: Plugin specs to install, each ``<plugin>@<marketplace>``.
+            mcp_endpoint_from: MCP endpoint URL to replace in the installed plugins' MCP configs.
+            mcp_endpoint_to: Replacement endpoint URL.
+            mcp_endpoint_args: Extra arguments inserted after the replacement URL.
+            *args: Forwarded to the base agent.
+            **kwargs: Forwarded to the base agent.
+        """
         self._marketplaces = list(marketplaces) if marketplaces else []
         self._plugins = list(plugins) if plugins else []
         if self._marketplaces and not self._plugins:
@@ -144,6 +172,11 @@ class Codex(_HarborCodex):
                 "marketplaces were given without plugins; a marketplace is only "
                 "added when a plugin from it is installed"
             )
+        self._mcp_endpoint_from = mcp_endpoint_from
+        self._mcp_endpoint_to = mcp_endpoint_to
+        self._mcp_endpoint_args = validate_endpoint_override(
+            mcp_endpoint_from, mcp_endpoint_to, mcp_endpoint_args, bool(self._plugins)
+        )
         super().__init__(logs_dir, *args, **kwargs)
         # Read now because an aws-bench trial later overrides AWS_REGION to the task's Region
         # for the agent's AWS calls, which may not serve the model.
@@ -270,7 +303,19 @@ class Codex(_HarborCodex):
             parts.append(f"codex plugin marketplace add {shlex.quote(source)}")
         for spec in self._plugins:
             parts.append(f"codex plugin add {shlex.quote(spec)}")
+        if self._mcp_endpoint_to:
+            parts.append(self._build_endpoint_rewrite_command())
         return " && ".join(parts)
+
+    def _build_endpoint_rewrite_command(self) -> str:
+        """Rewrite the endpoint in the plugins ``codex plugin add`` just cached."""
+        assert self._mcp_endpoint_from and self._mcp_endpoint_to
+        return build_endpoint_rewrite_command(
+            self._mcp_endpoint_from,
+            self._mcp_endpoint_to,
+            self._mcp_endpoint_args,
+            f"${{CODEX_HOME:-{self._REMOTE_CODEX_HOME.as_posix()}}}",
+        )
 
     def _build_mcp_config_command(self) -> str | None:
         r"""Write MCP server config to ``$CODEX_HOME/config.toml`` with correct keys.
