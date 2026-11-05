@@ -169,7 +169,7 @@ def test_endpoint_override_runs_after_the_plugin_install(tmp_path: Path):
     """The rewrite must follow `codex plugin add`, which is what writes the cached config."""
     cmd = _override_agent(tmp_path)._build_register_mcp_servers_command()
     assert cmd is not None
-    assert cmd.index("codex plugin add") < cmd.index("MCP_ENDPOINT_OK")
+    assert cmd.rindex("codex plugin add") < cmd.index('"$py" -c')
     assert "CODEX_HOME" in cmd
     assert subprocess.run(["bash", "-n", "-c", cmd]).returncode == 0
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 from pathlib import Path
 
@@ -125,9 +126,11 @@ def test_a_new_endpoint_that_extends_the_old_one_is_not_stale(tmp_path: Path):
 
 
 def test_running_it_twice_is_a_no_op(tmp_path: Path):
-    _cache_config(tmp_path, _args_config())
+    path = _cache_config(tmp_path, _args_config())
     assert _rewrite(tmp_path) == []
+    first = path.read_text()
     assert _rewrite(tmp_path) == []
+    assert path.read_text() == first
 
 
 def test_every_cached_version_is_rewritten(tmp_path: Path):
@@ -170,7 +173,50 @@ def test_fails_on_an_unreadable_config_and_writes_nothing(tmp_path: Path):
 
 
 def test_fails_when_there_is_no_cache(tmp_path: Path):
-    assert _rewrite(tmp_path) != []
+    errors = _rewrite(tmp_path)
+    assert any("cannot be listed" in e for e in errors)
+
+
+def test_a_top_level_list_is_rewritten(tmp_path: Path):
+    path = _cache_config(tmp_path, ["proxy", _FROM])
+    assert _rewrite(tmp_path, ["--region", "us-east-1"]) == []
+    assert json.loads(path.read_text()) == ["proxy", _TO, "--region", "us-east-1"]
+
+
+def test_the_old_endpoint_left_as_a_key_fails(tmp_path: Path):
+    """A leftover is stale wherever it appears, including as an object key."""
+    _cache_config(tmp_path, {"servers": {_FROM: 1, "other": _TO}})
+    errors = _rewrite(tmp_path)
+    assert any("still names" in e for e in errors)
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores directory permissions")
+def test_an_unreadable_directory_fails_instead_of_being_skipped(tmp_path: Path):
+    """A config that cannot be read could still name the old endpoint, so it is an error."""
+    _cache_config(tmp_path, _args_config(), version="1.0.0")
+    hidden = _cache_config(tmp_path, _args_config(), version="2.0.0")
+    hidden.parent.chmod(0o000)
+    try:
+        errors = _rewrite(tmp_path)
+    finally:
+        hidden.parent.chmod(0o755)
+    assert any("cannot be listed" in e for e in errors)
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores directory permissions")
+def test_a_write_failure_leaves_every_config_untouched(tmp_path: Path):
+    """Files are staged in full before any is replaced, so a failure cannot leave a mix."""
+    first = _cache_config(tmp_path, _args_config(), version="1.0.0")
+    second = _cache_config(tmp_path, _args_config(), version="2.0.0")
+    second.parent.chmod(0o555)  # readable, but no new file can be created next to the config
+    try:
+        errors = _rewrite(tmp_path)
+    finally:
+        second.parent.chmod(0o755)
+    assert any("cannot write" in e for e in errors)
+    assert json.loads(first.read_text()) == _args_config()
+    assert json.loads(second.read_text()) == _args_config()
+    assert not list(tmp_path.rglob("*.tmp"))
 
 
 # ── the command run in the container ──

@@ -62,7 +62,8 @@ def rewrite_plugin_endpoints(
     Only values equal to ``endpoint_from`` are replaced. When the value is an element of a
     list (a command's ``args``), ``endpoint_args`` are inserted right after the new URL;
     when it is an object value (a ``url`` field) there is nowhere to put them, so that is
-    an error. Nothing is written unless every config passes the checks.
+    an error. Nothing is written unless every config passes the checks, and the files are
+    replaced only after all of them were written out in full.
 
     Args:
         cache_dir: The agent CLI's ``plugins/cache`` directory.
@@ -87,7 +88,8 @@ def rewrite_plugin_endpoints(
             for item in node:
                 yield from strings(item)
         elif isinstance(node, dict):
-            for item in node.values():
+            for key, item in node.items():
+                yield key
                 yield from strings(item)
 
     def rewrite(node: object, where: str) -> object:
@@ -115,7 +117,10 @@ def rewrite_plugin_endpoints(
             return result
         return node
 
-    for root, _dirs, files in os.walk(cache_dir):
+    def unreadable(exc: OSError) -> None:
+        errors.append(f"{exc.filename}: cannot be listed ({exc.strerror})")
+
+    for root, _dirs, files in os.walk(cache_dir, onerror=unreadable):
         for name in sorted(files):
             if name not in (".mcp.json", "mcp.json"):
                 continue
@@ -137,11 +142,24 @@ def rewrite_plugin_endpoints(
 
     if not names_new:
         errors.append(f"no plugin config under {cache_dir} names {endpoint_to}")
-    if not errors:
+    if errors:
+        return errors
+    staged: list[tuple[str, str]] = []
+    try:
         for path, updated in pending:
-            with open(path, "w", encoding="utf-8") as handle:
+            temporary = path + ".endpoint-rewrite.tmp"
+            staged.append((temporary, path))
+            with open(temporary, "w", encoding="utf-8") as handle:
                 json.dump(updated, handle, indent=2, ensure_ascii=False)
                 handle.write("\n")
+            os.chmod(temporary, os.stat(path).st_mode & 0o7777)
+        for temporary, path in staged:
+            os.replace(temporary, path)
+    except OSError as exc:
+        for temporary, _path in staged:
+            if os.path.exists(temporary):
+                os.remove(temporary)
+        errors.append(f"cannot write {exc.filename} ({exc.strerror})")
     return errors
 
 
