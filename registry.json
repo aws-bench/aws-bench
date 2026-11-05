@@ -544,7 +544,7 @@
   },
   {
     "name": "ec2-multiregion",
-    "version": "1.0.0",
+    "version": "1.0.1",
     "description": "Small EC2-only environment used for end-to-end env-setup validation. Two stacks (ec2_ks84v1fh1, ec2_ls9fuhb52) plus AppRolesStack across us-east-1, us-west-1, and us-west-2; 9 aws-introspection tasks against ec2-multiregion.",
     "tasks": [
       {
@@ -606,7 +606,7 @@
       {
         "name": "ec2-multiregion",
         "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
-        "git_commit_id": "b1b22256aedd2651d40214764bd17ac13e315d9b",
+        "git_commit_id": "1adde7b840484bc67ade43bf597fddda84c210c4",
         "path": "scenarios/ec2-multiregion"
       }
     ],
@@ -1101,7 +1101,7 @@
   },
   {
     "name": "aws-bench-quickstart",
-    "version": "1.0.0",
+    "version": "1.0.1",
     "description": "Test dataset to try out aws-bench and run a smoke test to confirm that the framework is configured correctly. It uses the same tasks as the ec2-multiregion scenario.",
     "tasks": [
       {
@@ -1163,7 +1163,7 @@
       {
         "name": "ec2-multiregion",
         "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
-        "git_commit_id": "b1b22256aedd2651d40214764bd17ac13e315d9b",
+        "git_commit_id": "1adde7b840484bc67ade43bf597fddda84c210c4",
         "path": "scenarios/ec2-multiregion"
       }
     ],
@@ -2046,7 +2046,7 @@
   },
   {
     "name": "all",
-    "version": "1.0.0",
+    "version": "1.0.1",
     "description": "Unified dataset spanning 8 scenario(s) (api-and-observability, compute-and-data, databases-and-storage, ec2-multiregion, reference-architectures, serverless-apps, streaming-and-iot, troubleshooting-multiservice): 8 scenarios, 134 tasks.",
     "tasks": [
       {
@@ -2876,7 +2876,7 @@
       {
         "name": "ec2-multiregion",
         "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
-        "git_commit_id": "b1b22256aedd2651d40214764bd17ac13e315d9b",
+        "git_commit_id": "1adde7b840484bc67ade43bf597fddda84c210c4",
         "path": "scenarios/ec2-multiregion"
       },
       {
