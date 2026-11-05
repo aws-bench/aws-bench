@@ -7,27 +7,16 @@ the Claude Code and Codex adapters replace the endpoint in the cached MCP config
 after the install. Both CLIs use the same layout: ``<config dir>/plugins/cache/...`` with
 the MCP config in ``.mcp.json`` or ``mcp.json``.
 
-The rewrite fails the setup if the old endpoint is still configured afterwards, or if no
-config names the new one, so a trial never silently runs against the original endpoint.
+The configs are edited as parsed JSON, so the result is always valid JSON. The rewrite fails
+the setup if a config still names the old endpoint afterwards, or if no config names the new
+one, so a trial never silently runs against the original endpoint.
 """
 
 from __future__ import annotations
 
+import inspect
 import json
 import shlex
-
-# Plugin MCP config file names the agent CLIs read from an installed plugin.
-PLUGIN_MCP_FILES = (".mcp.json", "mcp.json")
-
-
-def _sed_pattern(literal: str) -> str:
-    """Escape a literal for a sed basic regular expression delimited by ``|``."""
-    return "".join("\\" + c if c in "\\.*[]^$|" else c for c in literal)
-
-
-def _sed_replacement(literal: str) -> str:
-    """Escape a literal for a sed replacement delimited by ``|``."""
-    return "".join("\\" + c if c in "\\&|" else c for c in literal)
 
 
 def validate_endpoint_override(
@@ -48,8 +37,7 @@ def validate_endpoint_override(
         A copy of ``endpoint_args`` (empty when none were given).
 
     Raises:
-        ValueError: If the combination is incomplete or a value cannot be embedded in
-            the ``sed`` expression.
+        ValueError: If the combination is incomplete.
     """
     args = list(endpoint_args) if endpoint_args else []
     if bool(endpoint_from) != bool(endpoint_to):
@@ -58,20 +46,123 @@ def validate_endpoint_override(
         raise ValueError("mcp_endpoint_args needs mcp_endpoint_from and mcp_endpoint_to")
     if endpoint_to and not has_plugins:
         raise ValueError("an MCP endpoint rewrite needs plugins to rewrite")
-    for value in (endpoint_from, endpoint_to, *args):
-        if value is not None and ("|" in value or "\n" in value):
-            raise ValueError(f"MCP endpoint values must not contain '|' or newlines: {value!r}")
     return args
+
+
+# The two functions below run inside the trial container, where aws_bench is not installed,
+# so they use only the standard library and `build_endpoint_rewrite_command` ships their
+# source with `python -c`. Tests call them directly.
+
+
+def rewrite_plugin_endpoints(
+    cache_dir: str, endpoint_from: str, endpoint_to: str, endpoint_args: list[str]
+) -> list[str]:
+    """Rewrite ``endpoint_from`` to ``endpoint_to`` in every cached plugin MCP config.
+
+    Only values equal to ``endpoint_from`` are replaced. When the value is an element of a
+    list (a command's ``args``), ``endpoint_args`` are inserted right after the new URL;
+    when it is an object value (a ``url`` field) there is nowhere to put them, so that is
+    an error. Nothing is written unless every config passes the checks.
+
+    Args:
+        cache_dir: The agent CLI's ``plugins/cache`` directory.
+        endpoint_from: Endpoint URL to replace.
+        endpoint_to: Replacement endpoint URL.
+        endpoint_args: Extra arguments inserted after the replacement URL in a list.
+
+    Returns:
+        Error messages; empty when the rewrite took effect.
+    """
+    import json
+    import os
+
+    errors: list[str] = []
+    pending: list[tuple[str, object]] = []
+    names_new = False
+
+    def strings(node: object):
+        if isinstance(node, str):
+            yield node
+        elif isinstance(node, list):
+            for item in node:
+                yield from strings(item)
+        elif isinstance(node, dict):
+            for item in node.values():
+                yield from strings(item)
+
+    def rewrite(node: object, where: str) -> object:
+        if isinstance(node, list):
+            out: list[object] = []
+            for item in node:
+                if item == endpoint_from:
+                    out.append(endpoint_to)
+                    out.extend(endpoint_args)
+                else:
+                    out.append(rewrite(item, where))
+            return out
+        if isinstance(node, dict):
+            result: dict[str, object] = {}
+            for key, value in node.items():
+                if value == endpoint_from:
+                    if endpoint_args:
+                        errors.append(
+                            f"{where}: '{key}' holds the endpoint, so mcp_endpoint_args "
+                            "(command arguments) cannot be inserted"
+                        )
+                    result[key] = endpoint_to
+                else:
+                    result[key] = rewrite(value, where)
+            return result
+        return node
+
+    for root, _dirs, files in os.walk(cache_dir):
+        for name in sorted(files):
+            if name not in (".mcp.json", "mcp.json"):
+                continue
+            path = os.path.join(root, name)
+            try:
+                with open(path, encoding="utf-8") as handle:
+                    original = json.load(handle)
+            except (OSError, ValueError) as exc:
+                errors.append(f"{path}: cannot be read as JSON ({exc})")
+                continue
+            updated = rewrite(original, path)
+            for text in strings(updated):
+                if endpoint_from in text and endpoint_to not in text:
+                    errors.append(f"{path}: still names {endpoint_from} in {text!r}")
+                if endpoint_to in text:
+                    names_new = True
+            if updated != original:
+                pending.append((path, updated))
+
+    if not names_new:
+        errors.append(f"no plugin config under {cache_dir} names {endpoint_to}")
+    if not errors:
+        for path, updated in pending:
+            with open(path, "w", encoding="utf-8") as handle:
+                json.dump(updated, handle, indent=2, ensure_ascii=False)
+                handle.write("\n")
+    return errors
+
+
+def rewrite_main(argv: list[str]) -> int:
+    """Command-line entry: ``cache_dir endpoint_from endpoint_to <JSON list of extra args>``."""
+    import json
+    import sys
+
+    errors = rewrite_plugin_endpoints(argv[1], argv[2], argv[3], json.loads(argv[4]))
+    for error in errors:
+        print(f"MCP endpoint rewrite failed: {error}", file=sys.stderr)
+    if errors:
+        return 1
+    print(f"MCP_ENDPOINT_OK {argv[3]}")
+    return 0
 
 
 def build_endpoint_rewrite_command(
     endpoint_from: str, endpoint_to: str, endpoint_args: list[str], config_dir: str
 ) -> str:
-    """Rewrite the endpoint in every installed plugin MCP config, then verify.
-
-    The URL is matched as a whole JSON string, so the replacement (the new URL followed by
-    ``endpoint_args``) keeps the config valid JSON. The check reads the plugin cache: no
-    config may still name the old endpoint, and at least one must name the new one.
+    """Build the shell command that rewrites the cached plugin configs and verifies it.
 
     Args:
         endpoint_from: Endpoint URL to replace.
@@ -83,20 +174,19 @@ def build_endpoint_rewrite_command(
     Returns:
         A shell command that exits non-zero when the rewrite did not take effect.
     """
-    old = json.dumps(endpoint_from)
-    new = ", ".join(json.dumps(v) for v in (endpoint_to, *endpoint_args))
-    expr = f"s|{_sed_pattern(old)}|{_sed_replacement(new)}|g"
-    stale_msg = shlex.quote(f"MCP endpoint rewrite failed: {endpoint_from} still configured")
-    missing_msg = shlex.quote(f"MCP endpoint rewrite failed: no plugin config names {endpoint_to}")
-    includes = " ".join(f"--include={shlex.quote(f)}" for f in PLUGIN_MCP_FILES)
-    src, dst = shlex.quote(endpoint_from), shlex.quote(endpoint_to)
+    program = "\n".join(
+        [
+            "from __future__ import annotations",
+            "import sys",
+            inspect.getsource(rewrite_plugin_endpoints),
+            inspect.getsource(rewrite_main),
+            "sys.exit(rewrite_main(sys.argv))",
+        ]
+    )
     return (
-        f'( d="{config_dir}/plugins"; '
-        f'for f in $(grep -rlF {src} "$d" {includes}); do '
-        f'sed -i {shlex.quote(expr)} "$f" || exit 1; done; '
-        f'if grep -rqF {src} "$d/cache" {includes}; then '
-        f"echo {stale_msg} >&2; exit 1; fi; "
-        f'grep -rqF {dst} "$d/cache" {includes} || '
-        f"{{ echo {missing_msg} >&2; exit 1; }}; "
-        f"echo {shlex.quote('MCP_ENDPOINT_OK ' + endpoint_to)} )"
+        "( py=$(command -v python3 || command -v python) "
+        '|| { echo "MCP endpoint rewrite failed: python not found" >&2; exit 1; }; '
+        f'"$py" -c {shlex.quote(program)} "{config_dir}/plugins/cache" '
+        f"{shlex.quote(endpoint_from)} {shlex.quote(endpoint_to)} "
+        f"{shlex.quote(json.dumps(endpoint_args))} )"
     )
