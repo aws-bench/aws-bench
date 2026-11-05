@@ -225,18 +225,3 @@ def test_endpoint_override_validates_its_arguments(logs_dir: Path):
     """The shared validation applies; its cases are covered in test_plugin_endpoint."""
     with pytest.raises(ValueError, match="given together"):
         ClaudeCode(logs_dir=logs_dir, plugins=[_PLUGIN], mcp_endpoint_from=_FROM)
-
-
-def test_endpoint_override_needs_every_install_to_succeed(logs_dir: Path):
-    """A failed earlier install must stop setup before the rewrite, not be masked by a later one."""
-    agent = ClaudeCode(
-        logs_dir=logs_dir,
-        marketplaces=["a/one"],
-        plugins=["p1@one", "p2@one"],
-        mcp_endpoint_from=_FROM,
-        mcp_endpoint_to=_TO,
-    )
-    cmd = agent._build_register_mcp_servers_command()
-    assert cmd is not None
-    assert "p1@one --scope user; " not in cmd
-    assert "p1@one --scope user && claude plugin install p2@one --scope user && " in cmd

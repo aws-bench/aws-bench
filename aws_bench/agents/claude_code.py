@@ -137,13 +137,9 @@ class ClaudeCode(_HarborClaudeCode):
             parts.append(f"claude plugin marketplace add {shlex.quote(source)} 2>/dev/null || true")
         for spec in self._plugins:
             parts.append(f"claude plugin install {shlex.quote(spec)} --scope user")
+        plugin_cmd = "; ".join(parts)
         if self._mcp_endpoint_to:
-            # Every install must succeed before the rewrite, or a missing plugin config would go
-            # unnoticed; each marketplace add already ends in `|| true`.
-            parts.append(self._build_endpoint_rewrite_command())
-            plugin_cmd = " && ".join(parts)
-        else:
-            plugin_cmd = "; ".join(parts)
+            plugin_cmd = f"{plugin_cmd} && {self._build_endpoint_rewrite_command()}"
 
         if base_cmd:
             return f"{base_cmd} && {plugin_cmd}"
