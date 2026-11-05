@@ -55,6 +55,18 @@ class TestKiroCliInstall:
         assert environment.exec.call_count >= 2
 
     @pytest.mark.asyncio
+    async def test_install_uses_supported_installer_interface(self, agent: KiroCli):
+        environment = MagicMock()
+        environment.exec = AsyncMock(return_value=MagicMock(return_code=0, stdout="", stderr=""))
+
+        await agent.install(environment)
+
+        command = environment.exec.call_args_list[1].kwargs.get("command", "")
+        assert "./kirocli/install.sh &&" in command
+        assert "--force" not in command
+        assert "--no-confirm" not in command
+
+    @pytest.mark.asyncio
     async def test_install_disables_greeting(self, agent: KiroCli):
         environment = MagicMock()
         environment.exec = AsyncMock(return_value=MagicMock(return_code=0, stdout="", stderr=""))
