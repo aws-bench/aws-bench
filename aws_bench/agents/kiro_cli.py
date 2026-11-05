@@ -184,7 +184,7 @@ class KiroCli(BaseInstalledAgent):
                 'kirocli-${KIRO_ARCH}-linux.zip" '
                 "-o /tmp/kirocli.zip && "
                 "cd /tmp && unzip -q kirocli.zip && "
-                "./kirocli/install.sh --force --no-confirm && "
+                "./kirocli/install.sh && "
                 "rm -rf /tmp/kirocli.zip /tmp/kirocli && "
                 f"{_PATH_PREFIX}"
                 "kiro-cli --version && "
