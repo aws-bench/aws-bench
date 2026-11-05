@@ -109,7 +109,7 @@ def test_fails_when_no_config_names_the_endpoint(tmp_path: Path):
     result = _run(tmp_path)
 
     assert result.returncode != 0
-    assert "names" in result.stderr
+    assert "no plugin config names" in result.stderr
 
 
 def test_fails_when_there_is_no_plugin_cache(tmp_path: Path):

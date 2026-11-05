@@ -11,53 +11,15 @@ from __future__ import annotations
 import json
 import shlex
 
-# Runs in the trial container, where aws_bench is not installed, so it uses only the standard
-# library. Arguments: cache dir, old endpoint, new endpoint, JSON list of extra arguments.
-# The configs are edited as parsed JSON and only values equal to the old endpoint change.
-_REWRITE_SCRIPT = """
-import json, os, sys
-
-cache, old, new, extra = sys.argv[1], sys.argv[2], sys.argv[3], json.loads(sys.argv[4])
-replaced = 0
-
-
-def rewrite(node):
-    global replaced
-    if isinstance(node, list):
-        out = []
-        for item in node:
-            if item == old:
-                out += [new, *extra]
-                replaced += 1
-            else:
-                out.append(rewrite(item))
-        return out
-    if isinstance(node, dict):
-        out = {}
-        for key, value in node.items():
-            if value == old and extra:
-                sys.exit(f"mcp_endpoint_args need an args list, but '{key}' holds the endpoint")
-            if value == old:
-                out[key] = new
-                replaced += 1
-            else:
-                out[key] = rewrite(value)
-        return out
-    return node
-
-
-for root, _, names in os.walk(cache):
-    for name in names:
-        if name in (".mcp.json", "mcp.json"):
-            path = os.path.join(root, name)
-            with open(path) as handle:
-                config = rewrite(json.load(handle))
-            with open(path, "w") as handle:
-                json.dump(config, handle, indent=2)
-if not replaced:
-    sys.exit(f"no plugin config under {cache} names {old}")
-print(f"MCP_ENDPOINT_OK {new}")
-"""
+# jq program: values equal to $old become $new. In an array (a command's args) the extra
+# arguments follow the new value; an object value (a `url` field) has no room for them.
+_JQ_REWRITE = """walk(
+  if type == "array" then map(if . == $old then ($new, $extra[]) else . end)
+  elif type == "object" then map_values(
+    if . != $old then .
+    elif ($extra | length) > 0 then error("mcp_endpoint_args need an args list, not a field")
+    else $new end)
+  else . end)"""
 
 
 def validate_endpoint_override(
@@ -96,10 +58,16 @@ def build_endpoint_rewrite_command(
     Returns:
         A shell command that exits non-zero when no config was rewritten.
     """
+    old, new = shlex.quote(endpoint_from), shlex.quote(endpoint_to)
+    extra = shlex.quote(json.dumps(endpoint_args))
     return (
-        "( py=$(command -v python3 || command -v python) "
-        '|| { echo "python not found" >&2; exit 1; }; '
-        f'"$py" -c {shlex.quote(_REWRITE_SCRIPT)} "{config_dir}/plugins/cache" '
-        f"{shlex.quote(endpoint_from)} {shlex.quote(endpoint_to)} "
-        f"{shlex.quote(json.dumps(endpoint_args))} )"
+        f'( d="{config_dir}/plugins/cache"; found=0; '
+        'command -v jq >/dev/null || { echo "jq not found" >&2; exit 1; }; '
+        'for f in $(find "$d" \\( -name .mcp.json -o -name mcp.json \\) 2>/dev/null); do '
+        f"if jq -e --arg old {old} 'any(..; . == $old)' \"$f\" >/dev/null 2>&1; then "
+        f"jq --arg old {old} --arg new {new} --argjson extra {extra} {shlex.quote(_JQ_REWRITE)} "
+        '"$f" > "$f.tmp" && mv "$f.tmp" "$f" || exit 1; found=1; fi; done; '
+        '[ "$found" = 1 ] || '
+        f'{{ echo "MCP endpoint rewrite failed: no plugin config names "{old} >&2; exit 1; }}; '
+        f"echo MCP_ENDPOINT_OK {new} )"
     )

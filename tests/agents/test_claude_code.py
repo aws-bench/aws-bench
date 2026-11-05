@@ -216,7 +216,7 @@ def test_endpoint_override_runs_after_the_plugin_install(logs_dir: Path):
     """The rewrite must follow `claude plugin install`, which is what writes the config."""
     cmd = _override_agent(logs_dir)._build_register_mcp_servers_command()
     assert cmd is not None
-    assert cmd.rindex("claude plugin install") < cmd.index('"$py" -c')
+    assert cmd.rindex("claude plugin install") < cmd.index("MCP_ENDPOINT_OK")
     assert "CLAUDE_CONFIG_DIR" in cmd
     assert subprocess.run(["bash", "-n", "-c", cmd]).returncode == 0
 
