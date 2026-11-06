@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
@@ -186,3 +187,41 @@ async def test_rewrites_github_ssh_to_https(plugin_agent: ClaudeCode):
     await plugin_agent.install(environment)
 
     assert any("insteadOf" in c and "git@github.com:" in c for c in _commands(environment))
+
+
+# ── MCP endpoint override ──
+
+_FROM = "https://prod.example/mcp"
+_TO = "https://preprod.example/mcp"
+
+
+def _override_agent(logs_dir: Path) -> ClaudeCode:
+    return ClaudeCode(
+        logs_dir=logs_dir,
+        marketplaces=[_MARKETPLACE],
+        plugins=[_PLUGIN],
+        mcp_endpoint_from=_FROM,
+        mcp_endpoint_to=_TO,
+    )
+
+
+def test_endpoint_override_is_off_by_default(plugin_agent: ClaudeCode):
+    """Without the arguments, no rewrite is appended to the plugin install."""
+    cmd = plugin_agent._build_register_mcp_servers_command()
+    assert cmd is not None
+    assert "MCP_ENDPOINT_OK" not in cmd
+
+
+def test_endpoint_override_runs_after_the_plugin_install(logs_dir: Path):
+    """The rewrite must follow `claude plugin install`, which is what writes the config."""
+    cmd = _override_agent(logs_dir)._build_register_mcp_servers_command()
+    assert cmd is not None
+    assert cmd.rindex("claude plugin install") < cmd.index("MCP_ENDPOINT_OK")
+    assert "CLAUDE_CONFIG_DIR" in cmd
+    assert subprocess.run(["bash", "-n", "-c", cmd]).returncode == 0
+
+
+def test_endpoint_override_validates_its_arguments(logs_dir: Path):
+    """The shared validation applies; its cases are covered in test_plugin_endpoint."""
+    with pytest.raises(ValueError, match="given together"):
+        ClaudeCode(logs_dir=logs_dir, plugins=[_PLUGIN], mcp_endpoint_from=_FROM)
