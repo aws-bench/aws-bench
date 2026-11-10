@@ -25,15 +25,89 @@ model, so every trial is expected to score `1.0`.
 | Step | Command | Timeout |
 |---|---|---|
 | 1 | `env init` validates the account and records the pristine baseline | 20 min |
-| 2 | `env setup` deploys the scenario (CDK) in `us-east-1`, `us-west-1`, `us-west-2` | 45 min |
-| 3 | `run -a oracle`, with pre-run environment verification on | 90 min |
-| 4 | Asserts every trial completed, without errors, with reward `1.0` | |
-| 5 | `env cleanup` always runs, even if an earlier step failed | 30 min |
+| 2 | `env setup` deploys the scenario (CDK) in `us-east-1`, `us-west-1`, `us-west-2` | scenario `environment.build_timeout_sec` + `deploy.timeout_sec` + 30 min (70 min for `ec2-multiregion`) |
+| 3 | `run -a oracle`, with pre-run environment verification on | sum over the selected tasks of `environment.build_timeout_sec` + `agent.timeout_sec` + `verifier.timeout_sec` (+ `pre_invoke`/`post_invoke` `timeout_sec`) + 30 min (340 min for the nine quickstart tasks) |
+| 4 | Asserts the job planned the expected number of trials, and every trial completed, without errors, with reward `1.0` | |
+| 5 | `env cleanup` is attempted once, also when init, setup or the test failed | scenario `environment.build_timeout_sec` + `cleanup.timeout_sec` + 30 min (130 min for `ec2-multiregion`); no deadline if no `scenario.toml` can be read |
 
-`scripts/check_job_rewards.py` checks the rewards. It fails if the job has no
-trials, if any trial raised an exception, if fewer trials completed than
-planned, or if any trial has a missing reward or one below `1.0`. You can also
-run it on its own: `python scripts/check_job_rewards.py <jobs-dir>/<job-name>`.
+The derived timeouts are built from the budgets the scenario and tasks
+declare:
+
+- **Setup and cleanup** come from `scenario.toml`, so the test does not stop
+  either step while it is inside those budgets. Cleanup includes the build
+  budget because `env cleanup` builds the scenario container first. With
+  `AWS_BENCH_INTEG_DATASET_PATH` the file is
+  `<checkout>/scenarios/<scenario>/scenario.toml`. With a registry dataset it
+  is the copy that `env init` caches in the scratch `HOME`. With several
+  scenarios the budgets are summed. If no manifest can be read, setup falls
+  back to 70 min, and cleanup runs with no deadline from the test at all,
+  because any fixed guess could stop a custom scenario's cleanup inside its own
+  budget and leave resources behind. The CLI bounds only its container build
+  and cleanup-phase script; the rest of `env cleanup` has no declared budget, so
+  a hung cleanup needs a manual interrupt.
+- **`run`** comes from each selected task's `task.toml`, summed as if the
+  trials ran one after another. The phase budgets count when the task declares
+  `[pre_invoke]`/`[post_invoke]` or ships that script directory. A task whose
+  `task.toml` cannot be read, or has no agent timeout, counts 60 min. With no
+  task directories at all the test uses 360 min. The scenario reset that
+  follows each mutating trial, and any environment healthcheck, are not
+  derived from their budgets; only the 30 min margin covers them.
+- The budgets are not scaled: the test passes no timeout multiplier.
+
+The test prints the values it used, including when cleanup has no deadline. On a timeout the CLI gets `SIGTERM`, so
+its own shutdown can stop containers and save results, and `SIGKILL` 60 s
+later if it is still running.
+
+The test counts the trials it expects with aws-bench's own dataset resolver,
+using the same source arguments and `-i` globs that it passes to `run` (one
+trial per task; the test passes no `-k`), and fails if the job planned a
+different number. Without `AWS_BENCH_INTEG_EXPECTED_TRIALS`, this confirms
+that the job ran every task the selection resolves, but it cannot detect a
+selection that is itself too small: a glob, dataset or registry that resolves
+fewer tasks than intended lowers both counts and still passes. With
+`AWS_BENCH_INTEG_EXPECTED_TRIALS=N` it can: the test fails before `run` if
+the selection does not resolve exactly `N` trials, and afterwards requires
+the job to have planned `N`.
+
+`scripts/check_job_rewards.py` checks the rewards per trial, using the trial
+names in `result.json`, and per eval. It fails if the job has no trials or a
+different number than expected (`--expected-trials N`), if any trial raised an
+exception, if fewer trials completed than planned, if any planned trial has no
+reward, if an eval's trial count does not match the trials it lists, or if any
+reward value of any trial is not `1.0`. Trials may carry different reward
+keys, also within one eval; each trial is checked against the rewards it has,
+and a trial with several reward keys counts once. Malformed, negative or empty
+statistics also count as a failure, including an `exception_stats` entry that
+is not a list. The script's
+docstring lists every check, and `tests/scripts/test_check_job_rewards.py` has
+failing inputs for them. You can also run it on its own:
+`python scripts/check_job_rewards.py <jobs-dir>/<job-name> [--expected-trials N]`.
+
+The test's own failure messages and CLI results mask secrets: the values of
+`--ve`/`--ae` assignments, of any `KEY=VALUE` argument whose key looks secret,
+of arguments passed as `Secret`, and of environment variables whose names look
+secret, wherever they appear in the captured output. Values of secret-named
+environment variables shorter than 8 characters are not scrubbed, so that
+short flag values such as `1` or `true` do not mangle ordinary output; a real
+secret that short would appear unmasked. `tests/test_integration_helpers.py` checks the full pytest report
+(also with `-l` and `--full-trace`) for a canary on the non-zero exit,
+timeout, unexpected-exception, environment-only-secret and
+setup-plus-cleanup-failure paths. This covers the test's output only. What the
+CLI itself writes to its logs under the scratch `HOME` is not checked here.
+
+If cleanup fails, how it is reported depends on what failed before it:
+
+- **Init or setup failed**: that failure is reported as
+  the error at setup of the test, with the cleanup failure appended to its
+  message (`Also, env cleanup failed (resources may be left behind): ...`).
+- **The test body failed**: pytest reports the test as `FAILED` with its own
+  message, and the cleanup failure separately, as an `ERROR at teardown` with
+  `env cleanup failed (resources may be left behind): ...`.
+- **Nothing else failed**: the cleanup failure is reported as an
+  `ERROR at teardown` with the same notice.
+
+`tests/test_integration_helpers.py` unit-tests the `deployed` context manager
+behind this with a stubbed CLI, including exceptions raised inside its block.
 
 The other tests in `tests/integration/test_acceptance.py` are named placeholders
 (skipped) for the commands in the backlog.
@@ -203,6 +277,13 @@ make integration
 ```
 
 Without the two opt-in variables, the target prints usage and exits with code 2.
+An explicit `pytest -m <expr>` overrides the default deselection of the
+`integration` marker. Nothing is deployed unless `AWS_BENCH_INTEG=1` and the
+account config are set, but the result is not all skips: the Bedrock token is
+checked first. For example, `pytest -m integration tests/integration` without
+the opt-in variables reports `7 skipped, 1 error` (the error is
+`AWS_BEARER_TOKEN_BEDROCK is not set`) if no token is set, and `8 skipped` if
+one is.
 
 ### Environment variables
 
@@ -216,6 +297,7 @@ Without the two opt-in variables, the target prints usage and exits with code 2.
 | `AWS_BENCH_INTEG_DATASET_PATH` | no | Path to a local `aws-bench-datasets` checkout, used instead of the registry. Use it to test unreleased dataset changes. Cannot be combined with `AWS_BENCH_INTEG_DATASET`. |
 | `AWS_BENCH_INTEG_SCENARIO` | no | Scenario to use with `AWS_BENCH_INTEG_DATASET_PATH` (default `ec2-multiregion`). The account config must map it. |
 | `AWS_BENCH_INTEG_TASKS` | no | Comma-separated `run -i` globs to run a subset of tasks, e.g. `'*list-ec-instances-all-regions'`. Start each glob with `*`, so it matches both directory and registry task names. |
+| `AWS_BENCH_INTEG_EXPECTED_TRIALS` | no | Positive integer: the number of trials the run must plan, e.g. `9` for the full quickstart dataset or `1` with a single-task glob. The test fails before `run` if the selection resolves a different number. Without it, a selection that is itself too small is not detected. Any other value fails the test at startup. |
 | `AWS_BENCH_INTEG_HOME_LINKS` | no | Extra directories (comma-separated, relative to `HOME`) to link into the test's scratch `HOME`. Use it when your credential helper reads files there (see [How the test isolates state](#how-the-test-isolates-state)). |
 | `AWS_BENCH_INTEG_ENV_NAME` | no | If set, must equal the config's `name`. The test fails otherwise. |
 
@@ -295,7 +377,11 @@ EBS snapshots in `us-east-1`.
 
 ## Validation status
 
-The quickstart test has been run live in a pre-existing-mode test account. All
-nine `aws-bench-quickstart` tasks completed with reward `1.0`, with pre-run
-environment verification on, and `env cleanup` finished successfully. A run
-longer than one hour with self-refreshing credentials has not been validated yet.
+The quickstart test has been run live, in a pre-existing-mode test account, at
+commit `5804afc`. All nine `aws-bench-quickstart` tasks completed with reward
+`1.0`, with pre-run environment verification on, and `env cleanup` finished
+successfully. Later changes (secret redaction, derived timeouts, the
+reward-check rewrite, `SIGTERM` handling, cleanup-failure reporting and
+`AWS_BENCH_INTEG_EXPECTED_TRIALS`) are
+covered by unit tests but have not been re-run live yet. A run longer than one
+hour with self-refreshing credentials has not been validated yet.

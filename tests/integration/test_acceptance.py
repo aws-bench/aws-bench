@@ -8,14 +8,31 @@ commands are named placeholders; see ``BACKLOG.md`` for priorities.
 from __future__ import annotations
 
 import importlib.util
+import json
 import os
 from pathlib import Path
 
 import pytest
 
-from .conftest import REPO_ROOT, IntegSettings
+from .conftest import REPO_ROOT
+from .helpers import (
+    IntegSettings,
+    Secret,
+    SecretEnv,
+    StepTimeouts,
+    deployed,
+    expected_trial_count,
+    find_scenario_manifests,
+    resolve_run_tasks,
+    run_timeout_for,
+    step_timeouts_for,
+)
 
 pytestmark = pytest.mark.integration
+
+# `env init` validates the account and records the baseline; it has no
+# manifest budget of its own.
+INIT_TIMEOUT_SEC = 1200.0
 
 
 def _load_reward_checker():
@@ -30,10 +47,12 @@ def _load_reward_checker():
 
 
 @pytest.fixture(scope="session")
-def bedrock_token() -> str:
+def bedrock_token() -> Secret:
     """Bearer token for the verifier's LLM judge (every quickstart task uses one).
 
     Session-scoped so it is checked before ``deployed_env`` deploys anything.
+    Wrapped in ``Secret`` so pytest's failure tracebacks (which print each
+    frame's arguments) never show it.
     """
     token = os.environ.get("AWS_BEARER_TOKEN_BEDROCK", "")
     if not token:
@@ -41,53 +60,82 @@ def bedrock_token() -> str:
             "AWS_BEARER_TOKEN_BEDROCK is not set. The quickstart tasks are scored by a "
             "Bedrock LLM judge; run `eval $(uv run aws-bench env creds --eval)` first."
         )
-    return token
+    return Secret(token)
+
+
+def _step_timeouts(settings: IntegSettings, cli_env: SecretEnv) -> StepTimeouts:
+    """Timeouts from the scenario budgets; printed so a run shows what it used."""
+    timeouts = step_timeouts_for(
+        find_scenario_manifests(
+            dataset_path=settings.dataset_path,
+            scenario=settings.scenario,
+            home=Path(cli_env["HOME"]),
+        )
+    )
+    print(f"step timeouts: {timeouts.describe()}")
+    return timeouts
 
 
 @pytest.fixture(scope="module")
-def deployed_env(integ_settings: IntegSettings, run_cli):
-    """``env init`` + ``env setup``, with ``env cleanup`` as a finalizer (always runs)."""
+def deployed_env(integ_settings: IntegSettings, cli_env: SecretEnv, run_cli):
+    """``env init`` + ``env setup``, with one ``env cleanup`` attempt on every exit path.
+
+    Setup and cleanup timeouts come from the scenario manifest (read after
+    ``env init``, which caches registry scenarios; re-read for cleanup, since
+    the cache may only exist after a failed init). If init or setup fails and
+    cleanup fails too, the original failure is reported with the cleanup
+    failure attached (see ``helpers.deployed``).
+    """
     env, src = integ_settings.env_name, integ_settings.env_source_args()
-    try:
-        run_cli("env", "init", "--env-name", env, *src, "--quiet", timeout=1200)
-        run_cli("env", "setup", "--env-name", env, *src, "--quiet", timeout=2700)
+    with deployed(
+        run_cli,
+        init_args=["env", "init", "--env-name", env, *src, "--quiet"],
+        setup_args=["env", "setup", "--env-name", env, *src, "--quiet"],
+        cleanup_args=["env", "cleanup", "--env-name", env, *src, "--yes", "--quiet"],
+        init_timeout=INIT_TIMEOUT_SEC,
+        setup_timeout=lambda: _step_timeouts(integ_settings, cli_env).setup,
+        cleanup_timeout=lambda: _step_timeouts(integ_settings, cli_env).cleanup,
+    ):
         yield integ_settings
-    finally:
-        # check=False so a failed cleanup never masks the original failure.
-        result = run_cli(
-            "env", "cleanup", "--env-name", env, *src, "--yes", "--quiet",
-            timeout=1800, check=False,
-        )  # fmt: skip
-        if result.returncode != 0:
-            pytest.fail(
-                f"env cleanup failed (resources may be left behind):\n{result.output[-4000:]}"
-            )
 
 
 def test_quickstart_oracle_earns_full_reward(
-    bedrock_token: str, deployed_env: IntegSettings, run_cli
+    bedrock_token: Secret, deployed_env: IntegSettings, cli_env: SecretEnv, run_cli
 ):
-    """Quickstart dataset + oracle agent: every trial completes with reward 1.0."""
+    """Quickstart dataset + oracle agent: the expected number of trials, all with reward 1.0."""
     job_name = f"integ-{deployed_env.run_id}"
     jobs_dir = Path(run_cli.cwd) / "jobs"  # type: ignore[attr-defined]
-    task_filter = [arg for g in deployed_env.task_globs for arg in ("-i", g)]
+    # Same resolver and cache directory as the CLI `run` below.
+    tasks = resolve_run_tasks(
+        deployed_env.run_dataset_config(
+            download_dir=Path(cli_env["HOME"]) / ".aws-bench" / "cache" / "tasks"
+        )
+    )
+    # Fails here, before `run`, if AWS_BENCH_INTEG_EXPECTED_TRIALS disagrees.
+    expected = expected_trial_count(deployed_env, resolved=tasks.expected_trials)
+    run_timeout = run_timeout_for(tasks.task_dirs)
+    note = f"; {tasks.note}" if tasks.note else ""
+    print(f"expected trials: {expected}; timeout: {run_timeout.describe()}{note}")
     run_cli(
         "run",
-        *task_filter,
+        *deployed_env.task_filter_args(),
         "--env-name", deployed_env.env_name,
         *deployed_env.run_source_args(),
         "-a", "oracle",
         "--job-name", job_name,
         "--jobs-dir", str(jobs_dir),
-        "--ve", f"AWS_BEARER_TOKEN_BEDROCK={bedrock_token}",
+        "--ve", Secret(f"AWS_BEARER_TOKEN_BEDROCK={bedrock_token.value}"),
         "--yes", "--quiet",
-        timeout=5400,
+        timeout=run_timeout.seconds,
     )  # fmt: skip
     checker = _load_reward_checker()
-    import json
-
     result = json.loads((jobs_dir / job_name / "result.json").read_text())
-    assert checker.find_problems(result) == []
+    n_total = result.get("n_total_trials") if isinstance(result, dict) else None
+    assert n_total == expected, (
+        f"job planned {n_total!r} trials, expected {expected} "
+        f"for globs {list(deployed_env.task_globs) or 'all tasks'}"
+    )
+    assert checker.find_problems(result, expected_trials=expected) == []
 
 
 # --- Placeholders (see BACKLOG.md) -------------------------------------------------

@@ -10,7 +10,7 @@ Importance = how much a regression hurts users. Ease = cost/time/account risk of
 
 | # | Command / feature | Importance | Ease | Status |
 |---|---|---|---|---|
-| 1 | `env init` + `env setup` + `run -d aws-bench-quickstart -a oracle` + `env cleanup` | High | Medium | Implemented (`test_quickstart_oracle_earns_full_reward`); passed live with all 9 tasks, verification on |
+| 1 | `env init` + `env setup` + `run -d aws-bench-quickstart -a oracle` + `env cleanup` | High | Medium | Implemented (`test_quickstart_oracle_earns_full_reward`); passed live at `5804afc` with all 9 tasks, verification on (later changes unit-tested only) |
 | 2 | `env show`, `env list` (read-only, run against the env from #1) | Medium | High | Placeholder |
 | 3 | `env creds` (mints a Bedrock token; uses 1 of 2 IAM slots) | Medium | Medium | Placeholder |
 | 4 | `env cleanup` as a standalone assertion (no stacks remain) | High | Medium | Placeholder |
@@ -22,8 +22,9 @@ Importance = how much a regression hurts users. Ease = cost/time/account risk of
 
 Suggested order: 1 is done. Next 2 and 4 (cheap), then 5, 3, 7, 8.
 
-Also pending: PR automation (an approval-gated GitHub workflow), and validating a
-run longer than one hour with self-refreshing credentials.
+Also pending: PR automation (an approval-gated GitHub workflow), a live re-run of
+the current suite, and validating a run longer than one hour with
+self-refreshing credentials.
 
 ## Isolation approach
 
