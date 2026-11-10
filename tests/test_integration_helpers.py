@@ -517,7 +517,12 @@ def inner_test_file(tmp_path_factory):
     ids=["default", "showlocals-long"],
 )
 def test_rendered_report_never_contains_canary(inner_test_file, flags):
-    env = {k: v for k, v in os.environ.items() if not k.startswith("COV_CORE")}
+    # Drop color-forcing variables (CI sets FORCE_COLOR) so ANSI escapes cannot
+    # split the summary line or a secret and make the string checks unreliable.
+    color_vars = {"FORCE_COLOR", "PY_COLORS", "CLICOLOR_FORCE"}
+    env = {
+        k: v for k, v in os.environ.items() if not k.startswith("COV_CORE") and k not in color_vars
+    }
     env["PYTHONPATH"] = str(REPO_ROOT)
     proc = subprocess.run(  # noqa: S603 - fixed argv
         [
@@ -533,6 +538,7 @@ def test_rendered_report_never_contains_canary(inner_test_file, flags):
             "no:cacheprovider",
             "-o",
             "addopts=",
+            "--color=no",
             *flags,
         ],  # fmt: skip
         cwd=inner_test_file.parent,
