@@ -337,6 +337,20 @@ class TestCodexBedrockRegion:
         assert parsed["model_provider"] == "amazon-bedrock"
         assert parsed["model_providers"]["amazon-bedrock"]["aws"]["region"] == "us-east-2"
 
+    async def test_bedrock_region_wins_over_agent_env_region(
+        self, logs_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        monkeypatch.setenv("AWS_REGION", "us-east-2")
+        # The harness passes the task's Region as -ae AWS_REGION for the agent's AWS calls.
+        agent = Codex(
+            logs_dir=logs_dir, bedrock_region="us-east-1", extra_env={"AWS_REGION": "us-west-2"}
+        )
+
+        parsed = await _written_provider_config(agent)
+
+        assert parsed["model_providers"]["amazon-bedrock"]["aws"]["region"] == "us-east-1"
+        assert agent._extra_env["AWS_REGION"] == "us-west-2"
+
     async def test_host_region_is_the_fallback(
         self, logs_dir: Path, monkeypatch: pytest.MonkeyPatch
     ):
