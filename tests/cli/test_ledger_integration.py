@@ -250,6 +250,120 @@ def test_run_patches_job_identity_into_entry(monkeypatch, tmp_path):
     assert data["exit_status"] == "ok"
 
 
+def test_run_masks_secret_env_assignments_in_entry(monkeypatch, tmp_path):
+    """``run --ve/--ae KEY=secret`` leaves no secret value in the ledger entry.
+
+    The root callback records ``sys.argv`` (not CliRunner's args), so the test
+    sets ``sys.argv`` to the same invocation. The canaries reach both the argv
+    record and the resolved config; neither may persist them, while the keys
+    and the non-secret assignment stay readable.
+    """
+    monkeypatch.setattr("aws_bench.logging.ledger.LOGS_DIR", tmp_path / "logs")
+    tasks_dir, scenarios_dir = _make_local_dataset(tmp_path)
+    _stub_run_seams(monkeypatch, job_id=str(uuid4()), is_resuming=False)
+
+    args = [
+        "run",
+        "--env-name",
+        "awsbench-ou",
+        "--path",
+        str(tasks_dir),
+        "--scenario-path",
+        str(scenarios_dir),
+        "--jobs-dir",
+        str(tmp_path / "jobs"),
+        "--ve",
+        "AWS_BEARER_TOKEN_BEDROCK=CANARY-CLI-VE",
+        "--ae",
+        "SOME_API_KEY=CANARY-CLI-AE",
+        "--ve",
+        "FOO=bar",
+        "--yes",
+    ]
+    monkeypatch.setattr("sys.argv", ["aws-bench", *args])
+
+    from aws_bench.cli.main import app
+
+    result = runner.invoke(app, args)
+
+    assert result.exit_code == 0, result.output
+    entry = _only_entry(tmp_path)
+    raw = (entry / "command.json").read_text()
+    assert "CANARY-CLI-VE" not in raw
+    assert "CANARY-CLI-AE" not in raw
+    data = json.loads(raw)
+    assert "AWS_BEARER_TOKEN_BEDROCK=***" in data["argv"]
+    assert "SOME_API_KEY=***" in data["argv"]
+    assert "FOO=bar" in data["argv"]
+    assert data["resolved_config"] is not None
+    assert data["exit_status"] == "ok"
+
+
+def test_run_masks_secret_kwargs_in_entry(monkeypatch, tmp_path):
+    """``run --ak/--verifier-kwarg key=secret`` leaves no secret in ``command.json``.
+
+    Kwargs have no Harbor serializer, so ``redact_config`` is the only defence for
+    the recorded config; the argv record goes through ``redact_argv``. Both the
+    spaced and the inline spelling are driven, plus a benign kwarg that must stay
+    visible and a count kwarg whose ``TOKEN`` fragment masks it (accepted
+    over-masking, see the redaction module docstring).
+    """
+    monkeypatch.setattr("aws_bench.logging.ledger.LOGS_DIR", tmp_path / "logs")
+    tasks_dir, scenarios_dir = _make_local_dataset(tmp_path)
+    _stub_run_seams(monkeypatch, job_id=str(uuid4()), is_resuming=False)
+
+    args = [
+        "run",
+        "--env-name",
+        "awsbench-ou",
+        "--path",
+        str(tasks_dir),
+        "--scenario-path",
+        str(scenarios_dir),
+        "--jobs-dir",
+        str(tmp_path / "jobs"),
+        "--agent",
+        "oracle",
+        "--ak",
+        "api_key=CANARY-AK",
+        "--ak=other_api_key=CANARY-AK-INLINE",
+        "--ak",
+        "max_tokens=4096",
+        "--ak",
+        "temperature=0.2",
+        "--verifier-kwarg",
+        "api_token=CANARY-VK",
+        "--verifier-kwarg=auth_header=CANARY-VK-INLINE",
+        "--yes",
+    ]
+    monkeypatch.setattr("sys.argv", ["aws-bench", *args])
+
+    from aws_bench.cli.main import app
+
+    result = runner.invoke(app, args)
+
+    assert result.exit_code == 0, result.output
+    entry = _only_entry(tmp_path)
+    raw = (entry / "command.json").read_text()
+    assert "CANARY-" not in raw
+    data = json.loads(raw)
+    assert "api_key=***" in data["argv"]
+    assert "--ak=other_api_key=***" in data["argv"]
+    assert "max_tokens=***" in data["argv"]
+    assert "temperature=0.2" in data["argv"]
+    assert "api_token=***" in data["argv"]
+    assert "--verifier-kwarg=auth_header=***" in data["argv"]
+    config = data["resolved_config"]
+    assert config["agents"][0]["kwargs"] == {
+        "api_key": "***",
+        "other_api_key": "***",
+        "max_tokens": "***",
+        "temperature": 0.2,
+    }
+    assert config["verifier"]["kwargs"] == {"api_token": "***", "auth_header": "***"}
+    assert data["exit_status"] == "ok"
+
+
 def test_run_records_resolved_config_when_create_fails(monkeypatch, tmp_path):
     """Beat 2 (a) runs before ``create``, so a create failure still leaves the config.
 

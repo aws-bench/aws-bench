@@ -5,11 +5,63 @@ One entry directory per ``aws-bench`` CLI call under ``LOGS_DIR``, holding:
 - ``command.json`` — the invocation record, written in three beats (open /
   resolved / finalize) and mutated in place.
 - ``run.log`` — the full ``aws_bench``-tree DEBUG capture for the invocation.
-- ``job-snapshot.tar.gz`` — a frozen copy of the job directory, for commands
-  that produce one.
+- ``job-snapshot.tar.gz`` — a forensic copy of the job directory, for
+  commands that produce one; not a replayable job directory (replay, resume or
+  re-scoring needs the original job dir). It is archived with plain
+  ``tarfile.add`` semantics (symlinks stored as links, never followed), except
+  that a non-directory member is left out when its basename is
+  ``config.json`` or ``lock.json`` (case-insensitive, any depth) or when it is
+  a second name for one: a hard link sharing such a file's ``(st_dev,
+  st_ino)``, found up front by an ``os.walk``/``os.lstat`` pass that never
+  reads file contents, or a hard-link member pointing at an excluded member.
+  A directory with either name is archived with its subtree. For ``aws-bench
+  run`` / ``job`` those are the files Harbor serializes ``JobConfig`` /
+  ``JobLock`` / ``TrialConfig`` into, so they hold agent and verifier kwargs,
+  env and MCP server configs (``lock.json`` also records the CLI invocation,
+  kwarg values as typed). Scenario job dirs (``aws-bench env``) lose their
+  ``config.json`` as well, although that file is aws-bench's own scenario
+  config and holds no credentials. ``command.json`` ``snapshot_excluded``
+  lists the excluded arcnames; it is present once a job dir is registered.
+
+  The snapshot is all-or-nothing. It is written to an owner-only (``0o600``)
+  ``job-snapshot.tar.gz.partial`` (replacing any stale one), flushed and
+  ``fsync``-ed (best effort), and renamed onto the final name only after a
+  clean close. Any failure (an unreadable or vanished member, or a listing or
+  ``lstat`` error in the pre-scan, included) records ``snapshot_status:
+  "failed"``, resets ``snapshot_excluded`` to ``[]``, logs one WARNING line
+  and removes the partial archive, and the final one if it exists. If that
+  cleanup itself fails (e.g. an interrupt right after the rename, then a
+  failed removal), ``snapshot_file_left`` names the file left behind, which
+  may be the finished archive. ``KeyboardInterrupt`` / ``SystemExit`` are
+  recorded the same way, then propagate; one that lands in ``finalize``
+  before the snapshot starts may leave no ``snapshot_status`` at all.
+
+  Known gaps: a plain copy of a config file under another name (a different
+  inode, e.g. ``config.json.bak``) is archived as-is. A symlink under another
+  name pointing at an excluded config is archived as a (dangling) symlink
+  member and is not listed in ``snapshot_excluded``; it carries no bytes of
+  the config. Every other member is
+  archived byte-for-byte too. Harbor's trial ``result.json`` embeds the full
+  ``TrialConfig`` (``TrialResult.config``), and the job-level ``result.json``
+  can nest every ``TrialResult``, so both can hold agent/verifier kwargs and
+  MCP server configs in cleartext. Harbor's own ``templatize_sensitive_env``
+  serializer covers env values under keys it deems sensitive: a value equal
+  to the host env var is written as ``${KEY}``, a ``${VAR}`` /
+  ``${VAR:-default}`` template is kept as written (default included), and any
+  other is written partially masked (its first 4 and last 3 characters kept;
+  ``****`` if 8 characters or fewer); other env values are kept.
+  Trajectories, ``*.jsonl``, logs, ``exception.txt`` and test output are
+  archived as-is too. The job directory on disk is never modified: it is
+  written by Harbor, outside aws-bench's control, and holds all of the above
+  in cleartext.
 
 Nothing here may fail the user's command: ``open_entry`` returns a no-op entry
-on any setup failure, and every method swallows its own errors.
+on any setup failure, every method swallows its own errors, and ``finalize``
+always attempts to flush, detach and close the ``run.log`` handler (each step
+guarded on its own, interrupts included) and always deactivates the entry, so
+a second call is a no-op. The only exceptions it lets out are interrupts
+(``KeyboardInterrupt`` / ``SystemExit``) raised while it runs, and only after
+that teardown.
 """
 
 from __future__ import annotations
@@ -19,6 +71,7 @@ import logging
 import os
 import platform
 import socket
+import stat
 import subprocess
 import tarfile
 from dataclasses import dataclass, field
@@ -52,6 +105,40 @@ _TS_FORMAT = "%Y-%m-%d__%H-%M-%S"
 # 0o600 file mode is defense in depth, matching `env creds`' dotenv output.
 _DIR_MODE = 0o700
 _FILE_MODE = 0o600
+
+# Basenames (matched case-insensitively, at any depth, non-directories only)
+# that the snapshot leaves out: the files Harbor serializes JobConfig / JobLock /
+# TrialConfig into, i.e. agent and verifier kwargs, env and MCP server configs.
+# See the module docstring.
+_SNAPSHOT_EXCLUDED_NAMES = frozenset({"config.json", "lock.json"})
+_SNAPSHOT_NAME = "job-snapshot.tar.gz"
+_SNAPSHOT_PARTIAL_NAME = f"{_SNAPSHOT_NAME}.partial"
+
+
+def _is_excluded_name(arcname: str) -> bool:
+    return arcname.rsplit("/", 1)[-1].lower() in _SNAPSHOT_EXCLUDED_NAMES
+
+
+def _raise(err: OSError) -> None:
+    raise err
+
+
+def _excluded_inodes(root: Path) -> set[tuple[int, int]]:
+    """``(st_dev, st_ino)`` of every excluded-name regular file under ``root``.
+
+    Metadata only (``os.walk`` without following links, ``os.lstat``); file
+    contents are never read. Any listing or ``lstat`` error propagates, failing
+    the snapshot closed: a skipped file's hard-link aliases could not be matched.
+    """
+    found: set[tuple[int, int]] = set()
+    for dirpath, _dirnames, filenames in os.walk(root, followlinks=False, onerror=_raise):
+        for name in filenames:
+            if name.lower() not in _SNAPSHOT_EXCLUDED_NAMES:
+                continue
+            st = os.lstat(os.path.join(dirpath, name))
+            if stat.S_ISREG(st.st_mode):
+                found.add((st.st_dev, st.st_ino))
+    return found
 
 
 def _chmod_best_effort(path: Path, mode: int) -> None:
@@ -107,6 +194,16 @@ def _context() -> dict[str, str | None]:
         "hostname": socket.gethostname(),
         "cwd": str(Path.cwd()),
     }
+
+
+def _remove_best_effort(path: Path) -> bool:
+    """Delete ``path`` if present; ``False`` (logged, not raised) if it remains."""
+    try:
+        path.unlink(missing_ok=True)
+    except OSError:
+        logger.debug("ledger: could not remove %s", path, exc_info=True)
+        return False
+    return True
 
 
 @dataclass
@@ -173,37 +270,138 @@ class LedgerEntry:
     def _write_snapshot(self) -> None:
         if self._job_dir is None:
             return
+        job_dir = self._job_dir
+        excluded: list[str] = []
+        excluded_set: set[str] = set()
+        self._record["snapshot_excluded"] = excluded
+        root_arc = job_dir.name
+        final = self.entry_dir / _SNAPSHOT_NAME
+        partial = self.entry_dir / _SNAPSHOT_PARTIAL_NAME
+
+        def _inode(info: tarfile.TarInfo) -> tuple[int, int]:
+            # Fail closed, like the pre-scan: an lstat error (e.g. a member that
+            # vanished since tarfile's own lstat) fails the whole snapshot, since
+            # the member's inode cannot be checked. Stricter than tarfile alone,
+            # which never reopens a hard-link member.
+            rel = info.name[len(root_arc) + 1 :] if info.name != root_arc else ""
+            st = os.lstat(job_dir / rel if rel else job_dir)
+            return (st.st_dev, st.st_ino)
+
+        def _exclude_configs(info: tarfile.TarInfo) -> tarfile.TarInfo | None:
+            # Directories are always kept (returning None would drop the subtree).
+            if info.isdir():
+                return info
+            drop = _is_excluded_name(info.name)
+            if not drop and info.islnk():
+                # tarfile maps a second name of an already-seen inode to a
+                # hard-link member; never keep one pointing at an excluded member.
+                drop = info.linkname in excluded_set or _is_excluded_name(info.linkname)
+            if not drop and inodes and (info.isreg() or info.islnk()):
+                drop = _inode(info) in inodes
+            if drop:
+                excluded.append(info.name)
+                excluded_set.add(info.name)
+                return None
+            return info
+
         try:
-            snapshot = self.entry_dir / "job-snapshot.tar.gz"
-            with tarfile.open(snapshot, "w:gz") as tf:
-                tf.add(self._job_dir, arcname=self._job_dir.name)
-            _chmod_best_effort(snapshot, _FILE_MODE)
+            inodes = _excluded_inodes(job_dir)
+            if os.path.lexists(partial):
+                partial.unlink()  # a stale partial is replaced, not fatal
+            flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_BINARY", 0)
+            fd = os.open(partial, flags, _FILE_MODE)
+            try:
+                fh = os.fdopen(fd, "wb")
+            except BaseException:
+                os.close(fd)
+                raise
+            with fh:
+                if hasattr(os, "fchmod"):
+                    os.fchmod(fh.fileno(), _FILE_MODE)  # in case the umask is unusual
+                with tarfile.open(fileobj=fh, mode="w:gz") as tf:
+                    tf.add(job_dir, arcname=root_arc, filter=_exclude_configs)
+                fh.flush()
+                try:
+                    os.fsync(fh.fileno())
+                except OSError:
+                    logger.debug("ledger: fsync of the snapshot skipped", exc_info=True)
+            os.replace(partial, final)
             self._record["snapshot_status"] = "ok"
-        except (OSError, tarfile.TarError):
-            logger.debug("ledger: job snapshot failed", exc_info=True)
+        except BaseException as exc:
+            # All-or-nothing: no archive, so nothing is reported as excluded.
             self._record["snapshot_status"] = "failed"
+            self._record["snapshot_excluded"] = []
+            logger.debug("ledger: job snapshot failed", exc_info=True)
+            # ``final`` only exists if an interrupt landed right after the rename.
+            left = None
+            for path in (partial, final):
+                if os.path.lexists(path) and not _remove_best_effort(path):
+                    left = path.name
+                    self._record["snapshot_file_left"] = left
+            if left is None:
+                logger.warning("ledger: job snapshot failed (%s); none written", type(exc).__name__)
+            else:
+                logger.warning(
+                    "ledger: job snapshot failed (%s); could not remove %s",
+                    type(exc).__name__,
+                    left,
+                )
+            if not isinstance(exc, Exception):
+                raise
 
     def finalize(self, exc: BaseException | None) -> None:
         """Beat 3: stamp outcome, write snapshot, close the run.log handler."""
         if not self._active:
             return
-        if exc is None:
-            self._record["exit_status"] = "ok"
-            self._record["error_type"] = None
-        elif isinstance(exc, KeyboardInterrupt):
-            self._record["exit_status"] = "interrupted"
-            self._record["error_type"] = type(exc).__name__
-        else:
-            self._record["exit_status"] = "error"
-            self._record["error_type"] = type(exc).__name__
-        self._record["finished_at"] = datetime.now(timezone.utc).isoformat()
-        self._write_snapshot()
-        self._flush()
-        if self._handler is not None:
-            logging.getLogger(NAMESPACE).removeHandler(self._handler)
-            self._handler.close()
-            self._handler = None
-        self._active = False
+        try:
+            if exc is None:
+                self._record["exit_status"] = "ok"
+                self._record["error_type"] = None
+            elif isinstance(exc, KeyboardInterrupt):
+                self._record["exit_status"] = "interrupted"
+                self._record["error_type"] = type(exc).__name__
+            else:
+                self._record["exit_status"] = "error"
+                self._record["error_type"] = type(exc).__name__
+            self._record["finished_at"] = datetime.now(timezone.utc).isoformat()
+            try:
+                self._write_snapshot()
+            except Exception:
+                logger.debug("ledger: job snapshot raised", exc_info=True)
+                self._record["snapshot_status"] = "failed"
+                self._record["snapshot_excluded"] = []
+        finally:
+            self._teardown()
+
+    def _teardown(self) -> None:
+        """Flush, detach and close; each step guarded, deactivation unconditional.
+
+        An interrupt raised by a step does not skip the later ones; the first
+        one is re-raised after all steps have run.
+        """
+        handler, self._handler = self._handler, None
+        interrupt: BaseException | None = None
+        try:
+            try:
+                self._flush()
+            except BaseException as exc:
+                interrupt = interrupt or (None if isinstance(exc, Exception) else exc)
+                logger.debug("ledger: final flush raised", exc_info=True)
+            if handler is not None:
+                try:
+                    logging.getLogger(NAMESPACE).removeHandler(handler)
+                except BaseException as exc:
+                    # The handler may be the broken part: do not log through it.
+                    interrupt = interrupt or (None if isinstance(exc, Exception) else exc)
+                try:
+                    handler.close()
+                except BaseException as exc:
+                    interrupt = interrupt or (None if isinstance(exc, Exception) else exc)
+                    logger.debug("ledger: closing run.log handler raised", exc_info=True)
+        finally:
+            self._active = False
+        if interrupt is not None:
+            raise interrupt
 
 
 def _noop_entry() -> LedgerEntry:

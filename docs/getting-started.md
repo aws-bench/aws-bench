@@ -357,6 +357,14 @@ The bearer token is a long-lived (30-day) service-specific credential for `bedro
 
 > **Before generating the token, ensure no stale `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` / `AWS_SESSION_TOKEN` are exported in your shell.** `env creds` uses the default AWS credential chain, in which these environment variables **take precedence over `AWS_PROFILE`** — so leftover keys silently generate the token against the wrong account. Run `unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN` (and confirm with `aws sts get-caller-identity`) so the token is minted against your management account.
 
+### Where secrets end up
+
+- **Env vars (`--ve` / `--ae`).** In aws-bench's command log, `~/.aws-bench/logs/<entry>/command.json`, a value whose key looks secret (it contains `TOKEN`, `KEY`, `SECRET`, `PASSWORD`, `CREDENTIAL`, `AUTH` or `BEARER`) is recorded as `KEY=***`, except env templates: `${VAR}` is kept as written and `${VAR:-default}` is recorded as `${VAR:-***}`.
+- **Harbor's job files.** Harbor's list of sensitive keys is narrower than aws-bench's: it does not include `BEARER`. Harbor writes an env value whose key it considers sensitive as `${KEY}` when the value equals the host env var, and otherwise partially masked (first 4 and last 3 characters kept; `****` if 8 characters or fewer). It writes a `${VAR:-default}` template exactly as given, default included.
+- **`run.log`.** The entry's `run.log`, next to `command.json`, is a verbatim DEBUG log and is not redacted.
+- **Kwargs (`--ak` / `--agent-kwarg` / `--verifier-kwarg`).** Harbor stores these values in cleartext: in `jobs/<job>/config.json` and `lock.json`, in each trial's `config.json` and `result.json`, and in the `result.json` files inside the log's `job-snapshot.tar.gz` (the snapshot leaves out `config.json` and `lock.json`). **Never pass a secret as a kwarg**; pass it as an env var with `--ve` / `--ae`.
+- **Treat `jobs/` and `~/.aws-bench/` as sensitive**, and review their contents before sharing them.
+
 ### Running with Bedrock (agent uses Bedrock models)
 
 Amazon Bedrock hosts models from multiple providers. aws-bench supports evaluating agents against any of them using a single bearer token:
