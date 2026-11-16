@@ -359,10 +359,10 @@ The bearer token is a long-lived (30-day) service-specific credential for `bedro
 
 ### Where secrets end up
 
-- **Env vars (`--ve` / `--ae`).** In aws-bench's command log, `~/.aws-bench/logs/<entry>/command.json`, a value whose key looks secret (it contains `TOKEN`, `KEY`, `SECRET`, `PASSWORD`, `CREDENTIAL`, `AUTH` or `BEARER`) is recorded as `KEY=***`, except env templates: `${VAR}` is kept as written and `${VAR:-default}` is recorded as `${VAR:-***}`.
+- **Env vars (`--ve` / `--ae`).** In aws-bench's command log, `~/.aws-bench/logs/<entry>/command.json`, a value whose key looks secret (it contains `TOKEN`, `KEY`, `SECRET`, `PASSWORD`, `CREDENTIAL`, `AUTH` or `BEARER`; `AUTHOR`, `AUTHORS` and `AUTHORED` are not treated as secret) is recorded as `KEY=***`, except env templates: `${VAR}` is kept as written and `${VAR:-default}` is recorded as `${VAR:-***}`.
 - **Harbor's job files.** Harbor's list of sensitive keys is narrower than aws-bench's: it does not include `BEARER`. Harbor writes an env value whose key it considers sensitive as `${KEY}` when the value equals the host env var, and otherwise partially masked (first 4 and last 3 characters kept; `****` if 8 characters or fewer). It writes a `${VAR:-default}` template exactly as given, default included.
 - **`run.log`.** The entry's `run.log`, next to `command.json`, is a verbatim DEBUG log and is not redacted.
-- **Kwargs (`--ak` / `--agent-kwarg` / `--verifier-kwarg`).** Harbor stores these values in cleartext: in `jobs/<job>/config.json` and `lock.json`, in each trial's `config.json` and `result.json`, and in the `result.json` files inside the log's `job-snapshot.tar.gz` (the snapshot leaves out `config.json` and `lock.json`). **Never pass a secret as a kwarg**; pass it as an env var with `--ve` / `--ae`.
+- **Kwargs (`--ak` / `--agent-kwarg` / `--verifier-kwarg`).** aws-bench masks a secret-named kwarg value in `command.json`, but Harbor stores these values in cleartext: in `jobs/<job>/config.json` and `lock.json`, and in each trial's `config.json` and `result.json`. The log's `job-snapshot.tar.gz` is an unredacted copy of the job directory, so it holds them too. **Never pass a secret as a kwarg**; pass it as an env var with `--ve` / `--ae`.
 - **Treat `jobs/` and `~/.aws-bench/` as sensitive**, and review their contents before sharing them.
 
 ### Running with Bedrock (agent uses Bedrock models)

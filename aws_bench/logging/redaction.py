@@ -68,11 +68,10 @@ Known gaps (pinned by ``TestKnownGaps``; these pass through unmasked):
 
 Scope: ``command.json`` (argv and resolved config) only. The sibling
 ``run.log`` is verbatim DEBUG and outside redaction scope by design. The
-snapshot is not redacted: ``ledger`` leaves out the config files but archives
-every other job-dir member (including ``result.json``) as-is, and the
-Harbor-owned job directory on disk holds everything in cleartext; see the
-``ledger`` module docstring. The tree is owner-only (``0o700``/``0o600``);
-treat ``~/.aws-bench/logs/`` as sensitive.
+``job-snapshot.tar.gz`` is a raw copy of the Harbor-written job directory
+(``config.json``, ``lock.json`` and ``result.json`` included) and is not
+redacted. The tree is owner-only (``0o700``/``0o600``); treat
+``~/.aws-bench/logs/`` as sensitive.
 """
 
 from __future__ import annotations
