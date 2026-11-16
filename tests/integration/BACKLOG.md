@@ -10,8 +10,8 @@ Importance = how much a regression hurts users. Ease = cost/time/account risk of
 
 | # | Command / feature | Importance | Ease | Status |
 |---|---|---|---|---|
-| 1 | `env init` + `env setup` + `run -d aws-bench-quickstart -a oracle` + `env cleanup` | High | Medium | Implemented (`test_quickstart_oracle_earns_full_reward`); passed live at `5804afc` with all 9 tasks, verification on (later changes unit-tested only) |
-| 2 | `env show`, `env list` (read-only, run against the env from #1) | Medium | High | Placeholder |
+| 1 | `env init` + `env setup` + `run -d aws-bench-quickstart -a oracle` + `env cleanup` | High | Medium | Implemented (`test_quickstart_oracle_earns_full_reward`); passed live at `5804afc` with all 9 tasks, and with one task on the final code of aws-bench/aws-bench#153 (`ae7b194`): reward 1.0, verification on, clean cleanup |
+| 2 | `env show`, `env list` (read-only, run against the env from #1) | Medium | High | Implemented (`test_env_show_happy_path` on the deployment from #1: per configured account a healthy `<scenario>-*` stack; failed or rolled-back stacks, regions and the OU row are not checked; `test_env_list_happy_path`); passed live, in the same run as #1 with one task of the quickstart dataset |
 | 3 | `env creds` (mints a Bedrock token; uses 1 of 2 IAM slots) | Medium | Medium | Placeholder |
 | 4 | `env cleanup` as a standalone assertion (no stacks remain) | High | Medium | Placeholder |
 | 5 | `env verify` / `env reset` (drift detection and baseline restore) | High | Medium | Not started |
@@ -20,11 +20,14 @@ Importance = how much a regression hurts users. Ease = cost/time/account risk of
 | 8 | Provisioning mode `env init` / `env terminate` (creates and closes real accounts; 90-day suspension) | High | Low | Placeholder |
 | 9 | `job` subcommands, `view`, `metrics` | Low | High | Not started |
 
-Suggested order: 1 is done. Next 2 and 4 (cheap), then 5, 3, 7, 8.
+Suggested order: 1 and 2 are done. Next 4 (cheap), then 5, 3, 7, 8.
 
-Also pending: PR automation (an approval-gated GitHub workflow), a live re-run of
-the current suite, and validating a run longer than one hour with
-self-refreshing credentials.
+Also pending: PR automation (an approval-gated GitHub workflow), and validating a
+run longer than one hour with self-refreshing credentials.
+
+Follow-ups for 2: match the regions of `env show` stacks against the scenario
+manifests, and handle account IDs in failure output (masking or not) before
+runs move to CI.
 
 ## Isolation approach
 

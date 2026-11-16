@@ -109,6 +109,54 @@ If cleanup fails, how it is reported depends on what failed before it:
 `tests/test_integration_helpers.py` unit-tests the `deployed` context manager
 behind this with a stubbed CLI, including exceptions raised inside its block.
 
+### `env show` and `env list`
+
+Two read-only tests check the output of these commands, with `COLUMNS=200`.
+`env show` runs with a 10 min timeout (an assumed bound for a few accounts and
+their enabled regions) and `env list` with a 2 min timeout (a credential check
+and a config read in pre-existing mode); neither is derived or validated live
+yet. The test removes `FORCE_COLOR` and `TTY_COMPATIBLE` from the CLI's
+environment, because either makes Rich treat a pipe as a terminal, and with
+`TERM` dumb or unknown Rich then ignores `COLUMNS` and uses 80 columns.
+`PY_COLORS` and `CLICOLOR_FORCE` are removed too, defensively (Rich does not
+read them). At 200 columns the unit tests parse `ec2-multiregion`
+panels without truncation; a very long env or scenario name can still be
+truncated, and the parsers then fail instead of passing. Any colour codes left
+are stripped before parsing.
+
+- `test_env_show_happy_path` runs `env show --env-name <name>` after the
+  quickstart test, on the same deployment: the `deployed_env` fixture is
+  module-scoped, so the module still runs `env init`, `env setup` and
+  `env cleanup` once. It requires exit code 0, a header titled with the env
+  name whose `Scenario accounts` count equals the number of accounts in the
+  config, and exactly one `ACTIVE` panel per configured scenario, account tag
+  and account ID. In every configured account, at least one stack named
+  `<scenario>-*` (the scenario in the panel title) must be in
+  `CREATE_COMPLETE`, `UPDATE_COMPLETE` or `IMPORT_COMPLETE`. Other stacks,
+  such as `CDKToolkit` or unrelated stacks in the account, do not count.
+  Failed or rolled-back stacks are not checked (drift detection is left to
+  the `env verify` test, backlog #5), and neither are stack regions or the
+  header's OU row.
+  - The env name, account count and account triples are compared with the
+    same account config the CLI reads, so they verify rendering and plumbing.
+    The stack check is the part tied to real AWS state. `ACTIVE` is a rendering
+    guard: pre-existing mode always reports it.
+  - The per-account stack check assumes `env setup` deployed the scenario's
+    stacks into every configured account. aws-bench does not enforce this
+    (each scenario's deploy script decides), but it holds when the account
+    config maps only the scenario under test: every scenario in
+    aws-bench-datasets has a single account tag, and its CDK app names its
+    stacks `<scenario>-<id>-<region>`.
+- `test_env_list_happy_path` runs `env list`, which in pre-existing mode needs
+  only the config and the caller's credentials, not a deployment. It requires
+  exit code 0 and exactly one row: the env name, OU ID `preexisting`, and the
+  number of accounts in the config.
+
+The parsers and checks are in `tests/integration/helpers.py`.
+`tests/test_integration_helpers.py` tests them on output rendered by the CLI's
+own display functions, with and without colour, including inputs that must
+fail.
+
 The other tests in `tests/integration/test_acceptance.py` are named placeholders
 (skipped) for the commands in the backlog.
 
@@ -380,8 +428,10 @@ EBS snapshots in `us-east-1`.
 The quickstart test has been run live, in a pre-existing-mode test account, at
 commit `5804afc`. All nine `aws-bench-quickstart` tasks completed with reward
 `1.0`, with pre-run environment verification on, and `env cleanup` finished
-successfully. Later changes (secret redaction, derived timeouts, the
-reward-check rewrite, `SIGTERM` handling, cleanup-failure reporting and
-`AWS_BENCH_INTEG_EXPECTED_TRIALS`) are
-covered by unit tests but have not been re-run live yet. A run longer than one
-hour with self-refreshing credentials has not been validated yet.
+successfully. It was run live again, with one task, at commit `ae7b194`:
+reward `1.0`, verification on, and a clean `env cleanup`. The `env show` and
+`env list` tests were run live when they were added, together with the quickstart
+test and one task: all three tests passed, and `env cleanup` finished
+successfully. The run does not record how long each command took, so the
+`env show` and `env list` timeouts are still assumed, not derived. A run longer
+than one hour with self-refreshing credentials has not been validated yet.

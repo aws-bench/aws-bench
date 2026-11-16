@@ -24,11 +24,11 @@ from pathlib import Path
 import pytest
 
 from .helpers import (
-    HOME_LINKS_VAR,
     CliResult,
     IntegSettings,
     Secret,
     SecretEnv,
+    build_cli_env,
     load_settings,
     run_aws_bench,
 )
@@ -69,6 +69,15 @@ def cli_env(integ_settings: IntegSettings, tmp_path_factory: pytest.TempPathFact
     prints fixture arguments when a fixture fails and this environment carries
     the caller's credentials.
 
+    Built by ``helpers.build_cli_env``. ``COLUMNS`` is set to ``CLI_COLUMNS`` so
+    Rich output is laid out at a fixed, wide width instead of its 80-column pipe
+    default, and ``COLOR_FORCING_VARS`` are removed (``cli_display_env``):
+    ``FORCE_COLOR`` (set in CI) and ``TTY_COMPATIBLE`` make Rich treat a pipe as
+    a terminal, and with ``TERM`` dumb or unknown it then ignores ``COLUMNS``.
+    ``PY_COLORS`` and ``CLICOLOR_FORCE`` are removed defensively. Very long env
+    or scenario names can still be truncated at this width; the parsers then
+    fail rather than pass.
+
     ``HOME`` is redirected so ``~/.aws-bench`` state/logs of this run never touch
     (or collide with) the developer's own environments. Tool directories are
     symlinked into the scratch home so credentials keep working:
@@ -79,17 +88,11 @@ def cli_env(integ_settings: IntegSettings, tmp_path_factory: pytest.TempPathFact
       to ``HOME``), e.g. what a ``credential_process`` helper reads from
       ``HOME``. Runs longer than one hour need refreshable base credentials.
     """
-    env = dict(os.environ)
-    real_home = Path(env.get("HOME", str(Path.home())))
-    scratch_home = tmp_path_factory.mktemp("integ-home")
-    extra = [p.strip() for p in env.get(HOME_LINKS_VAR, "").split(",") if p.strip()]
-    for name in (".aws", ".docker", *extra):
-        if (real_home / name).exists():
-            link = scratch_home / name
-            link.parent.mkdir(parents=True, exist_ok=True)
-            link.symlink_to(real_home / name, target_is_directory=True)
-    env["HOME"] = str(scratch_home)
-    env["AWSBENCH_ACCOUNT_CONFIG"] = str(integ_settings.account_config)
+    env = build_cli_env(
+        os.environ,
+        account_config=integ_settings.account_config,
+        scratch_home=tmp_path_factory.mktemp("integ-home"),
+    )
     return SecretEnv(env)
 
 

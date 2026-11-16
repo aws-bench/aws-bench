@@ -1,8 +1,9 @@
 """Per-command happy-path acceptance tests against a real test account.
 
 Opt-in only (``make integration``). Implemented: the quickstart + oracle flow
-(``env setup`` -> ``run`` -> full reward -> ``env cleanup``). The remaining
-commands are named placeholders; see ``BACKLOG.md`` for priorities.
+(``env setup`` -> ``run`` -> full reward -> ``env cleanup``), ``env show``
+against the same deployment, and ``env list``. The remaining commands are
+named placeholders; see ``BACKLOG.md`` for priorities.
 """
 
 from __future__ import annotations
@@ -14,6 +15,8 @@ from pathlib import Path
 
 import pytest
 
+from aws_bench.account_management.preexisting import load_account_config
+
 from .conftest import REPO_ROOT
 from .helpers import (
     IntegSettings,
@@ -21,8 +24,12 @@ from .helpers import (
     SecretEnv,
     StepTimeouts,
     deployed,
+    env_list_problems,
+    env_show_problems,
     expected_trial_count,
     find_scenario_manifests,
+    parse_env_list,
+    parse_env_show,
     resolve_run_tasks,
     run_timeout_for,
     step_timeouts_for,
@@ -33,6 +40,15 @@ pytestmark = pytest.mark.integration
 # `env init` validates the account and records the baseline; it has no
 # manifest budget of its own.
 INIT_TIMEOUT_SEC = 1200.0
+# `env show` / `env list` are read-only and have no manifest budget either.
+# Assumed, not derived: `env show` collects quotas per account and lists stacks
+# region by region (sequentially) in every enabled region; 600 s is sized for
+# the supported few accounts x enabled regions. A live run finished within it; the
+# actual duration was not recorded.
+SHOW_TIMEOUT_SEC = 600.0
+# `env list` only checks credentials and reads the config in pre-existing mode.
+# Assumed; a live run finished within it, the actual duration was not recorded.
+LIST_TIMEOUT_SEC = 120.0
 
 
 def _load_reward_checker():
@@ -79,6 +95,10 @@ def _step_timeouts(settings: IntegSettings, cli_env: SecretEnv) -> StepTimeouts:
 @pytest.fixture(scope="module")
 def deployed_env(integ_settings: IntegSettings, cli_env: SecretEnv, run_cli):
     """``env init`` + ``env setup``, with one ``env cleanup`` attempt on every exit path.
+
+    Module-scoped: every test here that requests it shares one deployment, and
+    cleanup runs once, after the last of them. If init or setup fails, pytest
+    caches that error and reports it for each such test without deploying again.
 
     Setup and cleanup timeouts come from the scenario manifest (read after
     ``env init``, which caches registry scenarios; re-read for cleanup, since
@@ -138,6 +158,45 @@ def test_quickstart_oracle_earns_full_reward(
     assert checker.find_problems(result, expected_trials=expected) == []
 
 
+def test_env_show_happy_path(deployed_env: IntegSettings, run_cli):
+    """`env show --env-name N` exits 0 and shows N's accounts, each with a healthy scenario stack.
+
+    Checked (``env_show_problems``): a header titled N whose account count
+    matches the config; exactly one ``ACTIVE`` panel per configured (scenario,
+    tag, account ID); and in every configured account a stack named
+    ``<scenario>-*`` in ``HEALTHY_STACK_STATUSES``. Failed or rolled-back
+    stacks are not checked (left to the `env verify` test), nor are regions or
+    the header's OU row. The env name, count and account triples are compared
+    with the same account config the CLI reads, so they verify rendering and
+    plumbing; the stack check is the part tied to real AWS state. ``ACTIVE`` is
+    a rendering guard: pre-existing mode always reports it.
+
+    Needs the deployed env (for the stacks), so it shares the module-scoped
+    ``deployed_env`` with the quickstart test: no extra deploy, and it runs
+    after that test (file order), before the module's single ``env cleanup``.
+    """
+    result = run_cli("env", "show", "--env-name", deployed_env.env_name, timeout=SHOW_TIMEOUT_SEC)
+    shown = parse_env_show(result.stdout)
+    print(f"env show: {len(shown.accounts)} account panel(s), env {shown.env_name!r}")
+    accounts = load_account_config(deployed_env.account_config).accounts
+    assert env_show_problems(shown, env_name=deployed_env.env_name, accounts=accounts) == [], (
+        result.stdout[-4000:]
+    )
+
+
+def test_env_list_happy_path(integ_settings: IntegSettings, run_cli):
+    """`env list` exits 0 and lists the configured environment with its account count.
+
+    Reads only the account config and the caller identity, so it needs no deploy.
+    """
+    result = run_cli("env", "list", timeout=LIST_TIMEOUT_SEC)
+    rows = parse_env_list(result.stdout)
+    accounts = load_account_config(integ_settings.account_config).accounts
+    assert env_list_problems(rows, env_name=integ_settings.env_name, accounts=accounts) == [], (
+        result.stdout[-4000:]
+    )
+
+
 # --- Placeholders (see BACKLOG.md) -------------------------------------------------
 
 
@@ -149,16 +208,6 @@ def test_env_init_happy_path():
 @pytest.mark.skip(reason="backlog: not implemented")
 def test_env_setup_happy_path():
     """`env setup` exits 0 and every scenario stack reaches a *_COMPLETE state."""
-
-
-@pytest.mark.skip(reason="backlog: not implemented")
-def test_env_list_happy_path():
-    """`env list --env-name N` exits 0 and lists the environment created by this run."""
-
-
-@pytest.mark.skip(reason="backlog: not implemented")
-def test_env_show_happy_path():
-    """`env show --env-name N` exits 0 and prints accounts and stack status for N."""
 
 
 @pytest.mark.skip(reason="backlog: not implemented")
