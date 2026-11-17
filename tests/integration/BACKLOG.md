@@ -13,21 +13,47 @@ Importance = how much a regression hurts users. Ease = cost/time/account risk of
 | 1 | `env init` + `env setup` + `run -d aws-bench-quickstart -a oracle` + `env cleanup` | High | Medium | Implemented (`test_quickstart_oracle_earns_full_reward`); passed live at `5804afc` with all 9 tasks, and with one task on the final code of aws-bench/aws-bench#153 (`ae7b194`): reward 1.0, verification on, clean cleanup |
 | 2 | `env show`, `env list` (read-only, run against the env from #1) | Medium | High | Implemented (`test_env_show_happy_path` on the deployment from #1: per configured account a healthy `<scenario>-*` stack; failed or rolled-back stacks, regions and the OU row are not checked; `test_env_list_happy_path`); passed live, in the same run as #1 with one task of the quickstart dataset |
 | 3 | `env creds` (mints a Bedrock token; uses 1 of 2 IAM slots) | Medium | Medium | Placeholder |
-| 4 | `env cleanup` as a standalone assertion (no stacks remain) | High | Medium | Placeholder |
+| 4 | `env cleanup` as a standalone assertion (no stacks remain) | High | Medium | Implemented; passed live in a run of the whole suite with one task (about 84 min): the deployment held a healthy `<scenario>-*` stack in every account before cleanup, and every stack was `DELETE_COMPLETE` afterwards, bootstrap stacks included (`test_env_cleanup_happy_path` in `test_env_cleanup.py`: own deployment, cleanup as the asserted step, then a read-only `cloudformation:ListStacks` check of every region the scenario declares; only CloudFormation stacks are checked) |
 | 5 | `env verify` / `env reset` (drift detection and baseline restore) | High | Medium | Not started |
 | 6 | `env snapshot` | Low | High | Not started |
 | 7 | `run` with a non-oracle agent (needs model credentials, non-deterministic) | High | Low | Not started |
 | 8 | Provisioning mode `env init` / `env terminate` (creates and closes real accounts; 90-day suspension) | High | Low | Placeholder |
 | 9 | `job` subcommands, `view`, `metrics` | Low | High | Not started |
 
-Suggested order: 1 and 2 are done. Next 4 (cheap), then 5, 3, 7, 8.
+Suggested order: 1, 2 and 4 are done. Next 5, then 3, 7, 8.
 
-Also pending: PR automation (an approval-gated GitHub workflow), and validating a
-run longer than one hour with self-refreshing credentials.
+Also pending: PR automation (an approval-gated GitHub workflow). A run longer than one
+hour is validated with a self-refreshing credential source (a `credential_process`
+profile). The whole suite now takes about 84 min with one task, after the `env cleanup`
+test added its own deployment, so credentials that do not refresh expire mid-run.
 
 Follow-ups for 2: match the regions of `env show` stacks against the scenario
 manifests, and handle account IDs in failure output (masking or not) before
 runs move to CI.
+
+Follow-ups for 4:
+
+- Check resource types other than CloudFormation stacks (AMIs, EBS snapshots,
+  IAM roles, S3 buckets, Cloud Control resources); this needs a resource
+  scanner the test does not have.
+- Check the other enabled regions for stacks. This needs only
+  `ec2:DescribeRegions` (`aws_bench.utils.regions.get_enabled_regions`) plus
+  the same `cloudformation:ListStacks` calls the test already makes.
+- Run trials in the test. The cleanup sweeps and the orphan scan already run,
+  but only against setup-created resources; running trials would add
+  task-created residue for them to detect and delete.
+- The test deploys its own environment: one extra `env init`, `env setup` and
+  asserted `env cleanup`, plus two read-only stack listings. The whole suite took about
+  84 min with one task; the time of this test alone was not recorded. Sharing one deployment would need a way to run cleanup as a
+  test step before the shared one ends.
+- The test-layer cleanup deadline (build + script + 1800 s margin) can be
+  shorter than the product's composed cleanup budget. This comes from the
+  existing derivation and also affects the finalizer.
+- The asserted cleanup has no deadline if no manifest is readable (same
+  existing behaviour).
+- No re-poll of `ListStacks` right after cleanup. Add a bounded re-poll for
+  `*_IN_PROGRESS` stacks only if a live run shows lag.
+- Add a check before `env init` that the accounts hold no stacks.
 
 ## Isolation approach
 

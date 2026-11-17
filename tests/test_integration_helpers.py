@@ -15,7 +15,10 @@ import textwrap
 import time
 from pathlib import Path
 
+import boto3
 import pytest
+from botocore.exceptions import ClientError
+from moto import mock_aws
 from rich.console import Console
 
 from aws_bench.account_management.models import ScenarioAccount
@@ -33,6 +36,7 @@ from tests.integration.helpers import (
     PREEXISTING_OU_ID,
     RUN_MARGIN_SEC,
     SETUP_MARGIN_SEC,
+    AccountStacks,
     CliResult,
     EnvShow,
     IntegSettings,
@@ -41,15 +45,22 @@ from tests.integration.helpers import (
     SecretEnv,
     ShownAccount,
     ShownStack,
+    StackRecord,
+    _error_label,
     build_cli_env,
+    cleanup_output_problems,
     cli_display_env,
+    collect_account_stacks,
     deployed,
+    deployed_stack_problems,
     env_list_problems,
     env_secret_values,
     env_show_problems,
     expected_trial_count,
     find_scenario_manifests,
     load_settings,
+    mask_account_id,
+    mask_account_ids,
     parse_env_list,
     parse_env_show,
     plain,
@@ -57,8 +68,10 @@ from tests.integration.helpers import (
     resolve_run_tasks,
     run_aws_bench,
     run_timeout_for,
+    scenario_regions,
     scrub,
     secret_values,
+    stack_problems,
     step_timeouts_for,
 )
 
@@ -724,6 +737,42 @@ def test_deployed_body_error_and_cleanup_failure_adds_note():
             raise RuntimeError("body boom")
     note = excinfo.value.__notes__[0]
     assert "env cleanup failed (resources may be left behind):\nexit 2" in note
+
+
+def test_deployed_mark_clean_skips_the_safety_net_cleanup():
+    cli = _StubCli()
+    with _deployed(cli) as deployment:
+        cli("env", "cleanup", timeout=1)  # the body's own cleanup step
+        deployment.mark_clean()
+    assert cli.steps() == ["init", "setup", "cleanup"]
+
+
+def test_deployed_mark_clean_then_raise_still_cleans_up_and_reraises():
+    cli = _StubCli()
+    boom = RuntimeError("after mark_clean")
+    with pytest.raises(RuntimeError) as excinfo:
+        with _deployed(cli) as deployment:
+            deployment.mark_clean()
+            raise boom
+    assert excinfo.value is boom
+    assert cli.steps() == ["init", "setup", "cleanup"]
+
+
+def test_deployed_without_mark_clean_still_cleans_up_after_a_body_cleanup():
+    """A body that ran cleanup but did not confirm the result still gets the safety net."""
+    cli = _StubCli()
+    with _deployed(cli):
+        cli("env", "cleanup", timeout=1)
+    assert cli.steps() == ["init", "setup", "cleanup", "cleanup"]
+
+
+def test_deployed_body_failure_before_mark_clean_cleans_up_and_reraises():
+    cli = _StubCli()
+    with pytest.raises(AssertionError, match="leftover"):
+        with _deployed(cli) as deployment:
+            assert False, "leftover"  # noqa: B011
+            deployment.mark_clean()
+    assert cli.steps() == ["init", "setup", "cleanup"]
 
 
 def test_deployed_reads_cleanup_timeout_lazily():
@@ -1662,3 +1711,421 @@ def test_cli_env_failure_never_renders_the_environment(account_config, tmp_path)
     assert "FileExistsError" in out, out[-3000:]  # the failure path was reached
     assert TOKEN not in out
     assert ENV_TOKEN not in out
+
+
+# --------------------------------------------------------------------------- #
+# Post-cleanup stack check
+# --------------------------------------------------------------------------- #
+REGIONS = {"ec2-multiregion": ["us-east-1", "us-west-2"], "other": ["us-east-1"]}
+
+
+def _acct(scenario, tag, account_id, stacks=(), errors=(), regions=None):
+    return AccountStacks(
+        scenario,
+        tag,
+        account_id,
+        tuple(regions if regions is not None else REGIONS[scenario]),
+        stacks=tuple(StackRecord(*x) for x in stacks),
+        errors=tuple(errors),
+    )
+
+
+def _both(primary_stacks=(), other_stacks=(), **kw):
+    return [
+        _acct("ec2-multiregion", "PRIMARY", "111122223333", primary_stacks, **kw),
+        _acct("other", "A", "444455556666", other_stacks),
+    ]
+
+
+def _problems(found):
+    return stack_problems(found, accounts=CONFIGURED, regions_by_scenario=REGIONS)
+
+
+def test_stack_problems_empty_accounts_pass():
+    assert _problems(_both()) == []
+
+
+def test_stack_problems_deleted_stacks_pass():
+    found = _both([("us-east-1", "ec2-multiregion-EC2-a-us-east-1", "DELETE_COMPLETE")])
+    assert _problems(found) == []
+
+
+@pytest.mark.parametrize("name", ["CDKToolkit", "cdk-hnb659fds-assets-x"])
+def test_stack_problems_healthy_bootstrap_stack_fails(name):
+    found = _both([("us-west-2", name, "CREATE_COMPLETE")])
+    assert _problems(found) == [
+        f"ec2-multiregion/PRIMARY (********3333): us-west-2: CDK bootstrap stack {name} "
+        "is CREATE_COMPLETE"
+    ]
+
+
+def test_stack_problems_leftover_scenario_stack_fails():
+    found = _both([("us-east-1", "ec2-multiregion-EC2-a-us-east-1", "CREATE_COMPLETE")])
+    assert _problems(found) == [
+        "ec2-multiregion/PRIMARY (********3333): us-east-1: "
+        "stack ec2-multiregion-EC2-a-us-east-1 is CREATE_COMPLETE"
+    ]
+
+
+def test_stack_problems_leftover_in_non_primary_region_fails():
+    found = _both([("us-west-2", "ec2-multiregion-EC2-b-us-west-2", "UPDATE_COMPLETE")])
+    (problem,) = _problems(found)
+    assert "us-west-2" in problem and "UPDATE_COMPLETE" in problem
+
+
+@pytest.mark.parametrize("status", ["DELETE_FAILED", "DELETE_IN_PROGRESS"])
+def test_stack_problems_stack_not_yet_gone_fails(status):
+    found = _both([("us-east-1", "ec2-multiregion-EC2-a-us-east-1", status)])
+    (problem,) = _problems(found)
+    assert problem.endswith(f"is {status}")
+
+
+@pytest.mark.parametrize(
+    "status", ["DELETE_FAILED", "DELETE_IN_PROGRESS", "CREATE_FAILED", "ROLLBACK_COMPLETE"]
+)
+def test_stack_problems_bootstrap_in_a_bad_state_fails(status):
+    found = _both([("us-east-1", "CDKToolkit", status)])
+    assert len(_problems(found)) == 1
+
+
+def test_stack_problems_deleted_bootstrap_stack_passes():
+    assert _problems(_both([("us-east-1", "CDKToolkit", "DELETE_COMPLETE")])) == []
+
+
+def test_stack_problems_one_account_with_leftover_among_clean_ones():
+    found = _both(other_stacks=[("us-east-1", "other-stack", "CREATE_COMPLETE")])
+    (problem,) = _problems(found)
+    assert problem.startswith("other/A (********6666)") and "other-stack" in problem
+
+
+def test_stack_problems_listing_error_is_a_problem_not_an_empty_region():
+    found = _both(errors=["us-west-2: ClientError AccessDenied"])
+    assert _problems(found) == [
+        "ec2-multiregion/PRIMARY (********3333): could not list stacks: "
+        "us-west-2: ClientError AccessDenied"
+    ]
+
+
+def test_stack_problems_credentials_error_is_a_problem():
+    found = _both(errors=["credentials: ClientError AccessDenied"])
+    assert len(_problems(found)) == 1
+
+
+def test_stack_problems_no_accounts_checked_fails():
+    problems = _problems([])
+    assert len(problems) == 1 and problems[0].startswith("configured accounts not checked")
+
+
+def test_stack_problems_empty_config_fails():
+    assert stack_problems([], accounts={}, regions_by_scenario={}) == [
+        "the account config maps no accounts: nothing was checked"
+    ]
+
+
+def test_stack_problems_unchecked_duplicate_and_unconfigured_accounts_fail():
+    first = _acct("ec2-multiregion", "PRIMARY", "111122223333")
+    extra = _acct("other", "B", "000000000000")
+    problems = _problems([first, first, extra])
+    assert any(p.startswith("accounts checked more than once") for p in problems)
+    assert any(p.startswith("configured accounts not checked: other/A") for p in problems)
+    assert any(p.startswith("accounts checked that are not configured") for p in problems)
+
+
+def test_stack_problems_fewer_regions_than_declared_fails():
+    found = [
+        _acct("ec2-multiregion", "PRIMARY", "111122223333", regions=["us-east-1"]),
+        _acct("other", "A", "444455556666"),
+    ]
+    (problem,) = _problems(found)
+    assert "queried regions ['us-east-1'], scenario declares ['us-east-1', 'us-west-2']" in problem
+
+
+def test_stack_problems_scenario_without_declared_regions_fails():
+    found = _both()
+    problems = stack_problems(
+        found, accounts=CONFIGURED, regions_by_scenario={"other": REGIONS["other"]}
+    )
+    assert len(problems) == 1 and "no declared regions" in problems[0]
+
+
+def test_stack_problems_never_prints_a_full_account_id():
+    found = _both([("us-east-1", "x", "CREATE_COMPLETE")], errors=["us-west-2: boom"])
+    text = "\n".join(_problems(found))
+    assert "111122223333" not in text and "444455556666" not in text
+
+
+_EXPECTED = {"ec2-multiregion": {"PRIMARY": "111122223333"}}
+_HEALTHY = ("us-east-1", "ec2-multiregion-EC2-a-us-east-1", "CREATE_COMPLETE")
+
+
+_DECLARED = {"ec2-multiregion": ["us-east-1", "us-west-2"]}
+
+
+def _before(*stacks, errors=(), found=None, regions=None):
+    entry = AccountStacks(
+        "ec2-multiregion",
+        "PRIMARY",
+        "111122223333",
+        ("us-east-1", "us-west-2"),
+        stacks=tuple(StackRecord(*x) for x in stacks),
+        errors=tuple(errors),
+    )
+    return deployed_stack_problems(
+        [entry] if found is None else found,
+        accounts=_EXPECTED,
+        regions_by_scenario=_DECLARED if regions is None else regions,
+    )
+
+
+@pytest.mark.parametrize("status", ["CREATE_COMPLETE", "UPDATE_COMPLETE", "IMPORT_COMPLETE"])
+def test_deployed_stack_problems_healthy_scenario_stack_passes(status):
+    assert _before(("us-west-2", "ec2-multiregion-EC2-b-us-west-2", status)) == []
+
+
+def test_deployed_stack_problems_empty_account_fails():
+    (problem,) = _before()
+    assert problem.startswith("ec2-multiregion/PRIMARY (********3333): no healthy stack named")
+
+
+@pytest.mark.parametrize(
+    "stacks",
+    [
+        [("us-east-1", "unrelated-stack", "CREATE_COMPLETE")],
+        [("us-east-1", "CDKToolkit", "CREATE_COMPLETE")],
+        [("us-east-1", "ec2-multiregion-x", "CREATE_IN_PROGRESS")],
+        [("us-east-1", "ec2-multiregion-x", "ROLLBACK_COMPLETE")],
+        [("us-east-1", "ec2-multiregion-x", "DELETE_COMPLETE")],
+        [("us-east-1", "ec2-multiregionx", "CREATE_COMPLETE")],
+    ],
+    ids=["unrelated", "bootstrap-only", "in-progress", "rolled-back", "deleted", "prefix-only"],
+)
+def test_deployed_stack_problems_no_healthy_scenario_stack_fails(stacks):
+    (problem,) = _before(*stacks)
+    assert "no healthy stack named 'ec2-multiregion-*'" in problem
+
+
+def test_deployed_stack_problems_listing_error_fails_even_with_a_healthy_stack():
+    problems = _before(_HEALTHY, errors=["us-west-2: ClientError AccessDenied"])
+    assert problems == [
+        "ec2-multiregion/PRIMARY (********3333): could not list stacks: "
+        "us-west-2: ClientError AccessDenied"
+    ]
+
+
+def test_deployed_stack_problems_unchecked_account_and_empty_config_fail():
+    assert _before(found=[]) == [
+        "configured accounts not checked: ec2-multiregion/PRIMARY (********3333)"
+    ]
+    assert deployed_stack_problems([], accounts={}, regions_by_scenario={}) == [
+        "the account config maps no accounts: nothing was checked"
+    ]
+
+
+def _record(
+    *stacks, errors=(), account_id="111122223333", scenario="ec2-multiregion", tag="PRIMARY"
+):
+    return AccountStacks(
+        scenario,
+        tag,
+        account_id,
+        ("us-east-1", "us-west-2"),
+        stacks=tuple(StackRecord(*x) for x in stacks),
+        errors=tuple(errors),
+    )
+
+
+def test_deployed_stack_problems_duplicate_record_fails():
+    record = _record(_HEALTHY)
+    (problem,) = _before(found=[record, record])
+    assert problem == "accounts checked more than once: ec2-multiregion/PRIMARY (********3333)"
+
+
+def test_deployed_stack_problems_conflicting_duplicate_does_not_hide_a_listing_error():
+    broken = _record(errors=["us-west-2: ClientError AccessDenied"])
+    healthy = _record(_HEALTHY)
+    for found in ([broken, healthy], [healthy, broken]):
+        problems = _before(found=found)
+        assert any(p.startswith("accounts checked more than once") for p in problems)
+        assert any(
+            "could not list stacks: us-west-2: ClientError AccessDenied" in p for p in problems
+        )
+
+
+def test_deployed_stack_problems_unconfigured_record_fails():
+    other = _record(_HEALTHY, account_id="000000000000", tag="OTHER")
+    assert _before(found=[_record(_HEALTHY), other]) == [
+        "accounts checked that are not configured: ec2-multiregion/OTHER (********0000)"
+    ]
+
+
+def test_deployed_stack_problems_unreadable_manifest_is_reported_as_a_manifest_problem():
+    problems = _before(_HEALTHY, regions={})
+    assert len(problems) == 1
+    assert "no declared regions for scenario 'ec2-multiregion' (manifest?)" in problems[0]
+    assert "did not deploy" not in problems[0]
+
+
+def test_deployed_stack_problems_fewer_regions_than_declared_fails():
+    entry = AccountStacks(
+        "ec2-multiregion", "PRIMARY", "111122223333", ("us-east-1",), (StackRecord(*_HEALTHY),)
+    )
+    (problem,) = _before(found=[entry])
+    assert "queried regions ['us-east-1'], scenario declares ['us-east-1', 'us-west-2']" in problem
+
+
+def test_deployed_stack_problems_never_prints_a_full_account_id():
+    assert "111122223333" not in "\n".join(_before(errors=["us-west-2: boom"]))
+
+
+def test_error_label_without_an_error_code():
+    assert _error_label(ClientError({}, "ListStacks")) == "ClientError"
+    assert _error_label(ClientError({"Error": {"Message": "m"}}, "ListStacks")) == "ClientError"
+    assert _error_label(ClientError({"Error": {"Code": ""}}, "ListStacks")) == "ClientError"
+
+
+def test_mask_account_id_keeps_only_the_last_four_digits():
+    assert mask_account_id("111122223333") == "********3333"
+    assert mask_account_id("not-an-id") == "****"
+    assert mask_account_ids("a 111122223333 b 1234 c 1111222233334") == (
+        "a ********3333 b 1234 c 1111222233334"
+    )
+
+
+class _FakeCfn:
+    def __init__(self, pages, error=None):
+        self._pages, self._error = pages, error
+
+    def get_paginator(self, name):
+        assert name == "list_stacks"
+        return self
+
+    def paginate(self, **kwargs):
+        assert not kwargs, "no status filter: DELETE_IN_PROGRESS must be visible"
+        if self._error:
+            raise self._error
+        return iter(self._pages)
+
+
+class _FakeSession:
+    def __init__(self, by_region):
+        self._by_region = by_region
+        self.services = []
+
+    def client(self, service, region_name):
+        self.services.append(service)
+        return self._by_region[region_name]
+
+
+def _page(*stacks):
+    return {"StackSummaries": [{"StackName": n, "StackStatus": s} for n, s in stacks]}
+
+
+def test_collect_reads_every_page_of_every_region():
+    session = _FakeSession(
+        {
+            "us-east-1": _FakeCfn([_page(("a", "CREATE_COMPLETE")), _page(("b", "DELETE_FAILED"))]),
+            "us-west-2": _FakeCfn([_page()]),
+        }
+    )
+    got = collect_account_stacks(
+        scenario="s", tag="T", account_id="111122223333",
+        regions=["us-east-1", "us-west-2"], session_for=lambda _id: session,
+    )  # fmt: skip
+    assert got.stacks == (
+        StackRecord("us-east-1", "a", "CREATE_COMPLETE"),
+        StackRecord("us-east-1", "b", "DELETE_FAILED"),
+    )
+    assert got.errors == () and set(session.services) == {"cloudformation"}
+
+
+def test_collect_records_a_region_error_by_code_only():
+    denied = ClientError(
+        {"Error": {"Code": "AccessDenied", "Message": "arn:aws:iam::111122223333:role/x"}},
+        "ListStacks",
+    )
+    session = _FakeSession(
+        {"us-east-1": _FakeCfn([_page()]), "us-west-2": _FakeCfn([], error=denied)}
+    )
+    got = collect_account_stacks(
+        scenario="s", tag="T", account_id="111122223333",
+        regions=["us-east-1", "us-west-2"], session_for=lambda _id: session,
+    )  # fmt: skip
+    assert got.errors == ("us-west-2: ClientError AccessDenied",)
+    assert "111122223333" not in repr(got.errors)
+
+
+def test_collect_records_a_credentials_error_without_its_message():
+    def session_for(_id):
+        raise RuntimeError("token=CANARY-TOKEN-0123456789 arn:aws:iam::111122223333:role/x")
+
+    got = collect_account_stacks(
+        scenario="s", tag="T", account_id="111122223333",
+        regions=["us-east-1"], session_for=session_for,
+    )  # fmt: skip
+    assert got.errors == ("credentials: RuntimeError",) and got.stacks == ()
+
+
+@pytest.fixture
+def moto_cfn(monkeypatch):
+    for var in ("AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"):
+        monkeypatch.setenv(var, "testing")
+    with mock_aws():
+        yield boto3.Session(region_name="us-east-1")
+
+
+_TEMPLATE = '{"Resources": {"Topic": {"Type": "AWS::SNS::Topic"}}}'  # one trivial resource
+
+
+def test_collect_against_moto_sees_a_stack_until_it_is_deleted(moto_cfn):
+    cfn = moto_cfn.client("cloudformation", region_name="us-west-2")
+    cfn.create_stack(StackName="ec2-multiregion-x", TemplateBody=_TEMPLATE)
+
+    def check():
+        got = collect_account_stacks(
+            scenario="ec2-multiregion", tag="PRIMARY", account_id="111122223333",
+            regions=["us-east-1", "us-west-2"], session_for=lambda _id: moto_cfn,
+        )  # fmt: skip
+        return stack_problems(
+            [got],
+            accounts={"ec2-multiregion": {"PRIMARY": "111122223333"}},
+            regions_by_scenario=REGIONS,
+        )
+
+    (problem,) = check()
+    assert "us-west-2: stack ec2-multiregion-x is CREATE_COMPLETE" in problem
+    cfn.delete_stack(StackName="ec2-multiregion-x")
+    assert check() == []
+
+
+def test_scenario_regions_reads_declared_regions_and_skips_unreadable(tmp_path):
+    good = _write_manifest(tmp_path / "good", EC2_MULTIREGION_TOML)
+    bad = _write_manifest(tmp_path / "bad", "not = [toml")
+    assert scenario_regions([good, bad, tmp_path / "missing.toml"]) == {
+        "ec2-multiregion": ["us-east-1", "us-west-1", "us-west-2"]
+    }
+
+
+def test_cleanup_output_problems_accepts_the_success_summary():
+    out = "Cleanup summary\nCleanup complete: 2 account(s) cleaned successfully.\n"
+    assert cleanup_output_problems(out, accounts=2) == []
+
+
+@pytest.mark.parametrize(
+    "out",
+    [
+        "",
+        "Cleanup complete: 1 account(s) cleaned successfully.\n",
+        "Cleanup completed with errors: 1 succeeded, 1 failed.\n",
+        "Cleanup cancelled.\n",
+    ],
+)
+def test_cleanup_output_problems_rejects_other_output(out):
+    assert cleanup_output_problems(out, accounts=2) != []
+
+
+def test_cleanup_output_problems_flags_errors_even_beside_a_success_line():
+    out = (
+        "Cleanup complete: 2 account(s) cleaned successfully.\n"
+        "Cleanup completed with errors: 1 succeeded, 1 failed.\n"
+    )
+    assert cleanup_output_problems(out, accounts=2) == ["the cleanup summary reports errors"]

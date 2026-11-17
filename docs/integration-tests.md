@@ -28,7 +28,7 @@ model, so every trial is expected to score `1.0`.
 | 2 | `env setup` deploys the scenario (CDK) in `us-east-1`, `us-west-1`, `us-west-2` | scenario `environment.build_timeout_sec` + `deploy.timeout_sec` + 30 min (70 min for `ec2-multiregion`) |
 | 3 | `run -a oracle`, with pre-run environment verification on | sum over the selected tasks of `environment.build_timeout_sec` + `agent.timeout_sec` + `verifier.timeout_sec` (+ `pre_invoke`/`post_invoke` `timeout_sec`) + 30 min (340 min for the nine quickstart tasks) |
 | 4 | Asserts the job planned the expected number of trials, and every trial completed, without errors, with reward `1.0` | |
-| 5 | `env cleanup` is attempted once, also when init, setup or the test failed | scenario `environment.build_timeout_sec` + `cleanup.timeout_sec` + 30 min (130 min for `ec2-multiregion`); no deadline if no `scenario.toml` can be read |
+| 5 | `env cleanup` is attempted once, also when init, setup or the test failed (the standalone test in `test_env_cleanup.py` runs its own deployment and cleanup, see below) | scenario `environment.build_timeout_sec` + `cleanup.timeout_sec` + 30 min (130 min for `ec2-multiregion`); no deadline if no `scenario.toml` can be read |
 
 The derived timeouts are built from the budgets the scenario and tasks
 declare:
@@ -151,6 +151,137 @@ are stripped before parsing.
   only the config and the caller's credentials, not a deployment. It requires
   exit code 0 and exactly one row: the env name, OU ID `preexisting`, and the
   number of accounts in the config.
+
+### `env cleanup` as the step under test
+
+`test_env_cleanup_happy_path` (in `tests/integration/test_env_cleanup.py`)
+runs `env cleanup` as the asserted step and then checks the accounts
+themselves. Without it, cleanup only runs as the finalizer of the shared
+deployment, and nothing looks at what it leaves behind.
+
+The test deploys its own environment (`env init`, `env setup`), because it
+consumes the environment it deploys. It uses the same derived timeouts as the
+quickstart test. The work it adds to a run is one more `env init`, `env setup`
+and asserted `env cleanup`, plus two read-only stack listings per account (one
+before cleanup, one after). Each command runs under its own deadline: for
+`ec2-multiregion`, `env init` 20 min, `env setup` up to 70 min and `env cleanup`
+up to 130 min. These are upper bounds, not measurements. Run time and the cost
+of the stacks have not been measured yet.
+
+The module runs after `test_acceptance.py`. pytest tears down that module's
+shared deployment (an `env cleanup` attempt) when the module ends, before the
+next module starts, and any cleanup failure is reported at that teardown. The
+two modules use the same accounts, so the accounts must be dedicated to these
+tests and start clean: the test does not check that they are empty before
+`env init`, and a teardown failure in the earlier module leaves stacks that
+this module then deploys next to. Both use the env name fixed by the account
+config, so do not run the suite in parallel or in random order.
+
+The account config is assumed to map only the scenario under test, as in the
+`env show` section above. The expected account count in the summary is the
+number of accounts in the whole config, and the stack check reports accounts
+of any other scenario because it has no manifest for them.
+
+It asserts, in order:
+
+1. Before cleanup: in every configured account, `cloudformation:ListStacks`
+   shows at least one stack named `<scenario>-*` in `CREATE_COMPLETE`,
+   `UPDATE_COMPLETE` or `IMPORT_COMPLETE`. So a healthy `<scenario>-*` stack
+   exists before cleanup, and an empty account afterwards means it was
+   removed. The check does not show that `env setup` created it: the deferred
+   emptiness check before `env init` (see the backlog) would establish that.
+   An account that was not checked, was checked twice, is not configured,
+   was queried over other regions than the manifest declares, or had a failed
+   query is reported with the same wording as in step 3. If the check fails,
+   the test fails with the reason and still runs the cleanup attempt.
+2. `env cleanup --yes` exits 0 and prints
+   `Cleanup complete: N account(s) cleaned successfully.` with `N` equal to the
+   number of configured accounts, and no `Cleanup completed with errors` line.
+3. In every configured account and every region the scenario's
+   `scenario.toml` declares, `cloudformation:ListStacks` (all pages, no status
+   filter) returns only stacks in `DELETE_COMPLETE`. `DELETE_IN_PROGRESS` and
+   `DELETE_FAILED` count as left behind.
+4. CDK bootstrap stacks get no exemption. On the asserted path (exit 0 and the
+   success summary) the CLI deletes the bootstrap stacks too, so a remaining
+   `CDKToolkit` or other stack whose name the product treats as CDK bootstrap
+   infrastructure (its `INFRA_PREFIXES`) is reported as a leftover. An
+   environment stack that survives and was not deferred makes the command exit
+   non-zero and skips infrastructure deletion, so the test fails on step 2.
+   The manual check under "Recovering after an interrupted run" is for an
+   interrupted run, not for this command.
+
+A stack that the product defers deleting (for example one blocked by
+requester-managed network interfaces) keeps its `FAILED` status internally but
+is left out of `DeletionSummary.failed`. The command then exits 0 with the
+success summary, and `CDKToolkit` is deliberately retained
+(`_maybe_delete_infra` in `cleanup/stack_deleter.py`). This is the case where
+the asserted success summary coexists with a retained bootstrap stack. The test
+reports both, and the deferred environment stack is the real cause of the
+failure. This is intended, because the stacks are still in the account. The
+safety-net cleanup then runs.
+
+Nested stacks (summaries with a `ParentId`) are listed and counted on purpose.
+The product's `StackDeleter.list_stacks` never deletes them, so a surviving
+nested stack needs manual deletion.
+
+The check fails, instead of passing, when an account was not checked, when
+credentials for an account cannot be obtained, when a region cannot be listed,
+or when the scenario's regions cannot be read from its manifest. It uses the
+CLI's own credential path (`CredentialProvider`, which assumes the configured
+`runner_role`), not a second authentication mechanism.
+
+If a check fails, the test still attempts `env cleanup` once more (see
+`deployed` above); it skips that attempt only after every check above passed
+and the test body ended normally.
+
+**Region scope.** Only the regions the scenario declares are listed. That
+matches the command: `ScenarioTrial._run_cleanup` (`scenario/trial.py`) passes
+the manifest's declared regions explicitly to the asserted cleanup, and so does
+the pre-cleanup residual sweep. The safety-net retry runs the same command, so
+it gets the same list. `CleanupManager._limit_to_baseline_regions`
+(`cleanup/manager.py`) intersects that list with the regions of the POST_SETUP
+snapshot if one exists, and a missing snapshot leaves the list unchanged. All
+enabled regions (`_discover_regions`) are used only when the all-regions option
+(`cleanup_all_regions`, off by default) is set.
+
+**Not verified.** Only CloudFormation stacks are checked. Other resource types
+(for example AMIs, EBS snapshots, IAM roles, S3 buckets and Cloud Control
+resources) are not looked at, and neither are regions the scenario does not
+declare (the region-restriction SCP is expected to keep resources out of
+them). The baseline snapshots are not checked either. Cleanup runs its
+pre-cleanup residual sweep (`_run_pre_cleanup_residual_sweep`), the per-region
+resource sweeper (`_cleanup_region_in_phases`), the global leftovers sweep
+(`_sweep_global_leftovers`) and the orphan scan (`_scan_orphaned_resources`),
+but no trial runs, so they only see resources that setup created. Detecting and
+deleting task-created residue stays uncovered; running trials would add that
+input. The check also does not show that
+cleanup removed stacks that were in the account before `env init`: the product
+deletes all stacks in the scenario's regions, so use an account that holds
+nothing else. The test module body itself is covered only by a live run, which
+has not happened yet; the helpers are unit tested.
+
+**IAM actions the check needs.** The list shows only the permissions the check
+relies on, all read-only. It is not a list of every call, and it is not limited
+to grants beyond what the CLI needs: `sts:AssumeRole` is the CLI's own
+assumption.
+
+| Action | Resource | Why |
+|---|---|---|
+| `sts:AssumeRole` | the configured `runner_role` of each account | the same assumption the CLI makes |
+| `cloudformation:ListStacks` | `*` (it does not support resource-level scoping) | list stacks in each declared region |
+
+The credential path also calls `sts:GetCallerIdentity` (once or twice per
+account) before it assumes the role. That call needs no grant. The test itself
+calls no write APIs and does not need `ec2:DescribeRegions`, because the
+regions come from the manifest.
+
+**Output.** Failure messages name accounts as `<scenario>/<tag>
+(********<last 4 digits>)` and report API errors by error code only, never by
+message, because messages can contain ARNs and account IDs. The test masks
+12-digit numbers in the tail of the CLI output that it adds to an assertion
+message. The CLI's own failure output (when `env cleanup` itself exits non-zero,
+or `env init`/`env setup` fails) is shown as the CLI printed it, as for the other
+tests, with only secret values masked.
 
 The parsers and checks are in `tests/integration/helpers.py`.
 `tests/test_integration_helpers.py` tests them on output rendered by the CLI's
@@ -291,17 +422,26 @@ file.
     --role-session-name preflight --query 'AssumedRoleUser.Arn' --output text
   ```
 
-- **Use credentials that refresh themselves.** A full run can take longer than
-  one hour. aws-bench refreshes its own sessions into the runner role, but each
-  refresh uses your base credentials. Static keys exported into the shell expire
-  mid-run, and `env cleanup` can then leave resources behind. Use a
-  self-refreshing source instead, such as:
+- **Use credentials that refresh themselves.** The full suite runs longer than
+  one hour: with one quickstart task it took about 84 min, because the
+  `env cleanup` test runs its own `env init`, `env setup` and `env cleanup`
+  after the quickstart, `env show` and `env list` tests. aws-bench refreshes its
+  own sessions into the runner role, but each refresh uses your base credentials. Static
+  keys exported into the shell expire mid-run, and `env cleanup` can then leave
+  resources behind. Use a self-refreshing source instead, such as:
   - a `credential_process` profile
   - IAM Identity Center
   - an instance role
 
   Unset any static `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` and
   `AWS_SESSION_TOKEN`, which would override your profile.
+  With static credentials, run one test module at a time, so that each run
+  fits in the credentials' lifetime. `make integration` always runs the whole
+  directory, so call pytest directly with the same environment variables:
+  ```bash
+  uv run pytest tests/integration/test_env_cleanup.py -m integration \
+    --no-cov --timeout=0 -p no:cacheprovider -v
+  ```
 - **Bedrock token** for the judge:
 
   ```bash
@@ -407,9 +547,10 @@ HOME="$H" AWSBENCH_ACCOUNT_CONFIG=/path/to/accounts.yaml \
 With a local datasets checkout, replace `-d ...` with
 `--scenario-path /path/to/aws-bench-datasets/scenarios --include-scenarios ec2-multiregion`.
 
-Afterwards, check that no scenario stacks remain in the three regions. Only
-`CDKToolkit` is expected, if a bootstrap ran. Also check for leftover AMIs and
-EBS snapshots in `us-east-1`.
+Afterwards, check that no scenario stacks remain in the three regions. After an
+interrupted run (not after a clean `env cleanup`, which also deletes the
+bootstrap stacks) only `CDKToolkit` is expected, if a bootstrap ran. Also check for leftover
+AMIs and EBS snapshots in `us-east-1`.
 
 ## Troubleshooting
 
@@ -432,6 +573,11 @@ successfully. It was run live again, with one task, at commit `ae7b194`:
 reward `1.0`, verification on, and a clean `env cleanup`. The `env show` and
 `env list` tests were run live when they were added, together with the quickstart
 test and one task: all three tests passed, and `env cleanup` finished
-successfully. The run does not record how long each command took, so the
-`env show` and `env list` timeouts are still assumed, not derived. A run longer
-than one hour with self-refreshing credentials has not been validated yet.
+successfully. The whole suite then passed in one run with one task: `4 passed, 4 skipped`
+in about 84 min. That includes `test_env_cleanup_happy_path`: before cleanup,
+every configured account held a healthy `<scenario>-*` stack, and afterwards
+every stack in the scenario's regions was `DELETE_COMPLETE`, the CDK bootstrap
+stacks included. The run does not record how long each command took, so the
+`env show` and `env list` timeouts are still assumed, not derived. That run,
+about 84 min, used a self-refreshing credential source (a `credential_process`
+profile), so a run longer than one hour with such a source is validated.

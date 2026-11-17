@@ -2,8 +2,9 @@
 
 Opt-in only (``make integration``). Implemented: the quickstart + oracle flow
 (``env setup`` -> ``run`` -> full reward -> ``env cleanup``), ``env show``
-against the same deployment, and ``env list``. The remaining commands are
-named placeholders; see ``BACKLOG.md`` for priorities.
+against the same deployment, and ``env list``. ``env cleanup`` as the step
+under test is in ``test_env_cleanup.py``, which deploys on its own. The remaining
+commands are named placeholders; see ``BACKLOG.md`` for priorities.
 """
 
 from __future__ import annotations
@@ -19,6 +20,7 @@ from aws_bench.account_management.preexisting import load_account_config
 
 from .conftest import REPO_ROOT
 from .helpers import (
+    INIT_TIMEOUT_SEC,
     IntegSettings,
     Secret,
     SecretEnv,
@@ -37,9 +39,6 @@ from .helpers import (
 
 pytestmark = pytest.mark.integration
 
-# `env init` validates the account and records the baseline; it has no
-# manifest budget of its own.
-INIT_TIMEOUT_SEC = 1200.0
 # `env show` / `env list` are read-only and have no manifest budget either.
 # Assumed, not derived: `env show` collects quotas per account and lists stacks
 # region by region (sequentially) in every enabled region; 600 s is sized for
@@ -217,11 +216,6 @@ def test_env_setup_happy_path():
 @pytest.mark.skip(reason="backlog: not implemented")
 def test_env_creds_happy_path():
     """`env creds -o FILE` exits 0 and FILE holds a non-empty AWS_BEARER_TOKEN_BEDROCK."""
-
-
-@pytest.mark.skip(reason="backlog: not implemented")
-def test_env_cleanup_happy_path():
-    """`env cleanup --yes` exits 0 and leaves no scenario stacks in the accounts."""
 
 
 @pytest.mark.skip(reason="backlog: not implemented")
