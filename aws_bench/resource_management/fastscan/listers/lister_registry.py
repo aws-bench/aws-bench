@@ -117,6 +117,17 @@ DISABLED_LISTERS: frozenset[tuple[str, str]] = frozenset(
 )
 
 
+# Entire services for which we don't run the listers on. A follow-up feature could
+# enable manual opt-in of these services, in case they are used in datasets.
+DISABLED_SERVICES: frozenset[str] = frozenset(
+    {
+        # GameLift (and GameLift Streams): not part of dataset resources; skip all scanning.
+        "gamelift",
+        "gameliftstreams",
+    }
+)
+
+
 def all_listers() -> list[Lister]:
     """Every lister the scanner runs: simple (minus superseded and disabled) + custom."""
     simple = [
@@ -125,7 +136,11 @@ def all_listers() -> list[Lister]:
         if (lister.service, lister.op) not in SUPERSEDED_BY_CUSTOM_LISTER
         and (lister.service, lister.op) not in DISABLED_LISTERS
     ]
-    return simple + list(custom_listers())
+    return [
+        lister
+        for lister in simple + list(custom_listers())
+        if lister.service not in DISABLED_SERVICES
+    ]
 
 
 def cfn_type_pins() -> dict[str, str]:
