@@ -1576,3 +1576,89 @@ def test_env_list_problems_wrong_fields():
         f"OU id 'ou-abcd', expected {PREEXISTING_OU_ID!r}",
         "None accounts listed, expected 2",
     ]
+
+
+# --------------------------------------------------------------------------- #
+# Fixture wiring of the integration suite (run in a nested pytest)
+# --------------------------------------------------------------------------- #
+
+
+def _nested_pytest(args: list[str], env_extra: dict[str, str]) -> str:
+    """Run pytest on the integration tests in a subprocess and return its output.
+
+    Colour-forcing variables and coverage hooks are dropped so the output can
+    be searched as plain text. ``-o addopts=`` lifts the default deselection of
+    the ``integration`` marker.
+    """
+    drop = {"FORCE_COLOR", "TTY_COMPATIBLE", "PY_COLORS", "CLICOLOR_FORCE", "AWS_BENCH_INTEG"}
+    env = {k: v for k, v in os.environ.items() if not k.startswith("COV_CORE") and k not in drop}
+    env["PYTHONPATH"] = str(REPO_ROOT)
+    env.update(env_extra)
+    proc = subprocess.run(  # noqa: S603 - fixed argv
+        [sys.executable, "-m", "pytest", "-p", "no:cacheprovider", "-o", "addopts=", *args],
+        cwd=REPO_ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+        errors="replace",
+        timeout=60,
+    )
+    return proc.stdout + proc.stderr
+
+
+def test_a_test_sharing_the_deployment_checks_the_bedrock_token_first():
+    """``env show`` only shares the deployment, yet the token check must precede it.
+
+    ``bedrock_token`` is session-scoped but is set up only for a test that
+    requests it, directly or through ``deployed_env``. If ``deployed_env`` did
+    not, this test would deploy in a run whose quickstart test already failed
+    for lack of a token.
+    """
+    plan = _nested_pytest(
+        [
+            "tests/integration/test_acceptance.py",
+            "-m",
+            "integration",
+            "-k",
+            "env_show",
+            "--setup-plan",
+            "-q",
+        ],
+        {},
+    )
+    assert "deployed_env" in plan, plan[-2000:]
+    assert "bedrock_token" in plan, plan[-2000:]
+    assert plan.index("bedrock_token") < plan.index("deployed_env")
+
+
+def test_cli_env_failure_never_renders_the_environment(account_config, tmp_path):
+    """A failure while building the CLI environment shows no credentials, even at -vvv.
+
+    pytest prints the arguments of traceback frames, and ``build_cli_env``
+    receives the whole environment. An extra link that overlaps ``.aws`` makes
+    it raise ``FileExistsError``.
+    """
+    home = tmp_path / "home"
+    (home / ".aws").mkdir(parents=True)
+    out = _nested_pytest(
+        [
+            "tests/integration/test_acceptance.py",
+            "-m",
+            "integration",
+            "-k",
+            "env_list",
+            "--tb=long",
+            "-vvv",
+        ],
+        {
+            "HOME": str(home),
+            "AWS_BENCH_INTEG": "1",
+            "AWS_BENCH_INTEG_ACCOUNT_CONFIG": str(account_config),
+            "AWS_BENCH_INTEG_HOME_LINKS": ".aws",
+            "AWS_SECRET_ACCESS_KEY": TOKEN,
+            "AWS_SESSION_TOKEN": ENV_TOKEN,
+        },
+    )
+    assert "FileExistsError" in out, out[-3000:]  # the failure path was reached
+    assert TOKEN not in out
+    assert ENV_TOKEN not in out

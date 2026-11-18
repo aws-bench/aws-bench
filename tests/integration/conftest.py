@@ -89,7 +89,7 @@ def cli_env(integ_settings: IntegSettings, tmp_path_factory: pytest.TempPathFact
       ``HOME``. Runs longer than one hour need refreshable base credentials.
     """
     env = build_cli_env(
-        os.environ,
+        SecretEnv(os.environ),
         account_config=integ_settings.account_config,
         scratch_home=tmp_path_factory.mktemp("integ-home"),
     )

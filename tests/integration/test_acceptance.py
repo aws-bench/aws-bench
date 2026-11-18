@@ -93,12 +93,16 @@ def _step_timeouts(settings: IntegSettings, cli_env: SecretEnv) -> StepTimeouts:
 
 
 @pytest.fixture(scope="module")
-def deployed_env(integ_settings: IntegSettings, cli_env: SecretEnv, run_cli):
+def deployed_env(integ_settings: IntegSettings, cli_env: SecretEnv, run_cli, bedrock_token: Secret):
     """``env init`` + ``env setup``, with one ``env cleanup`` attempt on every exit path.
 
     Module-scoped: every test here that requests it shares one deployment, and
     cleanup runs once, after the last of them. If init or setup fails, pytest
     caches that error and reports it for each such test without deploying again.
+
+    It requests ``bedrock_token`` itself, so every test that shares the
+    deployment, not only the ones that use the token, fails before anything is
+    deployed when the token is missing.
 
     Setup and cleanup timeouts come from the scenario manifest (read after
     ``env init``, which caches registry scenarios; re-read for cleanup, since

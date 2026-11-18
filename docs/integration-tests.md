@@ -339,7 +339,7 @@ one is.
 |---|---|---|
 | `AWS_BENCH_INTEG` | yes | Must be `1` to opt in |
 | `AWS_BENCH_INTEG_ACCOUNT_CONFIG` | yes | Path to the account config YAML (section 2) |
-| `AWS_BEARER_TOKEN_BEDROCK` | yes | Bedrock token for the LLM judge (section 3). The test fails before deploying anything without it. |
+| `AWS_BEARER_TOKEN_BEDROCK` | yes | Bedrock token for the LLM judge (section 3). The quickstart test, and the tests that share its deployment, fail before deploying anything without it. |
 | `AWS_PROFILE` (or other standard AWS variables) | yes | Base credentials that can assume the runner role |
 | `AWS_BENCH_INTEG_DATASET` | no | Registry dataset (default `aws-bench-quickstart`) |
 | `AWS_BENCH_INTEG_DATASET_PATH` | no | Path to a local `aws-bench-datasets` checkout, used instead of the registry. Use it to test unreleased dataset changes. Cannot be combined with `AWS_BENCH_INTEG_DATASET`. |
