@@ -1767,6 +1767,26 @@ def test_stack_problems_leftover_scenario_stack_fails():
     ]
 
 
+def test_stack_problems_masks_account_ids_in_stack_names():
+    """A stack name can carry an account ID; failure messages must not repeat it."""
+    found = _both([("us-east-1", "ec2-multiregion-123456789012-us-east-1", "CREATE_COMPLETE")])
+    (problem,) = _problems(found)
+    assert "123456789012" not in problem
+    assert "ec2-multiregion-********9012-us-east-1" in problem
+
+
+def test_deployed_stack_problems_masks_account_ids_in_scenario_names():
+    scenario = "s-123456789012"
+    found = [AccountStacks(scenario, "A", "111122223333", ("us-east-1",))]
+    problems = deployed_stack_problems(
+        found,
+        accounts={scenario: {"A": "111122223333"}},
+        regions_by_scenario={scenario: ["us-east-1"]},
+    )
+    assert problems, "an account without a deployment must be reported"
+    assert all("123456789012" not in p for p in problems)
+
+
 def test_stack_problems_leftover_in_non_primary_region_fails():
     found = _both([("us-west-2", "ec2-multiregion-EC2-b-us-west-2", "UPDATE_COMPLETE")])
     (problem,) = _problems(found)

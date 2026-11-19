@@ -1330,6 +1330,16 @@ def _check_coverage(
     return problems, clean
 
 
+def _masked(problems: Sequence[str]) -> list[str]:
+    """Mask account IDs in every problem string.
+
+    Stack and scenario names can carry an account ID. The strings are masked
+    where they are built, so every place that prints them (an assertion message
+    and pytest's own ``assert ... == []`` explanation) shows only masked IDs.
+    """
+    return [mask_account_ids(p) for p in problems]
+
+
 def stack_problems(
     found: Sequence[AccountStacks],
     *,
@@ -1362,7 +1372,7 @@ def stack_problems(
     Nested stacks (summaries with ``ParentId``) are listed and counted on
     purpose. The product's ``StackDeleter.list_stacks`` never deletes them, so a
     surviving nested stack needs manual deletion. Other resource types are not
-    checked.
+    checked. Account IDs inside stack or scenario names are masked in the result.
     """
     problems, _ = _check_coverage(found, accounts=accounts, regions_by_scenario=regions_by_scenario)
     for a in found:
@@ -1372,7 +1382,7 @@ def stack_problems(
                 continue
             kind = "CDK bootstrap stack" if is_infra_identifier(stack.name) else "stack"
             problems.append(f"{label}: {stack.region}: {kind} {stack.name} is {stack.status}")
-    return problems
+    return _masked(problems)
 
 
 def deployed_stack_problems(
@@ -1404,7 +1414,7 @@ def deployed_stack_problems(
                 f"'{scenario}-*' before cleanup, so no deployment was found in this account "
                 "(or it was not listed)"
             )
-    return problems
+    return _masked(problems)
 
 
 def cleanup_output_problems(output: str, *, accounts: int) -> list[str]:

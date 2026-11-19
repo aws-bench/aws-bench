@@ -279,7 +279,8 @@ regions come from the manifest.
 (********<last 4 digits>)` and report API errors by error code only, never by
 message, because messages can contain ARNs and account IDs. The test masks
 12-digit numbers in the tail of the CLI output that it adds to an assertion
-message. The CLI's own failure output (when `env cleanup` itself exits non-zero,
+message, and in the stack and scenario names inside the stack problems, since
+a name can carry an account ID. The CLI's own failure output (when `env cleanup` itself exits non-zero,
 or `env init`/`env setup` fails) is shown as the CLI printed it, as for the other
 tests, with only secret values masked.
 
