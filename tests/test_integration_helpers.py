@@ -6,6 +6,7 @@ Secret-handling tests check the full report of an inner pytest session (run as
 a subprocess), because that is what a developer or CI log actually shows.
 """
 
+import io
 import os
 import signal
 import subprocess
@@ -15,24 +16,43 @@ import time
 from pathlib import Path
 
 import pytest
+from rich.console import Console
 
+from aws_bench.account_management.models import ScenarioAccount
+from aws_bench.cli.display import render_account_state, render_env_header, render_env_list
+from aws_bench.resource_management.models import QuotaEntry
 from tests.integration import helpers
 from tests.integration.helpers import (
     CLEANUP_MARGIN_SEC,
+    CLI_COLUMNS,
+    COLOR_FORCING_VARS,
     FALLBACK_RUN_TIMEOUT_SEC,
     FALLBACK_SETUP_TIMEOUT_SEC,
     FALLBACK_TASK_BUDGET_SEC,
+    HOME_LINKS_VAR,
+    PREEXISTING_OU_ID,
     RUN_MARGIN_SEC,
     SETUP_MARGIN_SEC,
     CliResult,
+    EnvShow,
     IntegSettings,
+    ListedEnv,
     Secret,
     SecretEnv,
+    ShownAccount,
+    ShownStack,
+    build_cli_env,
+    cli_display_env,
     deployed,
+    env_list_problems,
     env_secret_values,
+    env_show_problems,
     expected_trial_count,
     find_scenario_manifests,
     load_settings,
+    parse_env_list,
+    parse_env_show,
+    plain,
     redact_args,
     resolve_run_tasks,
     run_aws_bench,
@@ -1210,3 +1230,435 @@ def test_find_manifests_registry_mode_reads_cli_cache(tmp_path):
 
 def test_find_manifests_registry_mode_empty_cache(tmp_path):
     assert find_scenario_manifests(dataset_path=None, scenario="x", home=tmp_path) == []
+
+
+# --------------------------------------------------------------------------- #
+# env show / env list output: rendered with the CLI's own display functions
+# --------------------------------------------------------------------------- #
+
+CONFIGURED = {"ec2-multiregion": {"PRIMARY": "111122223333"}, "other": {"A": "444455556666"}}
+BOOTSTRAP = {"name": "CDKToolkit", "status": "CREATE_COMPLETE", "region": "us-east-1"}
+HEALTHY = [
+    BOOTSTRAP,
+    {
+        "name": "ec2-multiregion-EC2-ls9fuhb522-us-west-2",
+        "status": "UPDATE_COMPLETE",
+        "region": "us-west-2",
+    },
+]
+OTHER_HEALTHY = [{"name": "other-stack", "status": "CREATE_COMPLETE", "region": "us-east-1"}]
+
+
+def _console(width: int = CLI_COLUMNS, *, color: bool = False):
+    return Console(file=io.StringIO(), width=width, force_terminal=color, highlight=False)
+
+
+def _account(scenario: str, tag: str, account_id: str, status: str = "ACTIVE"):
+    return ScenarioAccount(
+        account_id=account_id, email="", scenario_name=scenario, account_tag=tag, status=status
+    )
+
+
+def _render_show(
+    *,
+    name: str = "integ-env",
+    count: int | None = 2,
+    panels: list[tuple[tuple[str, str, str, str], list[dict[str, str]]]] | None = None,
+    width: int = CLI_COLUMNS,
+    color: bool = False,
+    quota_error: str | None = None,
+    quotas: list[QuotaEntry] | None = None,
+) -> str:
+    """Mirror `env show` in pre-existing mode: header panel, then one panel per account."""
+    if panels is None:
+        panels = [
+            (("ec2-multiregion", "PRIMARY", "111122223333", "ACTIVE"), HEALTHY),
+            (("other", "A", "444455556666", "ACTIVE"), OTHER_HEALTHY),
+        ]
+    console = _console(width, color=color)
+    render_env_header(
+        console, "000000000000", "preexisting", name, "preexisting", count,
+        account_quota="[dim]externally managed[/dim]",
+    )  # fmt: skip
+    for (scenario, tag, account_id, status), stacks in panels:
+        console.print(
+            render_account_state(
+                _account(scenario, tag, account_id, status), quotas or [], quota_error, stacks
+            )
+        )
+    return console.file.getvalue()  # type: ignore[attr-defined]
+
+
+def _render_list(rows: list[dict], *, color: bool = False) -> str:
+    console = _console(color=color)
+    render_env_list(console, "preexisting", "111122223333", rows)
+    return console.file.getvalue()  # type: ignore[attr-defined]
+
+
+@pytest.mark.parametrize("color", [False, True])
+def test_parse_env_show_reads_header_accounts_and_stacks(color):
+    shown = parse_env_show("INFO some log line\n" + _render_show(color=color))
+    assert shown == EnvShow(
+        env_name="integ-env",
+        scenario_accounts=2,
+        accounts=(
+            ShownAccount(
+                "ec2-multiregion", "PRIMARY", "111122223333", "ACTIVE",
+                stacks=(
+                    ShownStack("CDKToolkit", "CREATE_COMPLETE", "us-east-1"),
+                    ShownStack(
+                        "ec2-multiregion-EC2-ls9fuhb522-us-west-2", "UPDATE_COMPLETE", "us-west-2"
+                    ),
+                ),
+            ),
+            ShownAccount(
+                "other", "A", "444455556666", "ACTIVE",
+                stacks=(ShownStack("other-stack", "CREATE_COMPLETE", "us-east-1"),),
+            ),
+        ),
+    )  # fmt: skip
+    assert env_show_problems(shown, env_name="integ-env", accounts=CONFIGURED) == []
+
+
+def test_plain_strips_ansi_and_hyperlinks():
+    text = "\x1b[1;36mbold\x1b[0m \x1b]8;id=1;https://example.com\x1b\\link\x1b]8;;\x1b\\"
+    assert plain(text) == "bold link"
+
+
+def test_parse_env_show_with_quota_error_still_reads_stacks():
+    shown = parse_env_show(_render_show(quota_error="AccessDenied"))
+    assert [len(a.stacks) for a in shown.accounts] == [2, 1]
+
+
+@pytest.mark.parametrize("color", [False, True])
+def test_parse_env_show_with_quota_rows_still_reads_stacks(color):
+    """Live panels carry a quota table; its rows must not be read as stacks."""
+    quotas = [
+        QuotaEntry("us-east-1", "L-1216C47A", "Running On-Demand instances", 8, 32, True),
+        QuotaEntry("us-west-2", "L-0263D0A3", "EC2-VPC Elastic IPs", 10, 5, False),
+    ]
+    output = _render_show(quotas=quotas, color=color)
+    assert plain(output).count("L-1216C47A") == 2  # the quota table is in both panels
+    shown = parse_env_show(output)
+    assert [a.stacks for a in shown.accounts] == [
+        tuple(ShownStack(**s) for s in HEALTHY),
+        tuple(ShownStack(**s) for s in OTHER_HEALTHY),
+    ]
+    assert env_show_problems(shown, env_name="integ-env", accounts=CONFIGURED) == []
+
+
+def test_parse_env_show_without_accounts():
+    console = _console()
+    render_env_header(console, "000000000000", "preexisting", "integ-env", "preexisting")
+    console.print("  No scenario accounts found.")
+    shown = parse_env_show(console.file.getvalue())  # type: ignore[attr-defined]
+    assert shown == EnvShow("integ-env", None, ())
+    problems = env_show_problems(shown, env_name="integ-env", accounts=CONFIGURED)
+    assert any("scenario accounts, expected 2" in p for p in problems)
+    assert any("not shown" in p for p in problems)
+
+
+@pytest.mark.parametrize("output", ["", "Error: something failed\n"])
+def test_env_show_problems_on_empty_output(output):
+    problems = env_show_problems(parse_env_show(output), env_name="e", accounts=CONFIGURED)
+    assert problems[0] == "no environment header panel"
+    assert len(problems) == 3  # header, count, missing accounts
+
+
+def test_env_show_problems_wrong_name_and_count():
+    shown = parse_env_show(_render_show(name="someone-else", count=3))
+    problems = env_show_problems(shown, env_name="integ-env", accounts=CONFIGURED)
+    assert problems == [
+        "header shows environment 'someone-else', expected 'integ-env'",
+        "header shows 3 scenario accounts, expected 2",
+    ]
+
+
+def test_env_show_problems_missing_unexpected_and_duplicate_accounts():
+    panels = [
+        (("ec2-multiregion", "PRIMARY", "111122223333", "ACTIVE"), HEALTHY),
+        (("ec2-multiregion", "PRIMARY", "111122223333", "ACTIVE"), HEALTHY),
+        (("stray", "B", "111122223333", "ACTIVE"), []),
+    ]
+    shown = parse_env_show(_render_show(panels=panels))
+    problems = env_show_problems(shown, env_name="integ-env", accounts=CONFIGURED)
+    assert problems == [
+        "accounts shown more than once: [('ec2-multiregion', 'PRIMARY', '111122223333')]",
+        "configured accounts not shown: [('other', 'A', '444455556666')]",
+        "accounts shown that are not configured: [('stray', 'B', '111122223333')]",
+    ]
+
+
+def test_env_show_problems_inactive_account():
+    panels = [
+        (("ec2-multiregion", "PRIMARY", "111122223333", "SUSPENDED"), HEALTHY),
+        (("other", "A", "444455556666", "ACTIVE"), OTHER_HEALTHY),
+    ]
+    problems = env_show_problems(
+        parse_env_show(_render_show(panels=panels)), env_name="integ-env", accounts=CONFIGURED
+    )
+    assert problems == ["accounts not ACTIVE: [('ec2-multiregion', 'PRIMARY', 'SUSPENDED')]"]
+
+
+def _show_problems(primary: list[dict[str, str]], other: list[dict[str, str]]) -> list[str]:
+    """Problems for a rendered two-account `env show` with the given stack rows."""
+    panels = [
+        (("ec2-multiregion", "PRIMARY", "111122223333", "ACTIVE"), primary),
+        (("other", "A", "444455556666", "ACTIVE"), other),
+    ]
+    return env_show_problems(
+        parse_env_show(_render_show(panels=panels)), env_name="integ-env", accounts=CONFIGURED
+    )
+
+
+NO_SCENARIO_STACK = (
+    "configured accounts without a healthy <scenario>-* stack "
+    "(['CREATE_COMPLETE', 'IMPORT_COMPLETE', 'UPDATE_COMPLETE']): "
+)
+PRIMARY_KEY = "('ec2-multiregion', 'PRIMARY', '111122223333')"
+OTHER_KEY = "('other', 'A', '444455556666')"
+
+
+def _stack(name: str, status: str = "CREATE_COMPLETE", region: str = "us-west-1"):
+    return {"name": name, "status": status, "region": region}
+
+
+def test_env_show_problems_bootstrap_stack_only():
+    """CDKToolkit alone is not evidence that the scenario deployed."""
+    assert _show_problems([BOOTSTRAP], [BOOTSTRAP]) == [
+        NO_SCENARIO_STACK + f"[{PRIMARY_KEY}, {OTHER_KEY}]"
+    ]
+
+
+@pytest.mark.parametrize(
+    "unrelated",
+    ["unrelated-personal-stack", "ec2-multiregionx-AppRoles-us-east-1", "other-AppRoles-us-east-1"],
+    ids=["unrelated", "prefix-without-dash", "other-scenario"],
+)
+def test_env_show_problems_only_unrelated_healthy_stack(unrelated):
+    """A healthy stack not named `<scenario>-*` does not count for that scenario's account."""
+    assert _show_problems([BOOTSTRAP, _stack(unrelated)], OTHER_HEALTHY) == [
+        NO_SCENARIO_STACK + f"[{PRIMARY_KEY}]"
+    ]
+
+
+@pytest.mark.parametrize(
+    "other",
+    [[], [_stack("other-stack", "DELETE_IN_PROGRESS")]],
+    ids=["no-stacks", "in-progress-only"],
+)
+def test_env_show_problems_one_account_without_scenario_stack(other):
+    """A healthy stack in one account does not cover another configured account."""
+    assert _show_problems(HEALTHY, other) == [NO_SCENARIO_STACK + f"[{OTHER_KEY}]"]
+
+
+@pytest.mark.parametrize(
+    "status",
+    [
+        "ROLLBACK_COMPLETE",
+        "UPDATE_ROLLBACK_COMPLETE",
+        "UPDATE_FAILED",
+        "CREATE_FAILED",
+        "CREATE_IN_PROGRESS",
+        "UPDATE_IN_PROGRESS",
+        "DELETE_IN_PROGRESS",
+    ],
+)
+def test_env_show_problems_scenario_stack_not_healthy(status):
+    """A `<scenario>-*` stack that did not finish deploying is not evidence."""
+    primary = [BOOTSTRAP, _stack("ec2-multiregion-EC2-ls9fuhb522-us-west-1", status)]
+    assert _show_problems(primary, OTHER_HEALTHY) == [NO_SCENARIO_STACK + f"[{PRIMARY_KEY}]"]
+
+
+@pytest.mark.parametrize(
+    "failed",
+    [
+        _stack("unrelated-personal-stack", "UPDATE_FAILED"),
+        _stack("ec2-multiregion-cloudformation-x-us-west-1", "UPDATE_FAILED"),
+        _stack("ec2-multiregion-TigrisService-x-us-west-1", "ROLLBACK_COMPLETE"),
+        _stack("danube-eks-cluster-x", "DELETE_FAILED"),
+        _stack("CDKToolkit", "UPDATE_ROLLBACK_COMPLETE"),
+    ],
+    ids=lambda s: f"{s['name']}-{s['status']}",
+)
+def test_env_show_problems_ignores_failed_stacks_next_to_healthy(failed):
+    """Failed or rolled-back stacks are left to `env verify`; some scenarios create them."""
+    assert _show_problems([*HEALTHY, failed], OTHER_HEALTHY) == []
+
+
+def test_cli_display_env_sets_columns_and_drops_color_forcing():
+    env = {"HOME": "/h", "TERM": "dumb", "COLUMNS": "80", **dict.fromkeys(COLOR_FORCING_VARS, "1")}
+    assert cli_display_env(env) == {"HOME": "/h", "TERM": "dumb", "COLUMNS": str(CLI_COLUMNS)}
+    assert set(COLOR_FORCING_VARS) == {
+        "FORCE_COLOR",
+        "TTY_COMPATIBLE",
+        "PY_COLORS",
+        "CLICOLOR_FORCE",
+    }
+    assert env["COLUMNS"] == "80"  # the input is not modified
+
+
+def test_build_cli_env_applies_display_env_and_scratch_home(tmp_path):
+    """The `cli_env` fixture's environment: fixed width, no colour forcing, scratch HOME."""
+    real_home, scratch = tmp_path / "home", tmp_path / "scratch"
+    (real_home / ".aws").mkdir(parents=True)
+    (real_home / ".config" / "tool").mkdir(parents=True)
+    scratch.mkdir()
+    environ = {
+        "HOME": str(real_home),
+        "TERM": "dumb",
+        "COLUMNS": "80",
+        HOME_LINKS_VAR: " .config/tool , ",
+        **dict.fromkeys(COLOR_FORCING_VARS, "1"),
+    }
+    env = build_cli_env(environ, account_config=tmp_path / "accounts.yaml", scratch_home=scratch)
+    assert env["COLUMNS"] == str(CLI_COLUMNS)
+    assert not set(COLOR_FORCING_VARS) & env.keys()
+    assert env["HOME"] == str(scratch)
+    assert env["AWSBENCH_ACCOUNT_CONFIG"] == str(tmp_path / "accounts.yaml")
+    assert (scratch / ".aws").resolve() == (real_home / ".aws").resolve()
+    assert (scratch / ".config" / "tool").resolve() == (real_home / ".config" / "tool").resolve()
+    assert not (scratch / ".docker").exists()  # absent in the real HOME, so not linked
+    assert environ["HOME"] == str(real_home)  # the input is not modified
+
+
+def test_env_show_truncated_at_narrow_width_is_not_accepted():
+    """At Rich's 80-column pipe default long titles get cut; the check must not pass."""
+    panels = [
+        (("a-very-long-scenario-name-x" * 2, "PRIMARY", "111122223333", "ACTIVE"), HEALTHY),
+    ]
+    shown = parse_env_show(_render_show(panels=panels, count=1, width=60))
+    accounts = {"a-very-long-scenario-name-x" * 2: {"PRIMARY": "111122223333"}}
+    problems = env_show_problems(shown, env_name="integ-env", accounts=accounts)
+    assert any("configured accounts not shown" in p for p in problems)
+
+
+@pytest.mark.parametrize("color", [False, True])
+def test_parse_env_list_reads_rows(color):
+    out = _render_list(
+        [{"name": "integ-env", "ou_id": "preexisting", "account_count": 2}], color=color
+    )
+    rows = parse_env_list(out)
+    assert rows == (ListedEnv("integ-env", "preexisting", 2),)
+    assert env_list_problems(rows, env_name="integ-env", accounts=CONFIGURED) == []
+
+
+def test_parse_env_list_unknown_count_is_none():
+    rows = parse_env_list(_render_list([{"name": "e", "ou_id": "ou-1", "account_count": None}]))
+    assert rows == (ListedEnv("e", "ou-1", None),)
+
+
+@pytest.mark.parametrize("output", ["", "No test environments found.\n"])
+def test_env_list_problems_without_rows(output):
+    assert env_list_problems(parse_env_list(output), env_name="e", accounts=CONFIGURED) == [
+        "expected exactly one environment row, got 0: []"
+    ]
+
+
+def test_env_list_problems_more_than_one_row():
+    out = _render_list(
+        [
+            {"name": "integ-env", "ou_id": "preexisting", "account_count": 2},
+            {"name": "integ-env", "ou_id": "preexisting", "account_count": 2},
+        ]
+    )
+    problems = env_list_problems(parse_env_list(out), env_name="integ-env", accounts=CONFIGURED)
+    assert len(problems) == 1 and problems[0].startswith(
+        "expected exactly one environment row, got 2"
+    )
+
+
+def test_env_list_problems_wrong_fields():
+    out = _render_list([{"name": "other-env", "ou_id": "ou-abcd", "account_count": None}])
+    problems = env_list_problems(parse_env_list(out), env_name="integ-env", accounts=CONFIGURED)
+    assert problems == [
+        "environment 'other-env' listed, expected 'integ-env'",
+        f"OU id 'ou-abcd', expected {PREEXISTING_OU_ID!r}",
+        "None accounts listed, expected 2",
+    ]
+
+
+# --------------------------------------------------------------------------- #
+# Fixture wiring of the integration suite (run in a nested pytest)
+# --------------------------------------------------------------------------- #
+
+
+def _nested_pytest(args: list[str], env_extra: dict[str, str]) -> str:
+    """Run pytest on the integration tests in a subprocess and return its output.
+
+    Colour-forcing variables and coverage hooks are dropped so the output can
+    be searched as plain text. ``-o addopts=`` lifts the default deselection of
+    the ``integration`` marker.
+    """
+    drop = {"FORCE_COLOR", "TTY_COMPATIBLE", "PY_COLORS", "CLICOLOR_FORCE", "AWS_BENCH_INTEG"}
+    env = {k: v for k, v in os.environ.items() if not k.startswith("COV_CORE") and k not in drop}
+    env["PYTHONPATH"] = str(REPO_ROOT)
+    env.update(env_extra)
+    proc = subprocess.run(  # noqa: S603 - fixed argv
+        [sys.executable, "-m", "pytest", "-p", "no:cacheprovider", "-o", "addopts=", *args],
+        cwd=REPO_ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+        errors="replace",
+        timeout=60,
+    )
+    return proc.stdout + proc.stderr
+
+
+def test_a_test_sharing_the_deployment_checks_the_bedrock_token_first():
+    """``env show`` only shares the deployment, yet the token check must precede it.
+
+    ``bedrock_token`` is session-scoped but is set up only for a test that
+    requests it, directly or through ``deployed_env``. If ``deployed_env`` did
+    not, this test would deploy in a run whose quickstart test already failed
+    for lack of a token.
+    """
+    plan = _nested_pytest(
+        [
+            "tests/integration/test_acceptance.py",
+            "-m",
+            "integration",
+            "-k",
+            "env_show",
+            "--setup-plan",
+            "-q",
+        ],
+        {},
+    )
+    assert "deployed_env" in plan, plan[-2000:]
+    assert "bedrock_token" in plan, plan[-2000:]
+    assert plan.index("bedrock_token") < plan.index("deployed_env")
+
+
+def test_cli_env_failure_never_renders_the_environment(account_config, tmp_path):
+    """A failure while building the CLI environment shows no credentials, even at -vvv.
+
+    pytest prints the arguments of traceback frames, and ``build_cli_env``
+    receives the whole environment. An extra link that overlaps ``.aws`` makes
+    it raise ``FileExistsError``.
+    """
+    home = tmp_path / "home"
+    (home / ".aws").mkdir(parents=True)
+    out = _nested_pytest(
+        [
+            "tests/integration/test_acceptance.py",
+            "-m",
+            "integration",
+            "-k",
+            "env_list",
+            "--tb=long",
+            "-vvv",
+        ],
+        {
+            "HOME": str(home),
+            "AWS_BENCH_INTEG": "1",
+            "AWS_BENCH_INTEG_ACCOUNT_CONFIG": str(account_config),
+            "AWS_BENCH_INTEG_HOME_LINKS": ".aws",
+            "AWS_SECRET_ACCESS_KEY": TOKEN,
+            "AWS_SESSION_TOKEN": ENV_TOKEN,
+        },
+    )
+    assert "FileExistsError" in out, out[-3000:]  # the failure path was reached
+    assert TOKEN not in out
+    assert ENV_TOKEN not in out

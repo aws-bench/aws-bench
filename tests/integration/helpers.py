@@ -11,6 +11,8 @@ unit tests that exercise these helpers must run in ``make test``.
 - Subprocess timeouts derived from the scenario and task budgets
   (``step_timeouts_for``, ``run_timeout_for``) and the expected trial count
   (``resolve_run_tasks``, ``expected_trial_count``).
+- Parsing and checking `env show` / `env list` output (``parse_env_show``,
+  ``env_show_problems``, ``parse_env_list``, ``env_list_problems``).
 """
 
 from __future__ import annotations
@@ -23,7 +25,7 @@ import sys
 import uuid
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import cast
 
@@ -841,3 +843,276 @@ def expected_trial_count(settings: IntegSettings, *, resolved: int) -> int:
             pytrace=False,
         )
     return expected
+
+
+# --------------------------------------------------------------------------- #
+# `env show` / `env list` output
+# --------------------------------------------------------------------------- #
+
+# Console width the CLI subprocess gets (``COLUMNS``, which Rich reads). Rich
+# assumes 80 columns on a pipe and then truncates long panel titles and table
+# cells, which would hide the fields the tests parse. 200 columns fit the
+# `ec2-multiregion` panels the unit tests render; a very long env or scenario
+# name can still be truncated, and the parsers then fail (the header or account
+# panel is not recognised) rather than pass.
+CLI_COLUMNS = 200
+# Removed from the CLI's environment. ``FORCE_COLOR`` and ``TTY_COMPATIBLE``
+# make Rich treat a pipe as a terminal; with ``TERM`` dumb or unknown, Rich then
+# ignores ``COLUMNS`` and uses 80 columns. Rich does not read ``PY_COLORS`` or
+# ``CLICOLOR_FORCE``; they are removed defensively.
+COLOR_FORCING_VARS = ("FORCE_COLOR", "TTY_COMPATIBLE", "PY_COLORS", "CLICOLOR_FORCE")
+# OU id printed in pre-existing mode: `env show` takes it from
+# ``PreexistingEnvironmentConfig.to_test_environment``, `env list` hard-codes
+# it in ``list_envs``. Only ``env_list_problems`` checks it; the OU row of the
+# `env show` header is deliberately not checked.
+PREEXISTING_OU_ID = "preexisting"
+# Stack statuses that mean a deploy finished successfully.
+HEALTHY_STACK_STATUSES = frozenset({"CREATE_COMPLETE", "UPDATE_COMPLETE", "IMPORT_COMPLETE"})
+
+# CSI sequences (colours, styles) and OSC sequences (hyperlinks). Rich emits
+# them on a pipe too when FORCE_COLOR is set, as it is in CI.
+_ANSI_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)")
+_PANEL_TITLE_RE = re.compile(r"^╭─ (?P<title>.+?) ─*╮$")
+_PANEL_BODY_RE = re.compile(r"^│ (?P<body>.*?)\s*│$")
+# `render_account_state` title: "<scenario> / <tag>  ·  <account id>  ·  <status>".
+_ACCOUNT_TITLE_RE = re.compile(
+    r"^(?P<scenario>\S+) / (?P<tag>\S+)\s+·\s+(?P<account_id>\d{12})\s+·\s+(?P<status>\S+)$"
+)
+_ACCOUNT_COUNT_RE = re.compile(r"^Scenario accounts\s+(?P<count>\d+)$")
+_STACK_STATUS_RE = re.compile(r"^[A-Z]+(?:_[A-Z]+)+$")
+_REGION_RE = re.compile(r"^[a-z]{2}(?:-[a-z]+)+-\d+$")
+
+
+def plain(text: str) -> str:
+    """Return ``text`` without ANSI escape sequences."""
+    return _ANSI_RE.sub("", text)
+
+
+def cli_display_env(env: Mapping[str, str]) -> dict[str, str]:
+    """Return ``env`` with ``COLUMNS=CLI_COLUMNS`` and no ``COLOR_FORCING_VARS``.
+
+    Without colour forcing, Rich sees a pipe as a non-terminal and honours
+    ``COLUMNS`` whatever ``TERM`` is.
+    """
+    out = {k: v for k, v in env.items() if k not in COLOR_FORCING_VARS}
+    out["COLUMNS"] = str(CLI_COLUMNS)
+    return out
+
+
+def build_cli_env(
+    environ: Mapping[str, str], *, account_config: Path, scratch_home: Path
+) -> dict[str, str]:
+    """Return the CLI subprocess environment built from ``environ`` (see ``cli_env``).
+
+    Symlinks ``.aws``, ``.docker`` and the ``HOME_LINKS_VAR`` paths of the real
+    ``HOME`` into ``scratch_home``, points ``HOME`` at ``scratch_home``, sets
+    ``AWSBENCH_ACCOUNT_CONFIG`` and applies ``cli_display_env``.
+    """
+    env = dict(environ)
+    real_home = Path(env.get("HOME", str(Path.home())))
+    extra = [p.strip() for p in env.get(HOME_LINKS_VAR, "").split(",") if p.strip()]
+    for name in (".aws", ".docker", *extra):
+        if (real_home / name).exists():
+            link = scratch_home / name
+            link.parent.mkdir(parents=True, exist_ok=True)
+            link.symlink_to(real_home / name, target_is_directory=True)
+    env["HOME"] = str(scratch_home)
+    env["AWSBENCH_ACCOUNT_CONFIG"] = str(account_config)
+    return cli_display_env(env)
+
+
+@dataclass(frozen=True)
+class ShownStack:
+    """One row of an account's stack table in `env show`."""
+
+    name: str
+    status: str
+    region: str
+
+
+@dataclass(frozen=True)
+class ShownAccount:
+    """One account panel of `env show`."""
+
+    scenario: str
+    tag: str
+    account_id: str
+    status: str
+    stacks: tuple[ShownStack, ...] = ()
+
+
+@dataclass(frozen=True)
+class EnvShow:
+    """What `env show` printed: header panel title and count, then one panel per account."""
+
+    env_name: str | None
+    scenario_accounts: int | None
+    accounts: tuple[ShownAccount, ...]
+
+
+def parse_env_show(output: str) -> EnvShow:
+    """Parse `env show` output (``render_env_header`` + ``render_account_state`` panels).
+
+    The first panel whose title is not an account title is the header: its
+    title is the env name, and its "Scenario accounts" row the account count.
+    Each account panel contributes the stack rows (name, status, region) of
+    its stack table. Lines outside panels (e.g. log lines) are ignored.
+    """
+    env_name: str | None = None
+    count: int | None = None
+    accounts: list[ShownAccount] = []
+    stacks: list[ShownStack] = []
+    panel: str | None = None  # "header", "account" or None (outside / unknown panel)
+
+    def close_account() -> None:
+        if panel == "account":
+            accounts[-1] = replace(accounts[-1], stacks=tuple(stacks))
+
+    for line in plain(output).splitlines():
+        line = line.rstrip()
+        title = _PANEL_TITLE_RE.match(line)
+        if title:
+            close_account()
+            stacks = []
+            account = _ACCOUNT_TITLE_RE.match(title["title"])
+            if account:
+                fields = account["scenario"], account["tag"], account["account_id"]
+                accounts.append(ShownAccount(*fields, account["status"]))
+                panel = "account"
+            elif env_name is None and not accounts:
+                env_name = title["title"]
+                panel = "header"
+            else:
+                panel = None
+            continue
+        if line.startswith("╰"):
+            close_account()
+            panel = None
+            continue
+        body = _PANEL_BODY_RE.match(line)
+        if body is None or panel is None:
+            continue
+        text = body["body"].strip()
+        if panel == "header":
+            found = _ACCOUNT_COUNT_RE.match(text)
+            if found:
+                count = int(found["count"])
+            continue
+        cells = re.split(r"\s{2,}", text)
+        if len(cells) == 3 and _STACK_STATUS_RE.match(cells[1]) and _REGION_RE.match(cells[2]):
+            stacks.append(ShownStack(*cells))
+    close_account()
+    return EnvShow(env_name, count, tuple(accounts))
+
+
+def _configured(accounts: Mapping[str, Mapping[str, str]]) -> list[tuple[str, str, str]]:
+    return [(s, t, a) for s, tags in accounts.items() for t, a in tags.items()]
+
+
+def env_show_problems(
+    shown: EnvShow, *, env_name: str, accounts: Mapping[str, Mapping[str, str]]
+) -> list[str]:
+    """Return what is wrong with `env show` output for a deployed pre-existing env.
+
+    ``accounts`` is the account config's ``{scenario: {tag: account_id}}``.
+    Expected: a header titled ``env_name`` counting every configured account;
+    exactly one panel per configured account, each ``ACTIVE``; and in every
+    configured (scenario, tag, account) panel, at least one stack named
+    ``<scenario>-*`` in a ``HEALTHY_STACK_STATUSES`` state. Other stacks are
+    ignored: failed or rolled-back stacks are not checked (drift is left to
+    the `env verify` test), nor are the regions stacks are in, nor the
+    header's OU row. The env name, count and account triples come from the
+    same account config the CLI reads, so they verify rendering and plumbing.
+
+    The stack check assumes ``env setup`` deployed the scenario's stacks into
+    every configured account. aws-bench does not enforce that (each scenario's
+    own deploy script decides), but it holds when the account config maps only
+    scenarios this run sets up: every scenario in aws-bench-datasets has one
+    account tag, and its CDK app names its stacks ``<scenario>-<id>-<region>``.
+    ``env show`` lists stacks per account ID, so if two tags shared an account
+    ID the check would reduce to per-account evidence (pre-existing configs
+    reject that mapping).
+    """
+    problems: list[str] = []
+    if shown.env_name is None:
+        problems.append("no environment header panel")
+    elif shown.env_name != env_name:
+        problems.append(f"header shows environment {shown.env_name!r}, expected {env_name!r}")
+    expected = _configured(accounts)
+    if shown.scenario_accounts != len(expected):
+        problems.append(
+            f"header shows {shown.scenario_accounts!r} scenario accounts, expected {len(expected)}"
+        )
+    seen = [(a.scenario, a.tag, a.account_id) for a in shown.accounts]
+    duplicates = sorted({k for k in seen if seen.count(k) > 1})
+    if duplicates:
+        problems.append(f"accounts shown more than once: {duplicates}")
+    missing = sorted(set(expected) - set(seen))
+    if missing:
+        problems.append(f"configured accounts not shown: {missing}")
+    unexpected = sorted(set(seen) - set(expected))
+    if unexpected:
+        problems.append(f"accounts shown that are not configured: {unexpected}")
+    inactive = sorted((a.scenario, a.tag, a.status) for a in shown.accounts if a.status != "ACTIVE")
+    if inactive:
+        problems.append(f"accounts not ACTIVE: {inactive}")
+    without_stack = sorted(
+        (a.scenario, a.tag, a.account_id)
+        for a in shown.accounts
+        if (a.scenario, a.tag, a.account_id) in expected
+        and not any(
+            s.name.startswith(f"{a.scenario}-") and s.status in HEALTHY_STACK_STATUSES
+            for s in a.stacks
+        )
+    )
+    if without_stack:
+        problems.append(
+            f"configured accounts without a healthy <scenario>-* stack "
+            f"({sorted(HEALTHY_STACK_STATUSES)}): {without_stack}"
+        )
+    return problems
+
+
+@dataclass(frozen=True)
+class ListedEnv:
+    """One row of the `env list` table (``render_env_list``); ``accounts`` None if "?"."""
+
+    name: str
+    ou_id: str
+    accounts: int | None
+
+
+def parse_env_list(output: str) -> tuple[ListedEnv, ...]:
+    """Parse the body rows (``│ name │ ou id │ accounts │``) of the `env list` table."""
+    rows: list[ListedEnv] = []
+    for line in plain(output).splitlines():
+        line = line.strip()
+        if not (line.startswith("│") and line.endswith("│")):
+            continue
+        cells = [c.strip() for c in line[1:-1].split("│")]
+        if len(cells) != 3:
+            continue
+        name, ou_id, count = cells
+        rows.append(ListedEnv(name, ou_id, int(count) if count.isdigit() else None))
+    return tuple(rows)
+
+
+def env_list_problems(
+    rows: Sequence[ListedEnv], *, env_name: str, accounts: Mapping[str, Mapping[str, str]]
+) -> list[str]:
+    """Return what is wrong with `env list` output in pre-existing mode.
+
+    Pre-existing mode lists exactly the configured environment: one row named
+    ``env_name``, OU id ``PREEXISTING_OU_ID``, counting every configured account.
+    """
+    if len(rows) != 1:
+        return [f"expected exactly one environment row, got {len(rows)}: {list(rows)}"]
+    row, problems = rows[0], []
+    if row.name != env_name:
+        problems.append(f"environment {row.name!r} listed, expected {env_name!r}")
+    if row.ou_id != PREEXISTING_OU_ID:
+        problems.append(f"OU id {row.ou_id!r}, expected {PREEXISTING_OU_ID!r}")
+    expected = len(_configured(accounts))
+    if row.accounts != expected:
+        problems.append(f"{row.accounts!r} accounts listed, expected {expected}")
+    return problems
