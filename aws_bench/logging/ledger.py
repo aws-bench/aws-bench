@@ -187,23 +187,30 @@ class LedgerEntry:
         """Beat 3: stamp outcome, write snapshot, close the run.log handler."""
         if not self._active:
             return
-        if exc is None:
-            self._record["exit_status"] = "ok"
-            self._record["error_type"] = None
-        elif isinstance(exc, KeyboardInterrupt):
-            self._record["exit_status"] = "interrupted"
-            self._record["error_type"] = type(exc).__name__
-        else:
-            self._record["exit_status"] = "error"
-            self._record["error_type"] = type(exc).__name__
-        self._record["finished_at"] = datetime.now(timezone.utc).isoformat()
-        self._write_snapshot()
-        self._flush()
-        if self._handler is not None:
-            logging.getLogger(NAMESPACE).removeHandler(self._handler)
-            self._handler.close()
-            self._handler = None
-        self._active = False
+        try:
+            if exc is None:
+                self._record["exit_status"] = "ok"
+                self._record["error_type"] = None
+            elif isinstance(exc, KeyboardInterrupt):
+                self._record["exit_status"] = "interrupted"
+                self._record["error_type"] = type(exc).__name__
+            else:
+                self._record["exit_status"] = "error"
+                self._record["error_type"] = type(exc).__name__
+            self._record["finished_at"] = datetime.now(timezone.utc).isoformat()
+            self._write_snapshot()
+        finally:
+            # Even if the snapshot raised (e.g. an interrupt mid-tar), persist
+            # the outcome stamped above, then detach and close run.log so the
+            # handler never leaks.
+            try:
+                self._flush()
+            finally:
+                handler, self._handler = self._handler, None
+                self._active = False
+                if handler is not None:
+                    logging.getLogger(NAMESPACE).removeHandler(handler)
+                    handler.close()
 
 
 def _noop_entry() -> LedgerEntry:
