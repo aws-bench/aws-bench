@@ -13,6 +13,9 @@ unit tests that exercise these helpers must run in ``make test``.
   (``resolve_run_tasks``, ``expected_trial_count``).
 - Parsing and checking `env show` / `env list` output (``parse_env_show``,
   ``env_show_problems``, ``parse_env_list``, ``env_list_problems``).
+- The independent post-cleanup check: read-only CloudFormation stack listing and
+  its verdict (``collect_account_stacks``, ``stack_problems``,
+  ``cleanup_output_problems``).
 """
 
 from __future__ import annotations
@@ -27,15 +30,17 @@ from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 
 import pytest
+from botocore.exceptions import ClientError
 
 from aws_bench.account_management.preexisting import load_account_config
 from aws_bench.cli.job_config import AwsBenchJobConfig
 from aws_bench.dataset.config import AwsBenchDatasetConfig
 from aws_bench.dataset.models import ScriptType
 from aws_bench.dataset.task_config import AwsBenchTaskConfig
+from aws_bench.resource_management.cleanup.models import is_infra_identifier
 from aws_bench.scenario.config import ScenarioManifest
 
 REDACTED = "***"
@@ -66,6 +71,9 @@ HOME_LINKS_VAR = "AWS_BENCH_INTEG_HOME_LINKS"
 EXPECTED_TRIALS_VAR = "AWS_BENCH_INTEG_EXPECTED_TRIALS"
 DEFAULT_DATASET = "aws-bench-quickstart"
 DEFAULT_SCENARIO = "ec2-multiregion"
+# `env init` validates the account and records the baseline; it has no
+# manifest budget of its own.
+INIT_TIMEOUT_SEC = 1200.0
 
 
 @dataclass(frozen=True)
@@ -576,6 +584,23 @@ def _attempt_cleanup(
     return None
 
 
+class Deployment:
+    """Handle yielded by ``deployed``; lets a test that performs the cleanup itself say so."""
+
+    def __init__(self) -> None:
+        self.cleaned = False
+
+    def mark_clean(self) -> None:
+        """Record that the body ran `env cleanup` and confirmed nothing was left.
+
+        Call it only after both the cleanup step and every check on its result
+        passed. ``deployed`` then skips its own cleanup attempt, but only if the
+        body then exits normally: a body that calls this and then raises still
+        gets the attempt. Without this call, the attempt always runs.
+        """
+        self.cleaned = True
+
+
 @contextmanager
 def deployed(
     run_cli: RunCli,
@@ -586,7 +611,7 @@ def deployed(
     init_timeout: float,
     setup_timeout: Callable[[], float],
     cleanup_timeout: Callable[[], float | None],
-) -> Iterator[None]:
+) -> Iterator[Deployment]:
     """Run `env init` and `env setup`, yield, then always attempt `env cleanup` once.
 
     The timeouts are callables because they are read from manifests that
@@ -598,6 +623,10 @@ def deployed(
       cleanup is still attempted and the original exception is re-raised. A
       cleanup failure is appended to its message (``pytest.fail`` failures) or
       attached as a note (other exceptions) instead of replacing it.
+    - The body called ``Deployment.mark_clean()`` (it ran `env cleanup` itself
+      and checked the result) and then exited normally: the attempt is skipped,
+      since there is nothing left to clean. A body that fails before that call,
+      or raises after it, still gets the attempt.
 
     Used by the ``deployed_env`` fixture around its ``yield``. pytest does not
     throw a test's own failure into a fixture, so for a failing test the
@@ -605,13 +634,18 @@ def deployed(
     teardown error.
     """
     primary: BaseException | None = None
+    deployment = Deployment()
     try:
         run_cli(*init_args, timeout=init_timeout)
         run_cli(*setup_args, timeout=setup_timeout())
-        yield
+        yield deployment
     except BaseException as e:  # re-raised below, after cleanup
         primary = e
-    problem = _attempt_cleanup(run_cli, cleanup_args, cleanup_timeout)
+    problem = (
+        None
+        if deployment.cleaned and primary is None
+        else _attempt_cleanup(run_cli, cleanup_args, cleanup_timeout)
+    )
     if primary is None:
         if problem is not None:
             pytest.fail(f"{_LEAK_NOTICE}:\n{problem}", pytrace=False)
@@ -1115,4 +1149,287 @@ def env_list_problems(
     expected = len(_configured(accounts))
     if row.accounts != expected:
         problems.append(f"{row.accounts!r} accounts listed, expected {expected}")
+    return problems
+
+
+# --------------------------------------------------------------------------- #
+# Post-cleanup check: what is left in the accounts
+# --------------------------------------------------------------------------- #
+
+# CloudFormation status of a stack that is gone. `list_stacks` keeps reporting
+# deleted stacks (for about 90 days) with this status.
+STACK_GONE_STATUS = "DELETE_COMPLETE"
+
+SESSION_FOR_ACCOUNT = Callable[[str], Any]
+"""Builds a boto3 session for one account ID (the CLI's own credential path)."""
+
+
+@dataclass(frozen=True)
+class StackRecord:
+    """One CloudFormation stack as listed by `list_stacks`."""
+
+    region: str
+    name: str
+    status: str
+
+
+@dataclass(frozen=True)
+class AccountStacks:
+    """The stacks found in one configured account, region by region.
+
+    ``regions`` are the regions that were queried; ``errors`` describe any
+    query that failed (error codes only, never the service's message).
+    """
+
+    scenario: str
+    tag: str
+    account_id: str
+    regions: tuple[str, ...]
+    stacks: tuple[StackRecord, ...] = ()
+    errors: tuple[str, ...] = ()
+
+
+def mask_account_id(account_id: str) -> str:
+    """Show only the last four digits of a 12-digit account ID (``********3333``)."""
+    if re.fullmatch(r"\d{12}", account_id):
+        return "*" * 8 + account_id[-4:]
+    return "****"
+
+
+def mask_account_ids(text: str) -> str:
+    """Mask every 12-digit run in ``text`` that looks like an account ID."""
+    return re.sub(r"(?<!\d)\d{12}(?!\d)", lambda m: mask_account_id(m.group()), text)
+
+
+def account_label(scenario: str, tag: str, account_id: str) -> str:
+    """Account description for failure messages: scenario/tag plus the masked ID."""
+    return f"{scenario}/{tag} ({mask_account_id(account_id)})"
+
+
+def _error_label(error: BaseException) -> str:
+    """Name an error without its message, which may carry ARNs or account IDs."""
+    if isinstance(error, ClientError):
+        code = error.response.get("Error", {}).get("Code")
+        return f"ClientError {code}" if isinstance(code, str) and code else "ClientError"
+    return type(error).__name__
+
+
+def scenario_regions(manifest_paths: Sequence[Path]) -> dict[str, list[str]]:
+    """Map each readable manifest's scenario name to the regions it declares.
+
+    These are the regions the cleanup contract covers and the region
+    restriction allows. Unreadable manifests are skipped, so their scenarios
+    are missing from the result (``stack_problems`` reports that).
+    """
+    regions: dict[str, list[str]] = {}
+    for path in manifest_paths:
+        try:
+            manifest = ScenarioManifest.model_validate_toml(path.read_bytes())
+        except (OSError, ValueError):
+            continue
+        regions[manifest.scenario.name] = list(manifest.scenario.regions)
+    return regions
+
+
+def collect_account_stacks(
+    *,
+    scenario: str,
+    tag: str,
+    account_id: str,
+    regions: Sequence[str],
+    session_for: SESSION_FOR_ACCOUNT,
+) -> AccountStacks:
+    """List every stack in ``regions`` of one account, using only read-only calls.
+
+    Calls ``cloudformation:ListStacks`` (no status filter, all pages) once per
+    region. A failure to get a session or to list a region is recorded in
+    ``errors`` instead of being skipped, so it cannot pass as "no stacks".
+    """
+    errors: list[str] = []
+    stacks: list[StackRecord] = []
+    try:
+        session = session_for(account_id)
+    except Exception as e:  # noqa: BLE001 - reported by type, never by message
+        return AccountStacks(
+            scenario, tag, account_id, tuple(regions), errors=(f"credentials: {_error_label(e)}",)
+        )
+    for region in regions:
+        try:
+            cfn = session.client("cloudformation", region_name=region)
+            for page in cfn.get_paginator("list_stacks").paginate():
+                for summary in page.get("StackSummaries", []):
+                    stacks.append(StackRecord(region, summary["StackName"], summary["StackStatus"]))
+        except Exception as e:  # noqa: BLE001 - reported by type, never by message
+            errors.append(f"{region}: {_error_label(e)}")
+    return AccountStacks(
+        scenario, tag, account_id, tuple(regions), stacks=tuple(stacks), errors=tuple(errors)
+    )
+
+
+def _check_coverage(
+    found: Sequence[AccountStacks],
+    *,
+    accounts: Mapping[str, Mapping[str, str]],
+    regions_by_scenario: Mapping[str, Sequence[str]],
+) -> tuple[list[str], dict[tuple[str, str, str], AccountStacks]]:
+    """Validate that ``found`` covers the configured accounts, once each, cleanly.
+
+    Shared by ``stack_problems`` and ``deployed_stack_problems`` so that both
+    report the same problems in the same words. Returns the problems and the
+    records that passed every check (configured, seen once, queried over exactly
+    the regions the scenario declares, no failed query), keyed by
+    ``(scenario, tag, account_id)``. A problem is reported for:
+
+    - an empty account config, a configured account that was not checked,
+      checked twice, or an unconfigured one;
+    - a scenario with no known regions (an unreadable manifest), or an account
+      queried over other regions than its scenario declares;
+    - any failed query (credentials or listing a region): an unreadable region
+      is not an empty one.
+    """
+    problems: list[str] = []
+    expected = _configured(accounts)
+    if not expected:
+        problems.append("the account config maps no accounts: nothing was checked")
+    seen = [(a.scenario, a.tag, a.account_id) for a in found]
+    duplicates = sorted({k for k in seen if seen.count(k) > 1})
+    if duplicates:
+        problems.append(
+            "accounts checked more than once: " + ", ".join(account_label(*k) for k in duplicates)
+        )
+    missing = sorted(set(expected) - set(seen))
+    if missing:
+        problems.append(
+            "configured accounts not checked: " + ", ".join(account_label(*k) for k in missing)
+        )
+    unexpected = sorted(set(seen) - set(expected))
+    if unexpected:
+        problems.append(
+            "accounts checked that are not configured: "
+            + ", ".join(account_label(*k) for k in unexpected)
+        )
+    clean: dict[tuple[str, str, str], AccountStacks] = {}
+    for a in found:
+        key = (a.scenario, a.tag, a.account_id)
+        label = account_label(*key)
+        account_problems: list[str] = []
+        declared = regions_by_scenario.get(a.scenario)
+        if not declared:
+            account_problems.append(
+                f"{label}: no declared regions for scenario {a.scenario!r} (manifest?)"
+            )
+        elif sorted(a.regions) != sorted(declared):
+            account_problems.append(
+                f"{label}: queried regions {sorted(a.regions)}, "
+                f"scenario declares {sorted(declared)}"
+            )
+        account_problems.extend(f"{label}: could not list stacks: {err}" for err in a.errors)
+        problems.extend(account_problems)
+        if not account_problems and seen.count(key) == 1 and key in expected:
+            clean[key] = a
+    return problems, clean
+
+
+def _masked(problems: Sequence[str]) -> list[str]:
+    """Mask account IDs in every problem string.
+
+    Stack and scenario names can carry an account ID. The strings are masked
+    where they are built, so every place that prints them (an assertion message
+    and pytest's own ``assert ... == []`` explanation) shows only masked IDs.
+    """
+    return [mask_account_ids(p) for p in problems]
+
+
+def stack_problems(
+    found: Sequence[AccountStacks],
+    *,
+    accounts: Mapping[str, Mapping[str, str]],
+    regions_by_scenario: Mapping[str, Sequence[str]],
+) -> list[str]:
+    """Return what `env cleanup` left behind, or could not be shown to have removed.
+
+    ``accounts`` is the account config's ``{scenario: {tag: account_id}}`` and
+    ``regions_by_scenario`` the regions each scenario manifest declares. The
+    coverage problems listed in ``_check_coverage`` are reported, and so is any
+    stack whose status is not ``DELETE_COMPLETE``. That includes
+    ``DELETE_IN_PROGRESS`` (not gone yet) and ``DELETE_FAILED``.
+
+    A CDK bootstrap stack (a name the product treats as CDK bootstrap
+    infrastructure, ``is_infra_identifier``) is not tolerated in any state other
+    than ``DELETE_COMPLETE``. On the path the test asserts (exit 0 and the
+    success summary) the CLI deletes the bootstrap stacks too, so one that
+    remains is reported, labelled as a bootstrap stack. A surviving environment
+    stack that the product did not defer makes the command exit non-zero (the
+    test then fails at the exit-code step) and skips the infrastructure
+    deletion. A deferred environment stack keeps its FAILED status internally
+    but is left out of the failed list, so the command exits 0 with the success
+    summary while ``CDKToolkit`` is deliberately retained. That is the case
+    where the asserted summary coexists with a retained bootstrap stack, and the
+    deferred environment stack reported next to it is the real cause of the
+    failure. A bug in the product's infrastructure-name list would also change
+    which stacks get the bootstrap label, but not whether they are reported.
+
+    Nested stacks (summaries with ``ParentId``) are listed and counted on
+    purpose. The product's ``StackDeleter.list_stacks`` never deletes them, so a
+    surviving nested stack needs manual deletion. Other resource types are not
+    checked. Account IDs inside stack or scenario names are masked in the result.
+    """
+    problems, _ = _check_coverage(found, accounts=accounts, regions_by_scenario=regions_by_scenario)
+    for a in found:
+        label = account_label(a.scenario, a.tag, a.account_id)
+        for stack in sorted(a.stacks, key=lambda s: (s.region, s.name)):
+            if stack.status == STACK_GONE_STATUS:
+                continue
+            kind = "CDK bootstrap stack" if is_infra_identifier(stack.name) else "stack"
+            problems.append(f"{label}: {stack.region}: {kind} {stack.name} is {stack.status}")
+    return _masked(problems)
+
+
+def deployed_stack_problems(
+    found: Sequence[AccountStacks],
+    *,
+    accounts: Mapping[str, Mapping[str, str]],
+    regions_by_scenario: Mapping[str, Sequence[str]],
+) -> list[str]:
+    """Return why ``found`` does not show a deployment in every configured account.
+
+    Run between `env setup` and `env cleanup`. The coverage problems listed in
+    ``_check_coverage`` are reported, and every configured account that passed
+    them must hold at least one stack named ``<scenario>-*`` in a
+    ``HEALTHY_STACK_STATUSES`` state. Without this, a cleanup that had nothing
+    to remove would pass the post-cleanup check. Other stacks (``CDKToolkit``,
+    unrelated ones) do not count. The stack only has to exist at that moment;
+    it does not show that `env setup` created it.
+    """
+    problems, clean = _check_coverage(
+        found, accounts=accounts, regions_by_scenario=regions_by_scenario
+    )
+    for (scenario, tag, account_id), entry in clean.items():
+        if not any(
+            s.name.startswith(f"{scenario}-") and s.status in HEALTHY_STACK_STATUSES
+            for s in entry.stacks
+        ):
+            problems.append(
+                f"{account_label(scenario, tag, account_id)}: no healthy stack named "
+                f"'{scenario}-*' before cleanup, so no deployment was found in this account "
+                "(or it was not listed)"
+            )
+    return _masked(problems)
+
+
+def cleanup_output_problems(output: str, *, accounts: int) -> list[str]:
+    """Check the `env cleanup` summary the CLI prints (``display_cleanup_results``).
+
+    On success it prints ``Cleanup complete: N account(s) cleaned successfully.``
+    with one account per configured account; any failed row makes it print
+    ``Cleanup completed with errors`` and exit non-zero instead. The caller has
+    already required exit code 0; this guards the printed summary.
+    """
+    text = plain(output)
+    problems: list[str] = []
+    if "Cleanup completed with errors" in text:
+        problems.append("the cleanup summary reports errors")
+    expected = f"Cleanup complete: {accounts} account(s) cleaned successfully."
+    if expected not in text:
+        problems.append(f"the cleanup summary lacks {expected!r}")
     return problems
