@@ -103,6 +103,85 @@ def test_set_resolved_patches_and_redacts(tmp_path, monkeypatch):
     assert data["resolved_config"]["n"] == 4
 
 
+def test_secret_env_assignments_never_reach_the_entry(tmp_path, monkeypatch):
+    """``--ve``/``--ae`` secret values are masked in ``command.json``'s argv and config.
+
+    Drives the real writer through beats 1-3 with canary secrets in argv and in
+    the resolved config, with no job dir registered (so no snapshot is written),
+    then byte-scans the files the entry writes. The keys must stay visible.
+    ``run.log`` is in the scan but proves nothing: no code path here logs the
+    canaries, and ``run.log`` is outside the redaction scope by design.
+    """
+    argv = [
+        "aws-bench",
+        "run",
+        "--ve",
+        "AWS_BEARER_TOKEN_BEDROCK=CANARY-LEDGER",
+        "--ae",
+        "SOME_API_KEY=CANARY-AE",
+        "--ve=OTHER_TOKEN=CANARY-INLINE",
+        "--ve",
+        "FOO=bar",
+    ]
+    entry = _open(tmp_path, monkeypatch, argv=argv)
+    entry.set_resolved(
+        job_id="f47ac10b",
+        job_dir=None,
+        is_resuming=False,
+        resolved_config={
+            "verifier": {"env": {"AWS_BEARER_TOKEN_BEDROCK": "CANARY-LEDGER"}},
+            "agents": [{"env": {"SOME_API_KEY": "CANARY-AE"}}],
+        },
+    )
+    entry.finalize(None)
+
+    files = [p for p in entry.entry_dir.rglob("*") if p.is_file()]
+    assert entry.command_json_path in files
+    for path in files:
+        blob = path.read_bytes()
+        for canary in (b"CANARY-LEDGER", b"CANARY-AE", b"CANARY-INLINE"):
+            assert canary not in blob, f"{canary!r} leaked into {path.name}"
+
+    data = json.loads(entry.command_json_path.read_text())
+    assert data["argv"] == [
+        "aws-bench",
+        "run",
+        "--ve",
+        "AWS_BEARER_TOKEN_BEDROCK=***",
+        "--ae",
+        "SOME_API_KEY=***",
+        "--ve=OTHER_TOKEN=***",
+        "--ve",
+        "FOO=bar",
+    ]
+
+
+@pytest.mark.parametrize("error", [KeyboardInterrupt, RuntimeError])
+def test_finalize_detaches_run_log_when_snapshot_raises(tmp_path, monkeypatch, error):
+    """An exception escaping the snapshot propagates, but run.log is still torn down."""
+
+    def boom(self):
+        raise error("injected")
+
+    entry = _open(tmp_path, monkeypatch)
+    handler = entry._handler
+    assert isinstance(handler, logging.FileHandler)
+    monkeypatch.setattr(LedgerEntry, "_write_snapshot", boom)
+
+    with pytest.raises(error):
+        entry.finalize(None)
+
+    assert handler not in logging.getLogger("aws_bench").handlers
+    assert handler.stream is None  # closed
+    assert entry._handler is None
+    assert not entry._active
+    entry.finalize(None)  # a second call is a no-op
+    # The outcome stamped before the snapshot is still persisted.
+    data = json.loads(entry.command_json_path.read_text())
+    assert data["exit_status"] == "ok"
+    assert data["finished_at"]
+
+
 def test_finalize_ok_status(tmp_path, monkeypatch):
     entry = _open(tmp_path, monkeypatch)
     entry.finalize(None)
