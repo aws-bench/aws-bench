@@ -1,0 +1,116 @@
+# Integration test backlog
+
+End-to-end acceptance tests, organised per command, covering happy paths only
+(behaviour and outputs as expected in normal usage). Run manually with
+`make integration`; see `docs/integration-tests.md`.
+
+## Prioritised commands
+
+Importance = how much a regression hurts users. Ease = cost/time/account risk of testing it.
+
+| # | Command / feature | Importance | Ease | Status |
+|---|---|---|---|---|
+| 1 | `env init` + `env setup` + `run -d aws-bench-quickstart -a oracle` + `env cleanup` | High | Medium | Implemented (`test_quickstart_oracle_earns_full_reward`); passed live at `5804afc` with all 9 tasks, and with one task on the final code of aws-bench/aws-bench#153 (`ae7b194`): reward 1.0, verification on, clean cleanup |
+| 2 | `env show`, `env list` (read-only, run against the env from #1) | Medium | High | Implemented (`test_env_show_happy_path` on the deployment from #1: per configured account a healthy `<scenario>-*` stack; failed or rolled-back stacks, regions and the OU row are not checked; `test_env_list_happy_path`); passed live, in the same run as #1 with one task of the quickstart dataset |
+| 3 | `env creds` (mints a Bedrock token; uses 1 of 2 IAM slots) | Medium | Medium | Placeholder |
+| 4 | `env cleanup` as a standalone assertion (no stacks remain) | High | Medium | Implemented; passed live in a run of the whole suite with one task (about 84 min): the deployment held a healthy `<scenario>-*` stack in every account before cleanup, and every stack was `DELETE_COMPLETE` afterwards, bootstrap stacks included (`test_env_cleanup_happy_path` in `test_env_cleanup.py`: own deployment, cleanup as the asserted step, then a read-only `cloudformation:ListStacks` check of every region the scenario declares; only CloudFormation stacks are checked) |
+| 5 | `env verify` / `env reset` (drift detection and baseline restore) | High | Medium | Not started |
+| 6 | `env snapshot` | Low | High | Not started |
+| 7 | `run` with a non-oracle agent (needs model credentials, non-deterministic) | High | Low | Not started |
+| 8 | Provisioning mode `env init` / `env terminate` (creates and closes real accounts; 90-day suspension) | High | Low | Placeholder |
+| 9 | `job` subcommands, `view`, `metrics` | Low | High | Not started |
+
+Suggested order: 1, 2 and 4 are done. Next 5, then 3, 7, 8.
+
+Also pending: PR automation (an approval-gated GitHub workflow). A run longer than one
+hour is validated with a self-refreshing credential source (a `credential_process`
+profile). The whole suite now takes about 84 min with one task, after the `env cleanup`
+test added its own deployment, so credentials that do not refresh expire mid-run.
+
+Follow-ups for 2: match the regions of `env show` stacks against the scenario
+manifests.
+
+Follow-ups for masking account IDs (the suite's own failure messages and the
+pytest report of the integration tests are masked; see
+`docs/integration-tests.md` for what is and is not covered):
+- Job `result.json` files and the CLI's logs under the scratch `HOME` hold raw
+  IDs. Decide which of these trees may leave the machine when CI uploads
+  artifacts (task T13), then sanitize or exclude them.
+- `scripts/check_job_rewards.py` prints raw paths and problems when it is run
+  on its own. Masking there needs its own copy of the masking code, because
+  `scripts/` must not import the test helpers.
+- Pytest output outside the report is not masked: the warnings summary,
+  collection errors, live `log_cli` logging and test node IDs (probed, not
+  pinned by tests).
+
+Follow-ups for 4:
+
+- Check resource types other than CloudFormation stacks (AMIs, EBS snapshots,
+  IAM roles, S3 buckets, Cloud Control resources); this needs a resource
+  scanner the test does not have.
+- Check the other enabled regions for stacks. This needs only
+  `ec2:DescribeRegions` (`aws_bench.utils.regions.get_enabled_regions`) plus
+  the same `cloudformation:ListStacks` calls the test already makes.
+- Run trials in the test. The cleanup sweeps and the orphan scan already run,
+  but only against setup-created resources; running trials would add
+  task-created residue for them to detect and delete.
+- The test deploys its own environment: one extra `env init`, `env setup` and
+  asserted `env cleanup`, plus two read-only stack listings. The whole suite took about
+  84 min with one task; the time of this test alone was not recorded. Sharing one deployment would need a way to run cleanup as a
+  test step before the shared one ends.
+- The test-layer cleanup deadline (build + script + 1800 s margin) can be
+  shorter than the product's composed cleanup budget. This comes from the
+  existing derivation and also affects the finalizer.
+- The asserted cleanup has no deadline if no manifest is readable (same
+  existing behaviour).
+- No re-poll of `ListStacks` right after cleanup. Add a bounded re-poll for
+  `*_IN_PROGRESS` stacks only if a live run shows lag.
+- Add a check before `env init` that the accounts hold no stacks.
+
+## Isolation approach
+
+- **Unique run IDs.** Each session generates an 8-char ID (`run_id` fixture), used in
+  job names. It cannot go in the env name: pre-existing mode requires `--env-name` to
+  equal the account config's `name`. `HOME` is redirected for the CLI subprocess (with
+  `~/.aws` and `~/.docker` symlinked in), so local state in `~/.aws-bench` never
+  collides with a developer's real environments.
+- **Pre-existing mode caveat.** The account allowlist maps to fixed AWS accounts, so
+  unique env names do not isolate AWS resources: two runs on the same account still
+  share stacks. Resource-level isolation therefore needs one of:
+  1. one dedicated account (or account set) per concurrent runner, or
+  2. serialisation. Locally, only one person should use a given account at a
+     time (a shared lock, e.g. an S3 or DynamoDB lock item, is a possible later
+     addition). A future CI workflow should queue runs, e.g. with a GitHub
+     concurrency group and `cancel-in-progress: false`, because cancelling a run
+     would skip cleanup.
+- **Always clean up.** The `deployed_env` fixture runs `env cleanup` in a finalizer.
+- **No cross-account credentials in the repo.** The account config path and AWS
+  credentials come from the caller's environment.
+
+## Known issues
+
+None open.
+
+### Resolved: AMI snapshot race in `ec2-multiregion`
+
+- **Symptom.** `run` failed pre-run verification in us-east-1 at random:
+  `New resources detected - AWS::EC2::Snapshot`
+  (`Created by CreateImage(i-...) for ami-...`).
+- **Cause.** The scenario's `CreateAmi` custom resource calls `ec2:CreateImage`,
+  which returns before EC2 creates the AMI's EBS snapshot. The snapshot could
+  appear after the post-setup baseline was captured.
+- **Fix.** aws-bench/aws-bench-datasets#93 (`1adde7b`): `deploy.sh` waits for
+  the AMI to be `available`, and `cleanup.sh` deletes its snapshot.
+  aws-bench/aws-bench#152 (`ec7ec56`) re-pinned the registry.
+- **Validated.** All 9 quickstart tasks earned full reward with verification on,
+  and cleanup finished successfully.
+  The temporary `--no-verify-env` default was then removed, so the test always
+  verifies the environment.
+
+## Open questions
+
+- How many test accounts are available, and can each PR/runner get its own?
+- Should `env terminate` / provisioning mode be tested at all, given the 90-day
+  account suspension? Probably only in a disposable organisation.
+- Expected wall-clock time and cost per run, and an acceptable budget per PR.
+- Should a nightly run on `main` replace per-PR runs once stable?

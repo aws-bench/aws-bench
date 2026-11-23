@@ -72,10 +72,14 @@ docs/                     # User and contributor documentation
 2. Make your code changes and add corresponding unit tests
 3. Run the local gate to verify correctness
 4. Open a PR describing the issue and how the change fixes/improves the code. If tested live against a dataset, append data and findings.
-5. A maintainer reviews, pulls locally, and runs integration tests against live datasets to verify no regressions. We are actively working on adding automatic integration tests as a GitHub workflow.
+5. A maintainer reviews, pulls locally, and runs integration tests against live datasets to verify no regressions (see [Integration Tests](integration-tests.md)). We are actively working on running them automatically as a GitHub workflow.
 6. Approve and merge
 
 > **Why is it not required for contributors to run integration tests?** Integration tests deploy real AWS resources and run benchmark scenarios, which incurs AWS costs. We run these on our end to avoid passing that cost to contributors.
+
+## Integration tests
+
+`make integration` runs opt-in, end-to-end acceptance tests (`tests/integration/`) against real AWS resources in a dedicated test account. They are excluded from `make test`, `make check` and CI. See [Integration Tests](integration-tests.md) for account setup, environment variables, running, and troubleshooting, and `tests/integration/BACKLOG.md` for coverage plans.
 
 ## Running the Local Gate
 

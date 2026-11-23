@@ -122,6 +122,11 @@ testpaths = ["tests"]
 # Fail with the stuck test's stack instead of hanging (e.g. a unit test that
 # accidentally hits a real retry/poll sleep).
 timeout = 30
+# Real-AWS acceptance tests are opt-in: run with `make integration`.
+addopts = ["-m", "not integration"]
+markers = [
+    "integration: end-to-end test that uses real AWS (opt-in via `make integration`)",
+]
 filterwarnings = [
     "ignore::pytest.PytestCollectionWarning",
 ]

@@ -3,10 +3,10 @@
 from aws_bench.resource_management.fastscan.listers import all_listers, cfn_type_pins
 from aws_bench.resource_management.fastscan.listers.custom_listers import (
     custom_listers,
-    list_gamelift_custom_locations,
 )
 from aws_bench.resource_management.fastscan.listers.lister_registry import (
     DISABLED_LISTERS,
+    DISABLED_SERVICES,
     SUPERSEDED_BY_CUSTOM_LISTER,
 )
 from aws_bench.resource_management.fastscan.listers.simple_listers import SIMPLE_LISTERS
@@ -71,7 +71,9 @@ def test_region_skip_map_contract():
     from aws_bench.resource_management.fastscan.listers.region_skip import LISTER_REGION_SKIP
 
     live = {(lister.service, lister.op) for lister in all_listers()}
-    stale = sorted(k for k in LISTER_REGION_SKIP if k not in live)
+    # Keys for a service in DISABLED_SERVICES are not stale: the generated map keeps them so the
+    # entries still apply if the service is ever re-enabled.
+    stale = sorted(k for k in LISTER_REGION_SKIP if k not in live and k[0] not in DISABLED_SERVICES)
     assert not stale, f"region_skip references listers not in all_listers(): {stale}"
 
     empty = sorted(k for k, regions in LISTER_REGION_SKIP.items() if not regions)
@@ -120,20 +122,18 @@ def test_all_listers_has_no_duplicate_scan_keys():
     assert not dupes, f"duplicate scan keys would crash scan(): {dupes}"
 
 
-def test_gamelift_list_locations_simple_lister_is_superseded():
-    """The no-arg simple gamelift:list_locations row must yield to the CUSTOM-filtered lister.
+def test_gamelift_service_is_fully_skipped():
+    """GameLift (and GameLift Streams) is in DISABLED_SERVICES: no lister of it may run.
 
-    The simple row returns every AWS-managed Region / Local Zone location, which is undeletable
-    and absent from any snapshot, so it would surface as a new resource on every verify.
+    The supersedence bookkeeping for gamelift:list_locations stays in the tables so re-enabling
+    the service restores the correct single (custom) writer.
     """
+    assert "gamelift" in DISABLED_SERVICES
+    assert "gameliftstreams" in DISABLED_SERVICES
     assert ("gamelift", "list_locations") in SUPERSEDED_BY_CUSTOM_LISTER
     assert ("gamelift", "list_locations") in {(x.service, x.op) for x in SIMPLE_LISTERS}
-    # The custom lister reuses the row's op key (so the generated region-skip entry still
-    # applies), so exactly one lister runs under it: the custom one.
-    running = [x for x in all_listers() if (x.service, x.op) == ("gamelift", "list_locations")]
-    assert len(running) == 1
-    assert running[0].run is list_gamelift_custom_locations
-    assert running[0].cfn_type == "AWS::GameLift::Location"
+    running = [x for x in all_listers() if x.service in DISABLED_SERVICES]
+    assert running == []
 
 
 def test_superseded_table_op_never_runs_as_a_table_lister():

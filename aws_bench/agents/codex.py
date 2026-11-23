@@ -15,11 +15,14 @@ Bedrock mode is auto-detected from a non-empty ``AWS_BEARER_TOKEN_BEDROCK`` in
 the environment. When that token is absent this behaves exactly like harbor's
 Codex (OpenAI auth).
 
-Region: pass it with ``-ae AWS_REGION=us-east-2`` (API-key auth requires a
-Region). The host ``AWS_REGION`` is the fallback. It is pinned
-in ``config.toml`` as ``model_providers.amazon-bedrock.aws.region``, because an
-aws-bench trial sets the agent's ``AWS_REGION`` to the task's Region, and the
-model may not be served there (``bedrock-mantle`` returns 404).
+Region: pass it with ``--ak bedrock_region=us-east-1`` (API-key auth requires a
+Region). Without it, ``-ae AWS_REGION``, then the host ``AWS_REGION``, then
+``us-east-2``. It is pinned in ``config.toml`` as
+``model_providers.amazon-bedrock.aws.region``, because an aws-bench trial sets
+the agent's ``AWS_REGION`` to the task's Region, and the model may not be served
+there (``bedrock-mantle`` returns 404). Use ``bedrock_region`` when ``-ae
+AWS_REGION`` already carries the task's Region, as a harness that runs the agent's
+AWS calls in that Region does: the agent's AWS calls keep it, the model calls do not.
 
 Like Claude Code, marketplaces and plugins can be supplied via agent kwargs::
 
@@ -150,10 +153,11 @@ class Codex(_HarborCodex):
         mcp_endpoint_from: str | None = None,
         mcp_endpoint_to: str | None = None,
         mcp_endpoint_args: list[str] | None = None,
+        bedrock_region: str | None = None,
         *args: Any,
         **kwargs: Any,
     ) -> None:
-        """Store marketplace sources, plugin selectors and the MCP endpoint override.
+        """Store the plugin settings, the MCP endpoint override and the Bedrock Region.
 
         Args:
             logs_dir: Trial logs directory, forwarded to the base agent.
@@ -162,6 +166,7 @@ class Codex(_HarborCodex):
             mcp_endpoint_from: MCP endpoint URL to replace in the installed plugins' MCP configs.
             mcp_endpoint_to: Replacement endpoint URL.
             mcp_endpoint_args: Extra arguments inserted after the replacement URL.
+            bedrock_region: Region for the Bedrock model calls, over ``AWS_REGION``.
             *args: Forwarded to the base agent.
             **kwargs: Forwarded to the base agent.
         """
@@ -181,7 +186,10 @@ class Codex(_HarborCodex):
         # Read now because an aws-bench trial later overrides AWS_REGION to the task's Region
         # for the agent's AWS calls, which may not serve the model.
         self._bedrock_region = (
-            self._extra_env.get("AWS_REGION") or os.environ.get("AWS_REGION") or _DEFAULT_AWS_REGION
+            bedrock_region
+            or self._extra_env.get("AWS_REGION")
+            or os.environ.get("AWS_REGION")
+            or _DEFAULT_AWS_REGION
         )
 
     async def install(self, environment: BaseEnvironment) -> None:
