@@ -28,8 +28,20 @@ profile). The whole suite now takes about 84 min with one task, after the `env c
 test added its own deployment, so credentials that do not refresh expire mid-run.
 
 Follow-ups for 2: match the regions of `env show` stacks against the scenario
-manifests, and handle account IDs in failure output (masking or not) before
-runs move to CI.
+manifests.
+
+Follow-ups for masking account IDs (the suite's own failure messages and the
+pytest report of the integration tests are masked; see
+`docs/integration-tests.md` for what is and is not covered):
+- Job `result.json` files and the CLI's logs under the scratch `HOME` hold raw
+  IDs. Decide which of these trees may leave the machine when CI uploads
+  artifacts (task T13), then sanitize or exclude them.
+- `scripts/check_job_rewards.py` prints raw paths and problems when it is run
+  on its own. Masking there needs its own copy of the masking code, because
+  `scripts/` must not import the test helpers.
+- Pytest output outside the report is not masked: the warnings summary,
+  collection errors, live `log_cli` logging and test node IDs (probed, not
+  pinned by tests).
 
 Follow-ups for 4:
 
