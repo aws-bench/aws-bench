@@ -14,13 +14,22 @@ Importance = how much a regression hurts users. Ease = cost/time/account risk of
 | 2 | `env show`, `env list` (read-only, run against the env from #1) | Medium | High | Implemented (`test_env_show_happy_path` on the deployment from #1: per configured account a healthy `<scenario>-*` stack; failed or rolled-back stacks, regions and the OU row are not checked; `test_env_list_happy_path`); passed live, in the same run as #1 with one task of the quickstart dataset |
 | 3 | `env creds` (mints a Bedrock token; uses 1 of 2 IAM slots) | Medium | Medium | Placeholder |
 | 4 | `env cleanup` as a standalone assertion (no stacks remain) | High | Medium | Implemented; passed live in a run of the whole suite with one task (about 84 min): the deployment held a healthy `<scenario>-*` stack in every account before cleanup, and every stack was `DELETE_COMPLETE` afterwards, bootstrap stacks included (`test_env_cleanup_happy_path` in `test_env_cleanup.py`: own deployment, cleanup as the asserted step, then a read-only `cloudformation:ListStacks` check of every region the scenario declares; only CloudFormation stacks are checked) |
-| 5 | `env verify` / `env reset` (drift detection and baseline restore) | High | Medium | Not started |
+| 5 | `env verify` / `env reset` (drift detection and baseline restore; also a check that every `<scenario>-*` stack is `*_COMPLETE` after setup) | High | Medium | Not started |
 | 6 | `env snapshot` | Low | High | Not started |
 | 7 | `run` with a non-oracle agent (needs model credentials, non-deterministic) | High | Low | Not started |
 | 8 | Provisioning mode `env init` / `env terminate` (creates and closes real accounts; 90-day suspension) | High | Low | Placeholder |
 | 9 | `job` subcommands, `view`, `metrics` | Low | High | Not started |
 
 Suggested order: 1, 2 and 4 are done. Next 5, then 3, 7, 8.
+
+`env init` and `env setup` have no standalone tests. The quickstart and `env show` tests
+(rows 1 and 2) share one deployment that runs them once, and the `env cleanup` test (row 4)
+runs them again in its own. The helper that deploys fails the run unless both exit 0, and
+the `env show` and cleanup tests check that every configured account holds a healthy
+`<scenario>-*` stack. Checking the summary tables the commands print would add a named test
+line and finer failure attribution, not new coverage; add it only if the exit code proves
+too coarse. A stronger check of the setup result, that every `<scenario>-*` stack is in a
+`*_COMPLETE` state, goes with the failed-stack detection of row 5.
 
 Also pending: PR automation (an approval-gated GitHub workflow). A run longer than one
 hour is validated with a self-refreshing credential source (a `credential_process`

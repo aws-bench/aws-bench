@@ -30,6 +30,17 @@ model, so every trial is expected to score `1.0`.
 | 4 | Asserts the job planned the expected number of trials, and every trial completed, without errors, with reward `1.0` | |
 | 5 | `env cleanup` is attempted once, also when init, setup or the test failed (the standalone test in `test_env_cleanup.py` runs its own deployment and cleanup, see below) | scenario `environment.build_timeout_sec` + `cleanup.timeout_sec` + 30 min (130 min for `ec2-multiregion`); no deadline if no `scenario.toml` can be read |
 
+`env init` and `env setup` (steps 1 and 2) have no test of their own. The
+`deployed_env` fixture runs them once for the module, and the quickstart and
+`env show` tests share that deployment; the `env cleanup` test runs them again
+in its own deployment. The `deployed()` helper fails the run unless both exit 0,
+which pytest reports as a setup error of the tests that depend on it. A zero exit
+code alone does not show that anything was deployed, because a scenario source
+that resolves nothing also exits 0. The account-state checks carry that: the
+`env show` test requires a healthy `<scenario>-*` stack in every configured
+account, and the `env cleanup` test requires the same before it cleans up. The
+summary tables the two commands print are not parsed.
+
 The derived timeouts are built from the budgets the scenario and tasks
 declare:
 
@@ -589,8 +600,8 @@ An explicit `pytest -m <expr>` overrides the default deselection of the
 `integration` marker. Nothing is deployed unless `AWS_BENCH_INTEG=1` and the
 account config are set, but the result is not all skips: the Bedrock token is
 checked first. For example, `pytest -m integration tests/integration` without
-the opt-in variables reports `7 skipped, 1 error` (the error is
-`AWS_BEARER_TOKEN_BEDROCK is not set`) if no token is set, and `8 skipped` if
+the opt-in variables reports `5 skipped, 1 error` (the error is
+`AWS_BEARER_TOKEN_BEDROCK is not set`) if no token is set, and `6 skipped` if
 one is.
 
 ### Environment variables
@@ -694,7 +705,8 @@ reward `1.0`, verification on, and a clean `env cleanup`. The `env show` and
 `env list` tests were run live when they were added, together with the quickstart
 test and one task: all three tests passed, and `env cleanup` finished
 successfully. The whole suite then passed in one run with one task: `4 passed, 4 skipped`
-in about 84 min. That includes `test_env_cleanup_happy_path`: before cleanup,
+in about 84 min (before the `env init` and `env setup` placeholders were removed;
+the suite now collects six tests). That includes `test_env_cleanup_happy_path`: before cleanup,
 every configured account held a healthy `<scenario>-*` stack, and afterwards
 every stack in the scenario's regions was `DELETE_COMPLETE`, the CDK bootstrap
 stacks included. The run does not record how long each command took, so the

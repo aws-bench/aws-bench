@@ -3,8 +3,12 @@
 Opt-in only (``make integration``). Implemented: the quickstart + oracle flow
 (``env setup`` -> ``run`` -> full reward -> ``env cleanup``), ``env show``
 against the same deployment, and ``env list``. ``env cleanup`` as the step
-under test is in ``test_env_cleanup.py``, which deploys on its own. The remaining
-commands are named placeholders; see ``BACKLOG.md`` for priorities.
+under test is in ``test_env_cleanup.py``, which deploys on its own. ``env init`` and
+``env setup`` have no test of their own: ``deployed_env`` runs them once for this
+module (the quickstart and ``env show`` tests share that deployment), the ``env cleanup``
+test runs them again in its own deployment, and ``deployed()`` fails the run unless both
+exit 0 (pytest reports that as a setup error). The remaining commands are named
+placeholders; see ``BACKLOG.md`` for priorities.
 """
 
 from __future__ import annotations
@@ -210,16 +214,6 @@ def test_env_list_happy_path(integ_settings: IntegSettings, run_cli):
 
 
 # --- Placeholders (see BACKLOG.md) -------------------------------------------------
-
-
-@pytest.mark.skip(reason="backlog: not implemented")
-def test_env_init_happy_path():
-    """`env init --env-name N -d D` exits 0 and records accounts for N (visible in `env show`)."""
-
-
-@pytest.mark.skip(reason="backlog: not implemented")
-def test_env_setup_happy_path():
-    """`env setup` exits 0 and every scenario stack reaches a *_COMPLETE state."""
 
 
 @pytest.mark.skip(reason="backlog: not implemented")
