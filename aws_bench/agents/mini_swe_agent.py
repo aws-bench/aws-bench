@@ -5,7 +5,7 @@ which is required by LiteLLM for Bedrock model calls.
 
 Usage:
     aws-bench run --agent-import-path "aws_bench.agents.mini_swe_bedrock:MiniSweBedrock" \
-        -m "bedrock/us.anthropic.claude-sonnet-4-6" ...
+        -m "bedrock/us.anthropic.claude-sonnet-5-5" ...
 """
 
 from __future__ import annotations

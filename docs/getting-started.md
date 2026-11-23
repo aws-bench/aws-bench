@@ -365,7 +365,7 @@ Amazon Bedrock hosts models from multiple providers. aws-bench supports evaluati
 |--------------|----------|--------------------------|
 | `claude-code` | Anthropic | `global.anthropic.claude-sonnet-5`, `global.anthropic.claude-sonnet-4-6` |
 | `codex` | OpenAI | `openai.gpt-5.6-sol`, `openai.gpt-5.6-terra`, `openai.gpt-5.6-luna` |
-| `aws-bench-baseline-agent` | Anthropic | `us.anthropic.claude-sonnet-4-6` |
+| `aws-bench-baseline-agent` | Anthropic | `us.anthropic.claude-sonnet-5-5` |
 
 ```bash
 # Generate the bearer token (one-time, valid ~30 days)
@@ -429,7 +429,7 @@ uv run aws-bench run \
   -a claude-code \
   -m global.anthropic.claude-sonnet-5 \
   --ve "AWS_BEARER_TOKEN_BEDROCK=$AWS_BEARER_TOKEN_BEDROCK" \
-  --ve "REWARDKIT_JUDGE=bedrock/us.anthropic.claude-sonnet-4-6" \
+  --ve "REWARDKIT_JUDGE=bedrock/us.anthropic.claude-sonnet-5-5" \
   --yes
 ```
 
