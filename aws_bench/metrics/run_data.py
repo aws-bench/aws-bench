@@ -15,11 +15,12 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Iterable, Optional, TypeVar
+from typing import Any, Iterable, Iterator, Optional, TypeVar
 
 from harbor.models.job.config import JobConfig
 from harbor.models.job.lock import JobLock
@@ -143,6 +144,26 @@ def find_run_dirs(logs_dir: Path) -> list[Path]:
         for child in sorted(logs_dir.iterdir())
         if child.is_dir() and (child / "result.json").exists()
     ]
+
+
+# Trial subdirectories left out of artifact uploads: Claude Code's plugin cache and marketplaces.
+ARTIFACT_EXCLUDE_DIRS: tuple[tuple[str, ...], ...] = (
+    ("agent", "sessions", "plugins", "cache"),
+    ("agent", "sessions", "plugins", "marketplaces"),
+)
+
+
+def iter_artifact_files(run_dir: Path) -> Iterator[tuple[Path, Optional[str]]]:
+    """Yield each file of a run directory with its artifact directory (None at the root).
+
+    Skips ``ARTIFACT_EXCLUDE_DIRS`` inside every trial directory.
+    """
+    for root, dirs, files in os.walk(run_dir):
+        rel = Path(root).relative_to(run_dir)
+        dirs[:] = sorted(d for d in dirs if (rel / d).parts[1:] not in ARTIFACT_EXCLUDE_DIRS)
+        artifact_dir = rel.as_posix() if rel.parts else None
+        for name in sorted(files):
+            yield Path(root) / name, artifact_dir
 
 
 def uncached_input(n_input: Optional[int], n_cache: Optional[int]) -> Optional[int]:

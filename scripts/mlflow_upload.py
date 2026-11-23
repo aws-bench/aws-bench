@@ -35,6 +35,7 @@ from aws_bench.metrics.run_data import (
     RunData,
     TrialData,
     find_run_dirs,
+    iter_artifact_files,
     load_json,
     load_model,
     parse_datetime_ns,
@@ -176,9 +177,12 @@ def upload_single_run(
     # --- Aggregate metrics ---
     mlflow.log_metrics(aggregate_basic(run))
 
-    # --- Artifacts: upload the entire run directory ---
-    logger.info(f"Uploading all artifacts from {run.run_dir}")
-    mlflow.log_artifacts(str(run.run_dir))
+    # --- Artifacts: upload the run directory ---
+    files = list(iter_artifact_files(run.run_dir))
+    logger.info(f"Uploading {len(files)} artifact file(s) from {run.run_dir}")
+    artifact_client = mlflow.MlflowClient()
+    for path, artifact_dir in files:
+        artifact_client.log_artifact(mlflow_run.info.run_id, str(path), artifact_dir)
 
     mlflow.end_run(status="FAILED" if run_failed else "FINISHED")
 
