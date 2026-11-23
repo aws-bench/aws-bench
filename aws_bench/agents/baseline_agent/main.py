@@ -29,7 +29,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-DEFAULT_MODEL = "us.anthropic.claude-sonnet-4-6"
+DEFAULT_MODEL = "us.anthropic.claude-sonnet-5-5"
 MCP_CONFIG_PATH = Path("/installed-agent/mcp.json")
 SYSTEM_PROMPT_PATH = Path("/installed-agent/system_prompt.txt")
 PROMPT_PATH = Path("/installed-agent/prompt.txt")
