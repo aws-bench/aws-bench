@@ -25,7 +25,7 @@ from pathlib import Path
 import pytest
 
 from aws_bench.account_management.constants import ORG_ACCESS_ROLE
-from aws_bench.account_management.preexisting import ACCOUNT_CONFIG_ENV_VAR, load_account_config
+from aws_bench.account_management.preexisting import ACCOUNT_CONFIG_ENV_VAR
 from aws_bench.utils.credentials_provider import CredentialProvider, build_session_name
 
 from .helpers import (
@@ -37,6 +37,7 @@ from .helpers import (
     deployed,
     deployed_stack_problems,
     find_scenario_manifests,
+    load_accounts,
     mask_account_ids,
     scenario_regions,
     stack_problems,
@@ -62,8 +63,7 @@ def test_env_cleanup_happy_path(
     ``deployed`` still guarantees a cleanup attempt on every exit path: it is
     skipped only after every check above passed (``mark_clean``).
     """
-    env, src = integ_settings.env_name, integ_settings.env_source_args()
-    cleanup_args = ["env", "cleanup", "--env-name", env, *src, "--yes", "--quiet"]
+    cleanup_args = integ_settings.env_command("cleanup", "--yes", "--quiet")
 
     def manifests() -> list[Path]:
         return find_scenario_manifests(
@@ -74,19 +74,19 @@ def test_env_cleanup_happy_path(
 
     def timeouts():
         found = step_timeouts_for(manifests())
-        print(f"step timeouts: {found.describe()}")
+        print(f"step timeouts: {found.describe()}")  # describe() masks account IDs
         return found
 
     with deployed(
         run_cli,
-        init_args=["env", "init", "--env-name", env, *src, "--quiet"],
-        setup_args=["env", "setup", "--env-name", env, *src, "--quiet"],
+        init_args=integ_settings.env_command("init", "--quiet"),
+        setup_args=integ_settings.env_command("setup", "--quiet"),
         cleanup_args=cleanup_args,
         init_timeout=INIT_TIMEOUT_SEC,
         setup_timeout=lambda: timeouts().setup,
         cleanup_timeout=lambda: step_timeouts_for(manifests()).cleanup,
     ) as deployment:
-        accounts = load_account_config(integ_settings.account_config).accounts
+        accounts = load_accounts(integ_settings.account_config)
         regions = scenario_regions(manifests())
 
         # Read-only checks use the CLI's own credential path.
@@ -119,8 +119,10 @@ def test_env_cleanup_happy_path(
         # The step under test.
         result = run_cli(*cleanup_args, timeout=step_timeouts_for(manifests()).cleanup)
         n_accounts = sum(len(tags) for tags in accounts.values())
-        tail = mask_account_ids(result.stdout[-4000:])
-        assert cleanup_output_problems(result.stdout, accounts=n_accounts) == [], tail
+        # Not `assert f(raw) == []`: pytest would print the raw output as call arguments.
+        stdout = mask_account_ids(result.stdout)
+        summary_problems = cleanup_output_problems(stdout, accounts=n_accounts)
+        assert summary_problems == [], stdout[-4000:]
 
         problems = stack_problems(list_all(), accounts=accounts, regions_by_scenario=regions)
         assert problems == [], "env cleanup left stacks behind:\n" + "\n".join(problems)

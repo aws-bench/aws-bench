@@ -6,13 +6,16 @@ Secret-handling tests check the full report of an inner pytest session (run as
 a subprocess), because that is what a developer or CI log actually shows.
 """
 
+import importlib.util
 import io
+import json
 import os
 import signal
 import subprocess
 import sys
 import textwrap
 import time
+from dataclasses import replace
 from pathlib import Path
 
 import boto3
@@ -554,8 +557,10 @@ def test_rendered_report_never_contains_canary(inner_test_file, flags):
     # split the summary line or a secret and make the string checks unreliable.
     color_vars = {"FORCE_COLOR", "PY_COLORS", "CLICOLOR_FORCE"}
     env = {
-        k: v for k, v in os.environ.items() if not k.startswith("COV_CORE") and k not in color_vars
-    }
+        k: v
+        for k, v in os.environ.items()
+        if not k.startswith(("COV_CORE", "PYTEST_")) and k not in color_vars
+    }  # PYTEST_* (PYTEST_ADDOPTS, ...) would change the inner session
     env["PYTHONPATH"] = str(REPO_ROOT)
     proc = subprocess.run(  # noqa: S603 - fixed argv
         [
@@ -1432,9 +1437,9 @@ def test_env_show_problems_missing_unexpected_and_duplicate_accounts():
     shown = parse_env_show(_render_show(panels=panels))
     problems = env_show_problems(shown, env_name="integ-env", accounts=CONFIGURED)
     assert problems == [
-        "accounts shown more than once: [('ec2-multiregion', 'PRIMARY', '111122223333')]",
-        "configured accounts not shown: [('other', 'A', '444455556666')]",
-        "accounts shown that are not configured: [('stray', 'B', '111122223333')]",
+        "accounts shown more than once: [('ec2-multiregion', 'PRIMARY', '********3333')]",
+        "configured accounts not shown: [('other', 'A', '********6666')]",
+        "accounts shown that are not configured: [('stray', 'B', '********3333')]",
     ]
 
 
@@ -1464,8 +1469,8 @@ NO_SCENARIO_STACK = (
     "configured accounts without a healthy <scenario>-* stack "
     "(['CREATE_COMPLETE', 'IMPORT_COMPLETE', 'UPDATE_COMPLETE']): "
 )
-PRIMARY_KEY = "('ec2-multiregion', 'PRIMARY', '111122223333')"
-OTHER_KEY = "('other', 'A', '444455556666')"
+PRIMARY_KEY = "('ec2-multiregion', 'PRIMARY', '********3333')"
+OTHER_KEY = "('other', 'A', '********6666')"
 
 
 def _stack(name: str, status: str = "CREATE_COMPLETE", region: str = "us-west-1"):
@@ -1632,15 +1637,22 @@ def test_env_list_problems_wrong_fields():
 # --------------------------------------------------------------------------- #
 
 
-def _nested_pytest(args: list[str], env_extra: dict[str, str]) -> str:
+def _nested_pytest(args: list[str], env_extra: dict[str, str], *, timeout: float = 60) -> str:
     """Run pytest on the integration tests in a subprocess and return its output.
 
-    Colour-forcing variables and coverage hooks are dropped so the output can
-    be searched as plain text. ``-o addopts=`` lifts the default deselection of
-    the ``integration`` marker.
+    Colour-forcing variables, coverage hooks and every inherited
+    ``AWS_BENCH_INTEG*`` and ``PYTEST_*`` variable (``PYTEST_ADDOPTS``,
+    ``PYTEST_TIMEOUT``, ``PYTEST_PLUGINS``, ...) are dropped, so the session
+    depends only on what the arguments and ``env_extra`` set and the output
+    can be searched as plain text.
+    ``-o addopts=`` lifts the default deselection of the ``integration`` marker.
     """
-    drop = {"FORCE_COLOR", "TTY_COMPATIBLE", "PY_COLORS", "CLICOLOR_FORCE", "AWS_BENCH_INTEG"}
-    env = {k: v for k, v in os.environ.items() if not k.startswith("COV_CORE") and k not in drop}
+    drop = {"FORCE_COLOR", "TTY_COMPATIBLE", "PY_COLORS", "CLICOLOR_FORCE"}
+    env = {
+        k: v
+        for k, v in os.environ.items()
+        if not k.startswith(("COV_CORE", "AWS_BENCH_INTEG", "PYTEST_")) and k not in drop
+    }
     env["PYTHONPATH"] = str(REPO_ROOT)
     env.update(env_extra)
     proc = subprocess.run(  # noqa: S603 - fixed argv
@@ -1650,7 +1662,7 @@ def _nested_pytest(args: list[str], env_extra: dict[str, str]) -> str:
         capture_output=True,
         text=True,
         errors="replace",
-        timeout=60,
+        timeout=timeout,
     )
     return proc.stdout + proc.stderr
 
@@ -2149,3 +2161,955 @@ def test_cleanup_output_problems_flags_errors_even_beside_a_success_line():
         "Cleanup completed with errors: 1 succeeded, 1 failed.\n"
     )
     assert cleanup_output_problems(out, accounts=2) == ["the cleanup summary reports errors"]
+
+
+# --------------------------------------------------------------------------- #
+# Account IDs never reach a failure message, a report or a log
+# --------------------------------------------------------------------------- #
+# A canary that is not a placeholder, put where text from AWS, the CLI or the
+# config can carry an ID: names, paths, ARNs, CLI output, an account config.
+CANARY = "987654321098"
+MASKED = "********1098"
+
+
+# Every run of six digits taken from the canary: a cut-off ID leaves one of these.
+CANARY_FRAGMENTS = tuple(sorted({CANARY[i : i + 6] for i in range(len(CANARY) - 5)}))
+
+
+def _leaks(text: str) -> list[str]:
+    """Lines of ``text`` that show the canary or any run of six of its digits."""
+    return [
+        line[:200]
+        for line in text.splitlines()
+        if CANARY in line or any(fragment in line for fragment in CANARY_FRAGMENTS)
+    ]
+
+
+def _clean(text: str) -> None:
+    """Fail if ``text`` shows the canary ID or any six consecutive digits of it (a cut-off ID)."""
+    assert CANARY not in text
+    leaks = _leaks(text)
+    assert not leaks, "\n".join(leaks)
+
+
+CANARY_PRINTER = """
+import sys
+print("arn:aws:iam::987654321098:role/x stack s-987654321098")
+print("err 987654321098", file=sys.stderr)
+sys.exit(2)
+"""
+
+
+def test_cli_failure_message_masks_the_whole_output_tail(monkeypatch, tmp_path):
+    _use_program(monkeypatch, CANARY_PRINTER)
+    with pytest.raises(pytest.fail.Exception) as excinfo:
+        run_aws_bench(
+            ("env", "show", "--env-name", f"integ-{CANARY}", "--ve", f"K_TOKEN={TOKEN}"),
+            cwd=tmp_path,
+            env=dict(os.environ),
+            timeout=30,
+        )
+    report = _failed_report(excinfo)
+    _clean(report)
+    assert TOKEN not in report
+    assert "exited 2" in report
+    assert f"arn:aws:iam::{MASKED}:role/x stack s-{MASKED}" in report
+    assert f"err {MASKED}" in report
+    assert f"integ-{MASKED}" in report  # a name in the command line
+
+
+def test_timeout_message_masks_the_output_tail(monkeypatch, tmp_path):
+    _use_program(
+        monkeypatch, "import time; print('stack 987654321098', flush=True); time.sleep(30)"
+    )
+    with pytest.raises(pytest.fail.Exception) as excinfo:
+        run_aws_bench(("env", "setup"), cwd=tmp_path, env=dict(os.environ), timeout=1.5)
+    report = _failed_report(excinfo)
+    _clean(report)
+    assert f"stack {MASKED}" in report
+
+
+def test_masking_happens_before_the_tail_is_cut(monkeypatch, tmp_path):
+    """An ID cut by the 4000-character tail must not leave its last digits visible."""
+    _use_program(monkeypatch, "import sys; print('987654321098' + 'y' * 3994); sys.exit(1)")
+    with pytest.raises(pytest.fail.Exception) as excinfo:
+        run_aws_bench(("env", "setup"), cwd=tmp_path, env=dict(os.environ), timeout=30)
+    report = _failed_report(excinfo)
+    assert "21098" not in report
+    assert "*1098yyy" in report
+
+
+def test_secret_is_scrubbed_before_ids_are_masked(monkeypatch, tmp_path):
+    """A secret that holds an ID-like run is replaced as a whole, not left in pieces."""
+    secret = f"CANARY-{CANARY}-SECRET"
+    _use_program(monkeypatch, f"import sys; print({secret!r}, 'id 987654321098'); sys.exit(3)")
+    with pytest.raises(pytest.fail.Exception) as excinfo:
+        run_aws_bench(
+            ("run", "--ve", f"AWS_BEARER_TOKEN_BEDROCK={secret}"),
+            cwd=tmp_path,
+            env=dict(os.environ),
+            timeout=30,
+        )
+    report = _failed_report(excinfo)
+    _clean(report)
+    assert secret not in report
+    assert f"*** id {MASKED}" in report
+
+
+def test_cli_result_keeps_raw_output_for_parsing_but_never_prints_it(monkeypatch, tmp_path):
+    _use_program(monkeypatch, CANARY_PRINTER)
+    result = run_aws_bench(
+        ("env", "show", "--env-name", f"integ-{CANARY}"),
+        cwd=tmp_path,
+        env=dict(os.environ),
+        timeout=30,
+        check=False,
+    )
+    assert CANARY in result.stdout and CANARY in result.stderr  # the parsers need it
+    for text in (repr(result), str(result), f"{result}", result.masked_output()):  # type: ignore[attr-defined]
+        _clean(text)
+        assert MASKED in text
+    assert result.masked_output() == result.output.replace(CANARY, MASKED)  # type: ignore[attr-defined]
+    assert len(result.masked_output(tail=10)) == 10  # type: ignore[attr-defined]
+
+
+def test_leak_notice_masks_the_cleanup_output():
+    def cleanup(*args, timeout, check):
+        return CliResult(("env", "cleanup"), 3, f"arn:aws:iam::{CANARY}:role/x\n", "")
+
+    cli = _StubCli({"cleanup": cleanup})
+    with pytest.raises(pytest.fail.Exception) as excinfo:
+        with _deployed(cli):
+            pass
+    text = str(excinfo.value)
+    _clean(text)
+    assert f"exit 3\narn:aws:iam::{MASKED}:role/x" in text
+
+
+def test_leak_notice_attached_to_another_failure_is_masked():
+    def cleanup(*args, timeout, check):
+        return CliResult(("env", "cleanup"), 3, f"stack {CANARY}\n", "")
+
+    cli = _StubCli({"setup": RuntimeError("setup exploded"), "cleanup": cleanup})
+    with pytest.raises(RuntimeError) as excinfo:
+        with _deployed(cli):
+            pass
+    notes = "\n".join(excinfo.value.__notes__)
+    _clean(notes)
+    assert f"stack {MASKED}" in notes
+
+
+CANARY_ACCOUNTS = {f"scn-{CANARY}": {"PRIMARY": CANARY}}
+
+
+def _show_with(env_name: str, scenario: str, tag: str, account_id: str, stacks: list[dict]):
+    return parse_env_show(
+        _render_show(
+            name=env_name, count=1, panels=[((scenario, tag, account_id, "ACTIVE"), stacks)]
+        )
+    )
+
+
+def test_env_show_problems_never_print_an_account_id():
+    stack = {
+        "name": f"scn-{CANARY}-EC2-{CANARY}",
+        "status": "ROLLBACK_COMPLETE",
+        "region": "us-east-1",
+    }
+    shown = _show_with(f"integ-{CANARY}", f"scn-{CANARY}", "OTHER", CANARY, [stack])
+    problems = env_show_problems(shown, env_name="expected-name", accounts=CANARY_ACCOUNTS)
+    text = "\n".join(problems)
+    _clean(text)
+    assert f"header shows environment 'integ-{MASKED}'" in text
+    assert f"('scn-{MASKED}', 'PRIMARY', '{MASKED}')" in text  # configured, not shown
+    assert f"('scn-{MASKED}', 'OTHER', '{MASKED}')" in text  # shown, not configured
+
+
+def test_env_show_problems_without_a_healthy_stack_never_print_an_account_id():
+    stack = {"name": f"scn-{CANARY}-EC2", "status": "ROLLBACK_COMPLETE", "region": "us-east-1"}
+    shown = _show_with(f"integ-{CANARY}", f"scn-{CANARY}", "PRIMARY", CANARY, [stack])
+    problems = env_show_problems(shown, env_name=f"integ-{CANARY}", accounts=CANARY_ACCOUNTS)
+    assert len(problems) == 1
+    _clean(problems[0])
+    assert MASKED in problems[0]
+
+
+def test_env_list_problems_never_print_an_account_id():
+    out = _render_list([{"name": f"env-{CANARY}", "ou_id": f"ou-{CANARY}", "account_count": 5}])
+    rows = parse_env_list(out)
+    text = "\n".join(env_list_problems(rows, env_name="x", accounts=CANARY_ACCOUNTS))
+    _clean(text)
+    assert f"environment 'env-{MASKED}' listed" in text
+    assert f"OU id 'ou-{MASKED}'" in text
+    two = parse_env_list(out + out)
+    (many,) = env_list_problems(two, env_name="x", accounts=CANARY_ACCOUNTS)
+    _clean(many)
+    assert MASKED in many
+
+
+def _canary_objects() -> dict[str, object]:
+    stack = StackRecord("us-east-1", f"s-{CANARY}", "CREATE_COMPLETE")
+    account = ShownAccount(
+        f"scn-{CANARY}", "A", CANARY, "ACTIVE", (ShownStack(f"s-{CANARY}", "S", "r"),)
+    )
+    path = Path(f"/tmp/ds-{CANARY}/scenario.toml")
+    return {
+        "StackRecord": stack,
+        "AccountStacks": AccountStacks(f"scn-{CANARY}", "A", CANARY, ("us-east-1",), (stack,), ()),
+        "ShownStack": ShownStack(f"s-{CANARY}", "CREATE_COMPLETE", "us-east-1"),
+        "ShownAccount": account,
+        "EnvShow": EnvShow(f"env-{CANARY}", 1, (account,)),
+        "ListedEnv": ListedEnv(f"env-{CANARY}", f"ou-{CANARY}", 1),
+        "CliResult": CliResult(("--env-name", f"e-{CANARY}"), 1, f"out {CANARY}", f"err {CANARY}"),
+        "IntegSettings": IntegSettings(
+            run_id="r",
+            env_name=f"env-{CANARY}",
+            dataset="d",
+            account_config=Path(f"/tmp/{CANARY}/accounts.yaml"),
+            task_globs=(f"*{CANARY}",),
+            dataset_path=Path(f"/tmp/ds-{CANARY}"),
+            scenario=f"scn-{CANARY}",
+        ),
+        "StepTimeouts": step_timeouts_for([path]),
+        "RunTimeout": run_timeout_for([Path(f"/tmp/task-{CANARY}")]),
+        "RunTasks": helpers.RunTasks(1, (Path(f"/tmp/task-{CANARY}"),), f"note {CANARY}"),
+        "_Outcome": helpers._Outcome(0, f"out {CANARY}", f"err {CANARY}", f"problem {CANARY}"),
+    }
+
+
+@pytest.mark.parametrize("name", list(_canary_objects()))
+def test_dataclass_reprs_mask_account_ids(name):
+    """Pytest prints locals (``-l``) and frame arguments with ``repr``."""
+    obj = _canary_objects()[name]
+    for text in (repr(obj), str(obj), f"{[obj]}", f"{ {'k': obj} }"):
+        _clean(text)
+        assert MASKED in text
+
+
+def test_dataclass_masking_does_not_change_equality_or_fields():
+    obj = ListedEnv(f"env-{CANARY}", "ou", 1)
+    assert obj == ListedEnv(f"env-{CANARY}", "ou", 1)
+    assert obj.name == f"env-{CANARY}"
+
+
+def test_step_timeouts_and_run_timeout_descriptions_mask_paths_and_names(tmp_path):
+    manifest = _write_manifest(tmp_path / f"ds-{CANARY}" / "scenario", EC2_MULTIREGION_TOML)
+    text = step_timeouts_for([manifest, tmp_path / f"missing-{CANARY}.toml"]).describe()
+    _clean(text)
+    assert f"ds-{MASKED}" in text
+    run = run_timeout_for([tmp_path / f"task-{CANARY}"]).describe()
+    _clean(run)
+    assert f"task-{MASKED}" in run
+
+
+def _opted(config: Path, **extra: str) -> dict[str, str]:
+    return {"AWS_BENCH_INTEG": "1", "AWS_BENCH_INTEG_ACCOUNT_CONFIG": str(config), **extra}
+
+
+def _outcome_text(excinfo) -> str:
+    assert excinfo.value.pytrace is False
+    return str(excinfo.value)
+
+
+def test_settings_skip_reasons_mask_the_config_path(tmp_path):
+    missing = tmp_path / f"{CANARY}" / "accounts.yaml"
+    with pytest.raises(pytest.skip.Exception) as excinfo:
+        load_settings(_opted(missing), "r1")
+    _clean(str(excinfo.value))
+    assert f"{MASKED}/accounts.yaml" in str(excinfo.value)
+
+
+def test_settings_fail_messages_mask_names_and_paths(account_config, tmp_path):
+    ds = tmp_path / f"ds-{CANARY}"
+    cases = [
+        _opted(account_config, AWS_BENCH_INTEG_ENV_NAME=f"other-{CANARY}"),
+        _opted(account_config, AWS_BENCH_INTEG_DATASET_PATH=str(ds)),
+        _opted(account_config, AWS_BENCH_INTEG_EXPECTED_TRIALS=f"{CANARY}x"),
+    ]
+    for environ in cases:
+        with pytest.raises(pytest.fail.Exception) as excinfo:
+            load_settings(environ, "r1")
+        text = _outcome_text(excinfo)
+        _clean(text)
+        assert MASKED in text
+
+
+def test_settings_mismatch_with_an_env_name_from_the_config_is_masked(tmp_path):
+    config = tmp_path / "accounts.yaml"
+    config.write_text(ACCOUNT_CONFIG.replace("name: n", f"name: env-{CANARY}"))
+    with pytest.raises(pytest.fail.Exception) as excinfo:
+        load_settings(_opted(config, AWS_BENCH_INTEG_ENV_NAME="x"), "r1")
+    text = _outcome_text(excinfo)
+    _clean(text)
+    assert f"env-{MASKED}" in text
+
+
+def test_an_invalid_account_config_fails_without_the_value_it_rejects(tmp_path):
+    """The validation error quotes the offending value; it must not reach the report."""
+    config = tmp_path / "accounts.yaml"
+    config.write_text(ACCOUNT_CONFIG.replace("name: n", f"name: 'bad name {CANARY}'"))
+    with pytest.raises(pytest.fail.Exception) as excinfo:
+        load_settings(_opted(config), "r1")
+    text = _outcome_text(excinfo)
+    _clean(text)
+    assert "ValidationError" in text and MASKED in text
+
+
+def test_load_accounts_returns_the_mapping_with_a_masked_repr(tmp_path):
+    config = tmp_path / "accounts.yaml"
+    config.write_text(ACCOUNT_CONFIG.replace("111122223333", CANARY))
+    accounts = helpers.load_accounts(config)  # type: ignore[attr-defined]
+    assert accounts == {"ec2-multiregion": {"PRIMARY": CANARY}}
+    for text in (repr(accounts), str(accounts)):
+        _clean(text)
+        assert MASKED in text
+    missing = tmp_path / f"{CANARY}.yaml"
+    with pytest.raises(pytest.fail.Exception) as excinfo:
+        helpers.load_accounts(missing)  # type: ignore[attr-defined]
+    _clean(_outcome_text(excinfo))
+
+
+def test_expected_trial_count_failure_masks_the_globs():
+    with pytest.raises(pytest.fail.Exception) as excinfo:
+        expected_trial_count(_settings(5, (f"*task-{CANARY}",)), resolved=2)
+    text = _outcome_text(excinfo)
+    _clean(text)
+    assert f"task-{MASKED}" in text
+
+
+def test_mask_problems_masks_reward_checker_messages():
+    """``find_problems`` quotes trial names, which come from task names."""
+    spec = importlib.util.spec_from_file_location(
+        "check_job_rewards", REPO_ROOT / "scripts" / "check_job_rewards.py"
+    )
+    assert spec and spec.loader
+    checker = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(checker)
+    result = {
+        "n_total_trials": 1,
+        "stats": {
+            "n_completed_trials": 1,
+            "n_errored_trials": 0,
+            "evals": {
+                f"oracle__{CANARY}": {
+                    "n_trials": 1,
+                    "reward_stats": {"reward": {"0.0": [f"task-{CANARY}__abc"]}},
+                }
+            },
+        },
+    }
+    raw = checker.find_problems(result, expected_trials=1)
+    assert CANARY in "\n".join(raw)  # the checker itself reports names as they are
+    masked = helpers.mask_problems(raw)  # type: ignore[attr-defined]
+    _clean("\n".join(masked))
+    assert f"trial task-{MASKED}__abc: reward=0.0" in masked[0]
+
+
+def test_masked_dict_repr_hides_ids_and_keeps_the_contents():
+    data = helpers.MaskedDict({"k": {"t": CANARY}})  # type: ignore[attr-defined]
+    assert data == {"k": {"t": CANARY}}
+    _clean(repr(data))
+    assert MASKED in repr(data)
+
+
+def test_masked_dict_keeps_inner_mappings_masked_too(tmp_path):
+    config = tmp_path / "accounts.yaml"
+    config.write_text(ACCOUNT_CONFIG.replace("111122223333", CANARY))
+    accounts = helpers.load_accounts(config)  # type: ignore[attr-defined]
+    inner = accounts["ec2-multiregion"]
+    assert isinstance(inner, helpers.MaskedDict)  # type: ignore[attr-defined]
+    _clean(repr(inner))
+    assert inner == {"PRIMARY": CANARY}
+
+
+def test_masked_list_masks_its_text_and_keeps_the_values():
+    items = helpers.MaskedList(["env", f"--env-name=n-{CANARY}", "-d"])  # type: ignore[attr-defined]
+    assert items == ["env", f"--env-name=n-{CANARY}", "-d"]
+    assert list(items) == ["env", f"--env-name=n-{CANARY}", "-d"]
+    assert items[1] == f"--env-name=n-{CANARY}"
+    assert json.loads(json.dumps(items)) == ["env", f"--env-name=n-{CANARY}", "-d"]
+    for text in (repr(items), str(items), f"{items}"):
+        _clean(text)
+        assert f"n-{MASKED}" in text
+
+
+def test_masked_str_masks_only_its_repr():
+    text = helpers.MaskedStr(f"stack s-{CANARY}\n")
+    assert text == f"stack s-{CANARY}\n"  # the parsers read the raw text
+    assert str(text) == f"stack s-{CANARY}\n"
+    assert repr(text) == repr(f"stack s-{MASKED}\n")
+    assert helpers.parse_env_list(text) == ()
+
+
+def test_cli_env_is_a_dict_whose_repr_hides_the_values(tmp_path):
+    environ = {"HOME": str(tmp_path), "AWS_SECRET_ACCESS_KEY": TOKEN, "FORCE_COLOR": "1"}
+    env = build_cli_env(environ, account_config=tmp_path / "a.yaml", scratch_home=tmp_path / "h")
+    assert type(env) is helpers.SecretDict and isinstance(env, dict)  # usable as subprocess env
+    assert env["AWS_SECRET_ACCESS_KEY"] == TOKEN and "FORCE_COLOR" not in env
+    for text in (repr(env), str(env), f"{env}"):
+        assert TOKEN not in text and str(tmp_path) not in text
+
+
+def test_env_command_is_the_env_step_with_the_name_then_the_source():
+    settings = IntegSettings(
+        run_id="r",
+        env_name="integ-env",
+        dataset="ds",
+        account_config=Path("a"),
+        dataset_path=Path("/data/checkout"),
+        scenario="scn",
+    )
+    assert settings.env_command("cleanup", "--yes", "--quiet") == [
+        "env", "cleanup", "--env-name", "integ-env",
+        "--scenario-path", "/data/checkout/scenarios", "--include-scenarios", "scn",
+        "--yes", "--quiet",
+    ]  # fmt: skip
+    registry = replace(settings, dataset_path=None)
+    assert registry.env_command("init") == ["env", "init", "--env-name", "integ-env", "-d", "ds"]
+
+
+# --- the real test modules, run against a fake CLI, in a nested pytest ---------------
+
+FAKE_CLI = """
+import os, sys
+argv = sys.argv[1:]
+key = "_".join(argv[:2]).upper() if argv[0] == "env" else argv[0].upper()
+sys.stdout.write(os.environ.get("FAKE_OUT_" + key, ""))
+sys.stderr.write(os.environ.get("FAKE_ERR_" + key, ""))
+if argv[0] == "run":
+    folder = os.path.join(argv[argv.index("--jobs-dir") + 1], argv[argv.index("--job-name") + 1])
+    os.makedirs(folder, exist_ok=True)
+    with open(os.path.join(folder, "result.json"), "w") as f:
+        f.write(os.environ["FAKE_RESULT_JSON"])
+sys.exit(int(os.environ.get("FAKE_RC_" + key, "0")))
+"""
+
+FAKE_PLUGIN = f"""
+import logging, os, sys
+import pytest
+from tests.integration import helpers, test_acceptance, test_env_cleanup
+helpers.CLI_PROGRAM = (sys.executable, "-c", {FAKE_CLI!r})
+CANARY = {CANARY!r}
+MODES = os.environ.get("FAKE_MODE", "").split(",")
+class _Provider:
+    def __init__(self):
+        if "provider-error" in MODES:
+            raise RuntimeError(f"provider arn:aws:iam::{{CANARY}}:role/x")
+        if "provider-log" in MODES:
+            logging.getLogger("fake").warning("credential lookup for %s failed", CANARY)
+    def get_session_for_account(self, *args):
+        return object()
+def _collect(*, scenario, tag, account_id, regions, session_for):
+    stack = helpers.StackRecord(
+        "us-east-1", f"{{scenario}}-EC2-{{account_id}}-us-east-1", "CREATE_COMPLETE"
+    )
+    return helpers.AccountStacks(scenario, tag, account_id, tuple(regions), stacks=(stack,))
+def _chained(cfg):
+    try:
+        raise KeyError(f"inner {{CANARY}}")
+    except KeyError as cause:
+        error = RuntimeError(f"resolver arn:aws:iam::{{CANARY}}:role/x")
+        error.add_note(f"note {{CANARY}}")
+        raise error from cause
+if "parser-raises" in MODES:
+    helpers.plain = lambda text: None  # parse_env_show then fails in its own frame
+def pytest_runtest_setup(item):
+    if "skip-raw" in MODES and "env_list" in item.name:
+        pytest.skip(f"skip reason {{CANARY}}")
+test_env_cleanup.CredentialProvider = _Provider
+test_env_cleanup.collect_account_stacks = _collect
+if "resolver-chain" in MODES:
+    test_acceptance.resolve_run_tasks = _chained
+elif "resolver-real" not in MODES:
+    test_acceptance.resolve_run_tasks = lambda cfg: helpers.RunTasks(1, ())
+"""
+NESTED_CONFIG = f"""\
+schema_version: "1.0"
+mode: preexisting
+name: integ-{CANARY}
+runner_role: R
+cfn_role: C
+accounts:
+  scn-{CANARY}:
+    PRIMARY: "{CANARY}"
+"""
+
+NESTED_MANIFEST = EC2_MULTIREGION_TOML.replace(
+    'name = "ec2-multiregion"', f'name = "scn-{CANARY}"'
+).replace('regions = ["us-east-1", "us-west-1", "us-west-2"]', 'regions = ["us-east-1"]')
+
+NESTED_RESULT = {
+    "n_total_trials": 1,
+    "stats": {
+        "n_completed_trials": 1,
+        "n_errored_trials": 0,
+        "evals": {
+            f"oracle__scn-{CANARY}": {
+                "n_trials": 1,
+                "n_errors": 0,
+                "reward_stats": {"reward": {"0.0": [f"task-{CANARY}__abc"]}},
+            }
+        },
+    },
+}
+CLEANUP_SUMMARY = "Cleanup complete: 1 account(s) cleaned successfully.\n"
+
+
+def _nested_env(root: Path, extra: dict[str, str]) -> dict[str, str]:
+    scenario = f"scn-{CANARY}"
+    dataset = root / f"ds-{CANARY}"
+    _write_manifest(dataset / "scenarios" / scenario, NESTED_MANIFEST)
+    (dataset / "tasks" / scenario).mkdir(parents=True)
+    config = root / f"cfg-{CANARY}" / "accounts.yaml"
+    config.parent.mkdir()
+    config.write_text(NESTED_CONFIG)
+    (root / "plugin").mkdir()
+    (root / "plugin" / "fake_cli_plugin.py").write_text(FAKE_PLUGIN)
+    (root / "home").mkdir()
+    stack = {"name": f"{scenario}-EC2-{CANARY}", "status": "CREATE_COMPLETE", "region": "us-east-1"}
+    shown = _render_show(
+        name=f"integ-{CANARY}", count=1, panels=[((scenario, "OTHER", CANARY, "ACTIVE"), [stack])]
+    )
+    listed = _render_list(
+        [{"name": f"integ-{CANARY}", "ou_id": f"ou-{CANARY}", "account_count": 1}]
+    )
+    return {
+        "PYTHONPATH": os.pathsep.join([str(REPO_ROOT), str(root / "plugin")]),
+        "HOME": str(root / "home"),
+        "AWS_BENCH_INTEG": "1",
+        "AWS_BENCH_INTEG_ACCOUNT_CONFIG": str(config),
+        "AWS_BENCH_INTEG_DATASET_PATH": str(dataset),
+        "AWS_BENCH_INTEG_SCENARIO": scenario,
+        "AWS_BENCH_INTEG_TASKS": f"*task-{CANARY}",
+        "AWS_BEARER_TOKEN_BEDROCK": "dummy-bedrock-value-0001",
+        "FAKE_OUT_ENV_SHOW": shown,
+        "FAKE_OUT_ENV_LIST": listed,
+        "FAKE_ERR_ENV_SHOW": f"warning for {CANARY}\n",
+        "FAKE_RESULT_JSON": json.dumps(NESTED_RESULT),
+        **extra,
+    }
+
+
+# name -> (extra environment, strings the report must show masked)
+NESTED_SCENARIOS = {
+    # The CLI succeeds; every check fails. The cleanup output has no summary.
+    "checks-fail": (
+        {"FAKE_OUT_ENV_CLEANUP": f"stack {CANARY} not removed\n"},
+        [
+            f"accounts shown that are not configured: [('scn-{MASKED}', 'OTHER', '{MASKED}')]",
+            f"OU id 'ou-{MASKED}'",
+            f"trial task-{MASKED}__abc: reward=0.0",
+            f"stack {MASKED} not removed",
+            f"ds-{MASKED}",  # the `step timeouts:` line
+        ],
+    ),
+    # The cleanup summary is fine; a stack is left behind.
+    "stacks-left": (
+        {"FAKE_OUT_ENV_CLEANUP": CLEANUP_SUMMARY},
+        [f"scn-{MASKED}/PRIMARY ({MASKED}): us-east-1: stack scn-{MASKED}-EC2-{MASKED}-us-east-1"],
+    ),
+    # `env setup` and `env cleanup` fail; their output carries the ID.
+    "cli-fails": (
+        {
+            "FAKE_RC_ENV_SETUP": "4",
+            "FAKE_OUT_ENV_SETUP": f"setup arn:aws:iam::{CANARY}:role/x\n",
+            "FAKE_ERR_ENV_SETUP": f"setup err {CANARY}\n",
+            "FAKE_RC_ENV_CLEANUP": "3",
+            "FAKE_OUT_ENV_CLEANUP": f"cleanup arn:aws:iam::{CANARY}:role/x\n",
+        },
+        [
+            "exited 4",
+            f"setup arn:aws:iam::{MASKED}:role/x",
+            f"setup err {MASKED}",
+            "Also, env cleanup failed",
+            f"exit 3\ncleanup arn:aws:iam::{MASKED}:role/x",
+        ],
+    ),
+}
+NESTED_FLAGS = {
+    "no-locals": ["--tb=long", "-vvv", "-rA"],
+    "locals": ["--tb=long", "-vvv", "-rA", "-l", "--full-trace"],
+}
+
+
+@pytest.mark.timeout(240)
+@pytest.mark.parametrize("flags", NESTED_FLAGS.values(), ids=NESTED_FLAGS.keys())
+@pytest.mark.parametrize("scenario", NESTED_SCENARIOS)
+def test_integration_modules_never_print_an_account_id(scenario, flags, tmp_path):
+    """The real acceptance tests, against a fake CLI, print the canary nowhere.
+
+    ``-rA`` adds the captured output of passing tests, ``-vvv`` the full
+    assertion diffs, ``--tb=long`` the frame arguments and ``-l`` the locals.
+    """
+    extra, expected = NESTED_SCENARIOS[scenario]
+    out = _nested_pytest(
+        [
+            "tests/integration/test_acceptance.py",
+            "tests/integration/test_env_cleanup.py",
+            "-m",
+            "integration",
+            "-p",
+            "fake_cli_plugin",
+            "--color=no",
+            *flags,
+        ],  # fmt: skip
+        _nested_env(tmp_path, extra),
+        timeout=200,
+    )
+    assert " failed" in out or " error" in out, out[-3000:]  # the failure paths were reached
+    for text in expected:
+        assert text in out, text
+    leaks = _leaks(out)
+    assert not leaks, "\n".join(leaks)
+
+
+# --- the pytest report: exceptions, logs, skips and fixture failures from called code ---
+# The checks above stub the called code. These cases make it misbehave, so the
+# report hook in ``tests/integration/conftest.py`` is what keeps the ID out.
+ACCEPTANCE = "tests/integration/test_acceptance.py"
+CLEANUP = "tests/integration/test_env_cleanup.py"
+LONG = ["--tb=long", "-vvv", "-rA"]
+LOCALS = ["--tb=long", "-vvv", "-rA", "-l", "--full-trace"]
+TB_STYLES = [[f"--tb={style}", "-rA"] for style in ("short", "native", "line", "no")]
+_MASKED_ARN = f"arn:aws:iam::{MASKED}:role/x"
+
+
+def _link_aws_dir(root: Path) -> dict[str, str]:
+    """An extra home link that overlaps ``.aws``: ``cli_env`` then raises ``FileExistsError``."""
+    (root / "home" / ".aws").mkdir()
+    return {"AWS_BENCH_INTEG_HOME_LINKS": ".aws"}
+
+
+def _bad_config(root: Path) -> dict[str, str]:
+    config = root / f"bad-{CANARY}.yaml"
+    config.write_text(NESTED_CONFIG.replace(f"name: integ-{CANARY}", f"name: 'bad name {CANARY}'"))
+    return {"AWS_BENCH_INTEG_ACCOUNT_CONFIG": str(config)}
+
+
+# 500 characters of raw CLI output with the canary every 13 characters, so pytest's
+# 240-character cut of a frame argument splits an ID wherever it falls.
+LONG_STDOUT = (CANARY + "-") * 38 + "\n"
+assert len(LONG_STDOUT) > 400
+
+# name -> (files and selection, environment, flag sets, strings the report must show)
+CHANNEL_SCENARIOS = {
+    # The suite's own long raw string (the CLI's stdout) is a frame argument of the
+    # parser that fails. pytest cuts a repr longer than 240 characters unless -vv.
+    "long-raw-stdout": (
+        [ACCEPTANCE, "-k", "env_show"],
+        lambda root: {"FAKE_MODE": "parser-raises", "FAKE_OUT_ENV_SHOW": LONG_STDOUT},
+        [["-rA"], ["-v", "-rA"], ["-l", "-rA"]],
+        ["AttributeError", f"{MASKED}-{MASKED}"],
+    ),
+    # The real resolver raises "No tasks matched the filter(s) ['*task-<id>']".
+    "resolver-real": (
+        [ACCEPTANCE, "-k", "quickstart"],
+        lambda root: {"FAKE_MODE": "resolver-real"},
+        [LONG, LOCALS],
+        ["No tasks matched", "task-********1098"],
+    ),
+    # An exception with a cause and a note, raised by the resolver.
+    "resolver-chain": (
+        [ACCEPTANCE, "-k", "quickstart"],
+        lambda root: {"FAKE_MODE": "resolver-chain"},
+        [LONG, LOCALS],
+        [f"RuntimeError: resolver {_MASKED_ARN}", f"inner {MASKED}", f"note {MASKED}"],
+    ),
+    # ``CredentialProvider()`` raises; every traceback style and the summary show it masked.
+    "provider-error": (
+        [CLEANUP],
+        lambda root: {"FAKE_MODE": "provider-error"},
+        [LONG, LOCALS, *TB_STYLES],
+        [f"RuntimeError: provider {_MASKED_ARN}"],
+    ),
+    # An ID in a log record; the failure itself is ID-free (a stack is left behind).
+    "provider-log": (
+        [CLEANUP],
+        lambda root: {"FAKE_MODE": "provider-log", "FAKE_OUT_ENV_CLEANUP": CLEANUP_SUMMARY},
+        [LONG, LOCALS],
+        [f"credential lookup for {MASKED} failed"],
+    ),
+    # A fixture failure: the account config sits in a directory named after the account.
+    "cli-env-failure": (
+        [ACCEPTANCE, "-k", "env_list"],
+        _link_aws_dir,
+        [LONG, ["--tb=long", "-vvv", "-rA", "-l"], LOCALS],
+        ["FileExistsError", f"cfg-{MASKED}"],
+    ),
+    "env-name-mismatch": (
+        [ACCEPTANCE, "-k", "env_list"],
+        lambda root: {"AWS_BENCH_INTEG_ENV_NAME": f"other-{CANARY}"},
+        [LOCALS],
+        [f"other-{MASKED}", f"integ-{MASKED}"],
+    ),
+    "invalid-config": (
+        [ACCEPTANCE, "-k", "env_list"],
+        _bad_config,
+        [LOCALS],
+        ["cannot load the account config", "ValidationError", f"bad name {MASKED}"],
+    ),
+    "missing-dataset": (
+        [ACCEPTANCE, "-k", "env_list"],
+        lambda root: {"AWS_BENCH_INTEG_DATASET_PATH": str(root / f"missing-{CANARY}")},
+        [LOCALS],
+        ["missing", f"missing-{MASKED}"],
+    ),
+    "trial-count": (
+        [ACCEPTANCE, "-k", "quickstart"],
+        lambda root: {"AWS_BENCH_INTEG_EXPECTED_TRIALS": "7"},
+        [LOCALS],
+        [f"task-{MASKED}"],
+    ),
+    # A skip whose reason carries an ID that did not come through the suite's masking.
+    "skip-reason": (
+        [ACCEPTANCE, "-k", "env_list"],
+        lambda root: {"FAKE_MODE": "skip-raw"},
+        [["-rs"]],
+        [f"skip reason {MASKED}"],
+    ),
+    "skip-config-path": (
+        [ACCEPTANCE, "-k", "env_list"],
+        lambda root: {"AWS_BENCH_INTEG_ACCOUNT_CONFIG": str(root / f"none-{CANARY}.yaml")},
+        [["-rs"]],
+        [f"none-{MASKED}.yaml is not a file"],
+    ),
+}
+CHANNEL_CASES = [
+    pytest.param(name, tuple(flags), id=f"{name}-{'+'.join(flags)}")
+    for name, (_, _, flag_sets, _) in CHANNEL_SCENARIOS.items()
+    for flags in flag_sets
+]
+
+
+@pytest.mark.timeout(240)
+@pytest.mark.parametrize(("name", "flags"), CHANNEL_CASES)
+def test_pytest_report_masks_ids_from_called_code(name, flags, tmp_path):
+    """Exceptions, log records, skips and fixture failures never show the canary.
+
+    Covers the terminal report (traceback, frame arguments, locals, captured
+    sections, the short summary, skip reasons) and the ``--junitxml`` file, and
+    that the credentials in the session's environment appear in neither.
+    The called code is made to misbehave, so the report hook in
+    ``tests/integration/conftest.py`` is what masks these cases, except
+    ``skip-config-path`` (``load_settings`` masks that reason itself) and
+    ``long-raw-stdout`` (the suite's own string: ``MaskedStr`` masks its repr
+    before pytest cuts it, which the hook cannot do afterwards).
+    """
+    selection, make_env, _, expected = CHANNEL_SCENARIOS[name]
+    env = _nested_env(
+        tmp_path,
+        {"COLUMNS": "300", "AWS_SECRET_ACCESS_KEY": TOKEN, "AWS_SESSION_TOKEN": ENV_TOKEN},
+    )  # COLUMNS: the short summary is cut to the width
+    env.update(make_env(tmp_path))
+    report = tmp_path / "report.xml"
+    out = _nested_pytest(
+        [*selection, "-m", "integration", "-p", "fake_cli_plugin", "--color=no",
+         f"--junitxml={report}", *flags],
+        env,
+        timeout=200,
+    )  # fmt: skip
+    for text in expected:
+        assert text in out, f"{text}\n{out[-3000:]}"
+    for secret in (TOKEN, ENV_TOKEN):  # the credentials in the environment of the session
+        assert secret not in out, secret
+        assert secret not in report.read_text(), secret
+    leaks = _leaks(out)
+    assert not leaks, "\n".join(leaks)
+    _clean(report.read_text())
+
+
+@pytest.mark.timeout(240)  # above the 200 s of the nested session, which is the one that fires
+def test_live_output_shows_no_account_id(tmp_path):
+    """``-s`` adds no exposure: the suite masks what it prints, and the CLI's output is piped."""
+    out = _nested_pytest(
+        [ACCEPTANCE, CLEANUP, "-m", "integration", "-p", "fake_cli_plugin", "--color=no",
+         "--tb=short", "-s", "-rA"],
+        _nested_env(tmp_path, NESTED_SCENARIOS["checks-fail"][0]),
+        timeout=200,
+    )  # fmt: skip
+    assert f"stack {MASKED} not removed" in out
+    _clean(out)
+
+
+REPORT_PROBE = f"""
+import logging, sys, pytest
+ID = {CANARY!r}
+
+def test_call_failure():
+    print("out", ID)
+    print("err", ID, file=sys.stderr)
+    logging.getLogger("probe").warning("log %s", ID)
+    assert False, f"boom {{ID}}"
+
+@pytest.fixture
+def broken():
+    raise ValueError(f"fixture {{ID}}")
+
+def test_setup_error(broken):
+    pass
+
+@pytest.fixture
+def late():
+    yield
+    raise ValueError(f"teardown {{ID}}")
+
+def test_teardown_error(late):
+    pass
+
+def test_skipped():
+    pytest.skip(f"skip {{ID}}")
+
+@pytest.mark.xfail(reason=f"xfail {{ID}}")
+def test_xfailed():
+    assert False
+
+@pytest.mark.xfail(reason=f"xpass {{ID}}")
+def test_xpassed():
+    pass
+
+@pytest.mark.xfail(strict=True, reason=f"strict {{ID}}")
+def test_strict_xpassed():
+    pass
+"""
+
+
+@pytest.mark.timeout(90)  # above the 60 s of the nested session, which is the one that fires
+def test_report_hook_masks_every_report_field(tmp_path):
+    """The hook masks the setup, call and teardown reports of every outcome it lists.
+
+    Outcomes: failure, setup error, teardown error, skip, xfail, XPASS and strict
+    XPASS; fields: traceback, short summary, captured stdout, stderr and log
+    sections, skip and xfail reasons, junit XML. The hook is loaded as a plugin
+    so it applies to a probe file outside ``tests/integration``. The masked
+    markers must be present (so the hook ran and the short summary kept its
+    message), the outcome counts must be those of the probe, and the canary must
+    be absent from the terminal output and the junit XML.
+    """
+    (tmp_path / "test_probe.py").write_text(REPORT_PROBE)
+    report = tmp_path / "report.xml"
+    out = _nested_pytest(
+        [str(tmp_path / "test_probe.py"), "--rootdir", str(tmp_path),
+         "-p", "tests.integration.conftest",
+         "--color=no", "-rA", "--tb=long", "-l", f"--junitxml={report}"],
+        {"COLUMNS": "300"},
+        timeout=60,
+    )  # fmt: skip
+    for marker in (
+        f"AssertionError: boom {MASKED}",  # call failure: traceback and short summary
+        f"ValueError: fixture {MASKED}",  # setup error
+        f"ValueError: teardown {MASKED}",  # teardown error
+        f"out {MASKED}",  # captured stdout section
+        f"err {MASKED}",  # captured stderr section
+        f"log {MASKED}",  # captured log section
+        f"skip {MASKED}",  # skip reason
+        f"xfail {MASKED}",  # xfail reason
+        f"xpass {MASKED}",  # XPASS reason
+        f"[XPASS(strict)] strict {MASKED}",  # strict XPASS failure
+    ):
+        assert marker in out, f"{marker}\n{out[-3000:]}"
+    assert "Captured stderr call" in out
+    assert f"test_call_failure - AssertionError: boom {MASKED}" in out  # the short summary
+    # the outcomes are those of the probe: the hook changed none of them
+    assert "2 failed, 1 passed, 1 skipped, 1 xfailed, 1 xpassed, 2 errors" in out, out[-600:]
+    _clean(out)
+    xml = report.read_text()
+    _clean(xml)
+    assert f"boom {MASKED}" in xml
+
+
+class _Boom(Exception):
+    pass
+
+
+def _hook_report(request, error: BaseException):
+    """A failed ``call`` report for ``request.node``, run through the real report hook.
+
+    Returns the report before the hook (its plain-text rendering) and after it.
+    """
+    from _pytest.reports import TestReport
+    from pluggy import Result
+
+    from tests.integration import conftest as integration_conftest
+
+    def raise_error():
+        raise error
+
+    call = pytest.CallInfo.from_call(raise_error, "call")
+    report = TestReport.from_item_and_call(request.node, call)
+    before = _render(report.longrepr)
+    hook = integration_conftest.pytest_runtest_makereport(request.node, call)
+    next(hook)
+    with pytest.raises(StopIteration):
+        hook.send(Result.from_call(lambda: report))
+    return before, report
+
+
+def _render(longrepr) -> str:
+    """What the terminal prints for ``longrepr``, without colour and without any stripping."""
+    from _pytest._io import TerminalWriter
+
+    out = io.StringIO()
+    writer = TerminalWriter(out)
+    writer.hasmarkup = False
+    longrepr.toterminal(writer)
+    return out.getvalue()
+
+
+def test_report_without_an_id_is_unchanged_by_the_hook(request):
+    before, report = _hook_report(request, _Boom("no identifier here"))
+    assert before.strip()
+    assert _render(report.longrepr) == before  # the same text, whitespace included
+    assert str(report.longrepr) == before.strip()  # junit XML gets what pytest would give
+    crash = getattr(report.longrepr, "reprcrash", None)
+    assert crash is not None
+    assert crash.message == "tests.test_integration_helpers._Boom: no identifier here"
+
+
+def test_report_with_an_id_is_masked_in_its_text_str_and_reprcrash(request):
+    _, report = _hook_report(request, _Boom(f"boom {CANARY}"))
+    crash = getattr(report.longrepr, "reprcrash", None)
+    assert crash is not None
+    for text in (_render(report.longrepr), str(report.longrepr), crash.message):
+        assert f"boom {MASKED}" in text
+        _clean(text)
+
+
+def test_report_round_tripped_through_serialization_is_masked_but_loses_its_summary_line(request):
+    """A report that is serialized (pytest-xdist, report-log) keeps the masking, not ``reprcrash``.
+
+    The restored ``longrepr`` is the masked text as a plain ``str``; pytest then
+    has no one-line message for the short summary. Pinned so a change is noticed.
+    """
+    from _pytest.reports import TestReport
+
+    _, report = _hook_report(request, _Boom(f"boom {CANARY}"))
+    restored = TestReport._from_json(report._to_json())
+    assert isinstance(restored.longrepr, str)
+    assert f"boom {MASKED}" in restored.longrepr
+    _clean(restored.longrepr)
+    assert getattr(restored.longrepr, "reprcrash", None) is None  # no short-summary message
+
+
+UNIT_PROBE = f"""
+def test_fails():
+    raise AssertionError("unit {CANARY}")
+"""
+
+
+def test_the_hook_applies_only_below_the_directory_of_its_conftest(tmp_path):
+    """A test outside ``tests/integration`` keeps its report; one below it is masked."""
+    (tmp_path / "integ").mkdir()
+    (tmp_path / "integ" / "conftest.py").write_text(
+        "from tests.integration.conftest import pytest_runtest_makereport  # noqa: F401\n"
+    )
+    (tmp_path / "integ" / "test_in.py").write_text(UNIT_PROBE.replace("unit", "integ"))
+    (tmp_path / "unit").mkdir()
+    (tmp_path / "unit" / "test_out.py").write_text(UNIT_PROBE)
+    out = _nested_pytest(
+        [str(tmp_path), "--rootdir", str(tmp_path), "--color=no", "-rf", "--tb=short"],
+        {"COLUMNS": "300"},
+        timeout=60,
+    )
+    assert f"AssertionError: integ {MASKED}" in out, out[-1500:]
+    assert f"AssertionError: unit {CANARY}" in out, out[-1500:]  # untouched: still the raw ID
+    assert f"integ {CANARY}" not in out

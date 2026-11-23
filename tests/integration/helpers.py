@@ -11,6 +11,9 @@ unit tests that exercise these helpers must run in ``make test``.
 - Subprocess timeouts derived from the scenario and task budgets
   (``step_timeouts_for``, ``run_timeout_for``) and the expected trial count
   (``resolve_run_tasks``, ``expected_trial_count``).
+- Masking account IDs in everything that can reach a failure message, a report
+  or a log (``mask_account_ids``, ``fail_masked``, ``mask_problems``,
+  ``MaskedDict``, ``MaskedList``, ``CliResult.masked_output``).
 - Parsing and checking `env show` / `env list` output (``parse_env_show``,
   ``env_show_problems``, ``parse_env_list``, ``env_list_problems``).
 - The independent post-cleanup check: read-only CloudFormation stack listing and
@@ -30,12 +33,15 @@ from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, NoReturn, TypeVar, cast
 
 import pytest
 from botocore.exceptions import ClientError
 
-from aws_bench.account_management.preexisting import load_account_config
+from aws_bench.account_management.preexisting import (
+    PreexistingEnvironmentConfig,
+    load_account_config,
+)
 from aws_bench.cli.job_config import AwsBenchJobConfig
 from aws_bench.dataset.config import AwsBenchDatasetConfig
 from aws_bench.dataset.models import ScriptType
@@ -44,6 +50,144 @@ from aws_bench.resource_management.cleanup.models import is_infra_identifier
 from aws_bench.scenario.config import ScenarioManifest
 
 REDACTED = "***"
+_T = TypeVar("_T")
+_V = TypeVar("_V")
+
+
+# --------------------------------------------------------------------------- #
+# Account IDs
+# --------------------------------------------------------------------------- #
+# Text from AWS, the CLI or the config (names, paths, ARNs, error messages,
+# command output) can carry a 12-digit account ID. The suite masks the strings
+# it builds for a failure message, a problem list or a status print where it
+# builds them. pytest then has little to repeat: its assertion explanation
+# prints the operands of the failed ``assert`` (including call arguments), and
+# with ``--tb=long``/``-vvv``/``-l`` it also prints frame arguments and locals
+# with ``repr``. Objects that hold raw IDs therefore mask their own ``repr``
+# (``_masked_repr``, ``MaskedDict``, ``MaskedList``, ``MaskedStr``). The raw
+# text stays in the fields, because the parsers need it.
+#
+# What the suite does not build (exceptions raised by called code, frame
+# arguments and locals, captured logs, skip reasons) is masked when pytest
+# builds its report: see ``pytest_runtest_makereport`` in ``conftest.py``.
+def mask_account_id(account_id: str) -> str:
+    """Show only the last four digits of a 12-digit account ID (``********3333``)."""
+    if re.fullmatch(r"\d{12}", account_id):
+        return "*" * 8 + account_id[-4:]
+    return "****"
+
+
+def mask_account_ids(text: str) -> str:
+    """Mask every 12-digit run in ``text`` that looks like an account ID.
+
+    The result has the same length and layout as ``text``, so line numbers and
+    columns stay usable. Digit runs of any other length are left alone.
+    """
+    return re.sub(r"(?<!\d)\d{12}(?!\d)", lambda m: mask_account_id(m.group()), text)
+
+
+def mask_problems(problems: Sequence[str]) -> list[str]:
+    """Mask account IDs in every problem string.
+
+    Stack, scenario, environment and trial names can carry an account ID. The
+    strings are masked where they are built, so every place that prints them (an
+    assertion message and pytest's own ``assert ... == []`` explanation) shows
+    only masked IDs.
+    """
+    return [mask_account_ids(p) for p in problems]
+
+
+def account_label(scenario: str, tag: str, account_id: str) -> str:
+    """Account description for failure messages: scenario/tag plus the masked ID."""
+    return f"{scenario}/{tag} ({mask_account_id(account_id)})"
+
+
+def fail_masked(message: str) -> NoReturn:
+    """``pytest.fail`` with account IDs masked and no traceback."""
+    message = mask_account_ids(message)  # also replaces the raw text in this frame's locals
+    pytest.fail(message, pytrace=False)
+
+
+def _masked_repr(cls: type[_T]) -> type[_T]:
+    """Class decorator: mask account IDs in the generated ``repr``.
+
+    pytest renders fixture values, frame arguments and (with ``-l``) locals with
+    ``repr``, so an object that holds raw names or output must not print them.
+    Apply it above ``@dataclass``, which must generate the ``repr`` first::
+
+        @_masked_repr
+        @dataclass(frozen=True)
+        class Thing: ...
+    """
+    plain_repr = cls.__repr__
+
+    def __repr__(self: Any) -> str:
+        return mask_account_ids(plain_repr(self))
+
+    cls.__repr__ = __repr__  # type: ignore[method-assign,assignment]
+    return cls
+
+
+class MaskedStr(str):
+    """A ``str`` whose ``repr`` masks account IDs; the text itself stays raw for parsing.
+
+    pytest renders a frame argument or local with ``repr`` and then cuts it in the
+    middle when it is longer than 240 characters, which can leave a few digits of
+    an ID that no mask matches any more. Masking inside ``repr`` happens before
+    that cut. Slices, ``split`` and ``+`` return a plain ``str``: wrap those that
+    carry raw output and can reach a traceback.
+    """
+
+    __slots__ = ()
+
+    def __repr__(self) -> str:
+        """Return the quoted text with account IDs masked."""
+        return mask_account_ids(super().__repr__())
+
+
+class MaskedDict(dict[str, _V]):
+    """A ``dict`` whose ``repr`` masks account IDs (the account config's mapping)."""
+
+    __slots__ = ()
+
+    def __repr__(self) -> str:
+        """Return the ``dict``/``list`` representation with account IDs masked."""
+        return mask_account_ids(super().__repr__())
+
+    __str__ = __repr__
+
+
+class MaskedList(list[_T]):
+    """A ``list`` whose ``repr`` masks account IDs (CLI arguments, names)."""
+
+    __slots__ = ()
+
+    def __repr__(self) -> str:
+        """Return the ``dict``/``list`` representation with account IDs masked."""
+        return mask_account_ids(super().__repr__())
+
+    __str__ = __repr__
+
+
+def _load_config(path: Path) -> PreexistingEnvironmentConfig:
+    """Load the account config; fail the test with a masked message if that is not possible.
+
+    A validation error quotes the value it rejected, and a missing-file error
+    the path, so neither may reach pytest's report as it is.
+    """
+    problem = None
+    try:
+        return load_account_config(path)
+    except Exception as e:  # noqa: BLE001 - reported masked, outside this block
+        problem = f"cannot load the account config {path}: {type(e).__name__}: {e}"
+    fail_masked(problem)
+
+
+def load_accounts(path: Path) -> MaskedDict[MaskedDict[str]]:
+    """Return the account config's ``{scenario: {tag: account_id}}`` mapping."""
+    accounts = _load_config(path).accounts
+    return MaskedDict({scenario: MaskedDict(tags) for scenario, tags in accounts.items()})
+
 
 # --------------------------------------------------------------------------- #
 # Opt-in settings
@@ -76,6 +220,7 @@ DEFAULT_SCENARIO = "ec2-multiregion"
 INIT_TIMEOUT_SEC = 1200.0
 
 
+@_masked_repr
 @dataclass(frozen=True)
 class IntegSettings:
     """Validated opt-in settings for one integration session."""
@@ -89,7 +234,13 @@ class IntegSettings:
     scenario: str = DEFAULT_SCENARIO
     expected_trials: int | None = None
 
-    def env_source_args(self) -> list[str]:
+    def env_command(self, step: str, *extra: str) -> MaskedList[str]:
+        """The arguments of `env <step>` for this environment: name, source, then ``extra``."""
+        return MaskedList(
+            ["env", step, "--env-name", self.env_name, *self.env_source_args(), *extra]
+        )
+
+    def env_source_args(self) -> MaskedList[str]:
         """Scenario-source arguments for `env init|setup|cleanup`.
 
         Local mode: `--scenario-path` must be a directory *containing* scenario
@@ -97,13 +248,13 @@ class IntegSettings:
         it points at `<checkout>/scenarios`, narrowed by `--include-scenarios`.
         """
         if self.dataset_path is None:
-            return ["-d", self.dataset]
-        return [
+            return MaskedList(["-d", self.dataset])
+        return MaskedList([
             "--scenario-path", str(self.dataset_path / "scenarios"),
             "--include-scenarios", self.scenario,
-        ]  # fmt: skip
+        ])  # fmt: skip
 
-    def run_source_args(self) -> list[str]:
+    def run_source_args(self) -> MaskedList[str]:
         """Dataset-source arguments for `run`.
 
         Local mode needs both a tasks dir (`-p`) and a scenarios dir. `run` loads
@@ -111,15 +262,15 @@ class IntegSettings:
         reference, so `-p <checkout>/tasks/<scenario>` limits it to one.
         """
         if self.dataset_path is None:
-            return ["-d", self.dataset]
-        return [
+            return MaskedList(["-d", self.dataset])
+        return MaskedList([
             "--scenario-path", str(self.dataset_path / "scenarios"),
             "-p", str(self.dataset_path / "tasks" / self.scenario),
-        ]  # fmt: skip
+        ])  # fmt: skip
 
-    def task_filter_args(self) -> list[str]:
+    def task_filter_args(self) -> MaskedList[str]:
         """`-i <glob>` for each task glob (empty: every task of the dataset)."""
-        return [arg for g in self.task_globs for arg in ("-i", g)]
+        return MaskedList(arg for g in self.task_globs for arg in ("-i", g))
 
     def run_dataset_config(self, *, download_dir: Path | None = None) -> AwsBenchDatasetConfig:
         """The dataset config that `run` builds from ``run_source_args`` + ``task_filter_args``.
@@ -157,36 +308,34 @@ def load_settings(environ: Mapping[str, str], run_id: str | None = None) -> Inte
         pytest.skip(f"{ACCOUNT_CONFIG_VAR} must point to a pre-existing account config YAML")
     config = Path(raw).expanduser().resolve()
     if not config.is_file():
-        pytest.skip(f"{ACCOUNT_CONFIG_VAR}={raw} is not a file")
+        pytest.skip(mask_account_ids(f"{ACCOUNT_CONFIG_VAR}={raw} is not a file"))
     # Pre-existing mode requires --env-name to equal the config's `name`
     # (TestEnvironmentNotFoundError otherwise), so it cannot carry a per-run
     # suffix. Isolation between runs comes from the redirected HOME and unique
     # job names; AWS-level isolation needs one account per concurrent runner.
-    env_name = load_account_config(config).name
+    env_name = _load_config(config).name
     override = environ.get(ENV_NAME_VAR)
     if override and override != env_name:
-        pytest.fail(
+        fail_masked(
             f"{ENV_NAME_VAR}={override!r} does not match the account config's "
             f"name {env_name!r}; pre-existing mode requires them to be equal. "
-            f"Unset {ENV_NAME_VAR} or change `name` in {config}.",
-            pytrace=False,
+            f"Unset {ENV_NAME_VAR} or change `name` in {config}."
         )
     dataset_path: Path | None = None
     scenario = environ.get(SCENARIO_VAR) or DEFAULT_SCENARIO
     raw_dataset_path = environ.get(DATASET_PATH_VAR)
     if raw_dataset_path:
         if environ.get(DATASET_VAR):
-            pytest.fail(f"Set either {DATASET_VAR} or {DATASET_PATH_VAR}, not both.", pytrace=False)
+            fail_masked(f"Set either {DATASET_VAR} or {DATASET_PATH_VAR}, not both.")
         dataset_path = Path(raw_dataset_path).expanduser().resolve()
         for required in (
             dataset_path / "scenarios" / scenario / "scenario.toml",
             dataset_path / "tasks" / scenario,
         ):
             if not required.exists():
-                pytest.fail(
+                fail_masked(
                     f"{DATASET_PATH_VAR}={raw_dataset_path}: missing {required}. Point it at "
-                    f"an aws-bench-datasets checkout and set {SCENARIO_VAR} if needed.",
-                    pytrace=False,
+                    f"an aws-bench-datasets checkout and set {SCENARIO_VAR} if needed."
                 )
     expected_trials: int | None = None
     raw_expected = environ.get(EXPECTED_TRIALS_VAR, "").strip()
@@ -196,10 +345,9 @@ def load_settings(environ: Mapping[str, str], run_id: str | None = None) -> Inte
         except ValueError:
             expected_trials = 0
         if expected_trials < 1:
-            pytest.fail(
+            fail_masked(
                 f"{EXPECTED_TRIALS_VAR}={raw_expected!r} must be a positive integer "
-                "(the number of trials the run must plan), or unset.",
-                pytrace=False,
+                "(the number of trials the run must plan), or unset."
             )
     return IntegSettings(
         run_id=run_id or uuid.uuid4().hex[:8],
@@ -250,6 +398,18 @@ class Secret:
     __str__ = __repr__
 
 
+class SecretDict(dict[str, str]):
+    """A mutable environment whose ``repr`` shows no values (see ``SecretEnv``)."""
+
+    __slots__ = ()
+
+    def __repr__(self) -> str:
+        """Return a representation without values."""
+        return f"SecretDict(<{len(self)} variables, values hidden>)"
+
+    __str__ = __repr__
+
+
 class SecretEnv(Mapping[str, str]):
     """Read-only environment mapping whose ``repr`` shows no values.
 
@@ -284,9 +444,14 @@ class SecretEnv(Mapping[str, str]):
     __str__ = __repr__
 
 
+@_masked_repr
 @dataclass(frozen=True)
 class CliResult:
-    """Completed ``aws-bench`` invocation. ``args`` are redacted, output is scrubbed."""
+    """Completed ``aws-bench`` invocation. ``args`` are redacted, output is scrubbed.
+
+    ``stdout`` and ``stderr`` keep account IDs, because the parsers need them;
+    use ``masked_output`` in a message. ``repr`` masks them.
+    """
 
     args: tuple[str, ...]
     returncode: int
@@ -295,7 +460,18 @@ class CliResult:
 
     @property
     def output(self) -> str:
-        return self.stdout + self.stderr
+        """Scrubbed stdout and stderr, raw: for parsing only, never for a message."""
+        return MaskedStr(self.stdout + self.stderr)
+
+    def masked_output(self, tail: int | None = None) -> str:
+        """``output`` with account IDs masked; this is the view for messages.
+
+        The whole text is masked first and cut afterwards, so an ID that the
+        cut would split cannot leave its last digits visible. Secrets are already
+        scrubbed from ``stdout`` and ``stderr``.
+        """
+        text = mask_account_ids(self.output)
+        return text if tail is None else text[-tail:]
 
 
 def _mask_assignment(arg: str) -> str:
@@ -435,6 +611,7 @@ class _Command:
         )
 
 
+@_masked_repr
 @dataclass(frozen=True)
 class _Outcome:
     """What happened to one call. Output is already scrubbed."""
@@ -506,7 +683,9 @@ def _execute(
 
 
 def _tails(outcome: _Outcome) -> str:
-    return f"--- stdout ---\n{outcome.stdout[-_TAIL:]}\n--- stderr ---\n{outcome.stderr[-_TAIL:]}"
+    """The last ``_TAIL`` characters of each stream, account IDs masked before the cut."""
+    out, err = mask_account_ids(outcome.stdout), mask_account_ids(outcome.stderr)
+    return f"--- stdout ---\n{out[-_TAIL:]}\n--- stderr ---\n{err[-_TAIL:]}"
 
 
 def run_aws_bench(
@@ -523,6 +702,10 @@ def run_aws_bench(
     Secret values are those ``redact_args`` masks, every ``Secret`` argument,
     and every ``env`` value whose name looks secret (``env_secret_values``).
     They are masked in the returned ``CliResult`` and in every failure message.
+    Account IDs are masked in every failure message too, after the secrets: the
+    command line and the tail of each stream (``_tails``). The returned
+    ``CliResult`` keeps them in ``stdout``/``stderr`` for the parsers and masks
+    them in its ``repr``.
 
     - Non-zero exit (with ``check``), timeout, a start failure or any other
       ``Exception`` from the subprocess layer: ``pytest.fail(..., pytrace=False)``
@@ -543,19 +726,19 @@ def run_aws_bench(
     # --full-trace or unexpected errors; it skips names missing from the frame.
     del args, env
     outcome = _execute(cmd, cwd, timeout, term_grace)
-    shown = " ".join(cmd.shown)
+    shown = mask_account_ids(" ".join(cmd.shown))
     if isinstance(outcome, BaseException):
         outcome.__context__ = None
         outcome.__cause__ = None
         raise outcome.with_traceback(None) from None
     if outcome.problem is not None:
-        pytest.fail(f"`aws-bench {shown}` {outcome.problem}\n{_tails(outcome)}", pytrace=False)
+        fail_masked(f"`aws-bench {shown}` {outcome.problem}\n{_tails(outcome)}")
     assert outcome.returncode is not None
-    result = CliResult(cmd.shown, outcome.returncode, outcome.stdout, outcome.stderr)
+    result = CliResult(
+        cmd.shown, outcome.returncode, MaskedStr(outcome.stdout), MaskedStr(outcome.stderr)
+    )
     if check and result.returncode != 0:
-        pytest.fail(
-            f"`aws-bench {shown}` exited {result.returncode}\n{_tails(outcome)}", pytrace=False
-        )
+        fail_masked(f"`aws-bench {shown}` exited {result.returncode}\n{_tails(outcome)}")
     return result
 
 
@@ -576,11 +759,11 @@ def _attempt_cleanup(
     try:
         result = run_cli(*cleanup_args, timeout=cleanup_timeout(), check=False)
     except (Exception, pytest.fail.Exception) as e:  # noqa: BLE001 - reported, not raised here
-        # run_aws_bench failures are already redacted; anything else is named only.
+        # run_aws_bench failures are already redacted and masked; anything else is named only.
         detail = str(e) if isinstance(e, pytest.fail.Exception) else type(e).__name__
         return detail
     if result.returncode != 0:
-        return f"exit {result.returncode}\n{result.output[-_TAIL:]}"
+        return f"exit {result.returncode}\n{result.masked_output(_TAIL)}"
     return None
 
 
@@ -648,7 +831,7 @@ def deployed(
     )
     if primary is None:
         if problem is not None:
-            pytest.fail(f"{_LEAK_NOTICE}:\n{problem}", pytrace=False)
+            fail_masked(f"{_LEAK_NOTICE}:\n{problem}")
         return
     if problem is not None:
         notice = f"{_LEAK_NOTICE}:\n{problem}"
@@ -686,6 +869,7 @@ FALLBACK_TASK_BUDGET_SEC = 3600.0
 FALLBACK_RUN_TIMEOUT_SEC = 21600.0
 
 
+@_masked_repr
 @dataclass(frozen=True)
 class StepTimeouts:
     """Subprocess timeouts (seconds) for ``env setup`` and ``env cleanup``.
@@ -705,7 +889,7 @@ class StepTimeouts:
             cleanup = "env cleanup without a deadline (interrupt manually if it hangs)"
         else:
             cleanup = f"env cleanup {self.cleanup:g}s"
-        return f"env setup {self.setup:g}s, {cleanup} ({self.source})"
+        return mask_account_ids(f"env setup {self.setup:g}s, {cleanup} ({self.source})")
 
 
 def find_scenario_manifests(*, dataset_path: Path | None, scenario: str, home: Path) -> list[Path]:
@@ -761,6 +945,7 @@ def step_timeouts_for(manifest_paths: Sequence[Path]) -> StepTimeouts:
     )
 
 
+@_masked_repr
 @dataclass(frozen=True)
 class RunTimeout:
     """Subprocess timeout (seconds) for ``run``."""
@@ -769,7 +954,7 @@ class RunTimeout:
     source: str
 
     def describe(self) -> str:
-        return f"run {self.seconds:g}s ({self.source})"
+        return mask_account_ids(f"run {self.seconds:g}s ({self.source})")
 
 
 def task_budget_sec(cfg: AwsBenchTaskConfig, task_dir: Path) -> float | None:
@@ -824,6 +1009,7 @@ def run_timeout_for(task_dirs: Sequence[Path]) -> RunTimeout:
     )
 
 
+@_masked_repr
 @dataclass(frozen=True)
 class RunTasks:
     """Tasks `run` will select: the expected trial count and their directories."""
@@ -871,10 +1057,9 @@ def expected_trial_count(settings: IntegSettings, *, resolved: int) -> int:
         return resolved
     if resolved != expected:
         globs = list(settings.task_globs) or "all tasks"
-        pytest.fail(
+        fail_masked(
             f"{EXPECTED_TRIALS_VAR}={expected}, but the selection resolves {resolved} "
-            f"trial(s) (task globs: {globs}). Fix the selection or the expectation.",
-            pytrace=False,
+            f"trial(s) (task globs: {globs}). Fix the selection or the expectation."
         )
     return expected
 
@@ -917,32 +1102,34 @@ _STACK_STATUS_RE = re.compile(r"^[A-Z]+(?:_[A-Z]+)+$")
 _REGION_RE = re.compile(r"^[a-z]{2}(?:-[a-z]+)+-\d+$")
 
 
-def plain(text: str) -> str:
-    """Return ``text`` without ANSI escape sequences."""
-    return _ANSI_RE.sub("", text)
+def plain(text: str) -> MaskedStr:
+    """Return ``text`` without ANSI escape sequences, with a masked ``repr``."""
+    return MaskedStr(_ANSI_RE.sub("", text))
 
 
-def cli_display_env(env: Mapping[str, str]) -> dict[str, str]:
+def cli_display_env(env: Mapping[str, str]) -> SecretDict:
     """Return ``env`` with ``COLUMNS=CLI_COLUMNS`` and no ``COLOR_FORCING_VARS``.
 
     Without colour forcing, Rich sees a pipe as a non-terminal and honours
-    ``COLUMNS`` whatever ``TERM`` is.
+    ``COLUMNS`` whatever ``TERM`` is. The result is a ``SecretDict``: a plain
+    ``dict`` for ``subprocess``, with a ``repr`` that hides the values.
     """
-    out = {k: v for k, v in env.items() if k not in COLOR_FORCING_VARS}
+    out = SecretDict((k, v) for k, v in env.items() if k not in COLOR_FORCING_VARS)
     out["COLUMNS"] = str(CLI_COLUMNS)
     return out
 
 
 def build_cli_env(
     environ: Mapping[str, str], *, account_config: Path, scratch_home: Path
-) -> dict[str, str]:
+) -> SecretDict:
     """Return the CLI subprocess environment built from ``environ`` (see ``cli_env``).
 
     Symlinks ``.aws``, ``.docker`` and the ``HOME_LINKS_VAR`` paths of the real
     ``HOME`` into ``scratch_home``, points ``HOME`` at ``scratch_home``, sets
-    ``AWSBENCH_ACCOUNT_CONFIG`` and applies ``cli_display_env``.
+    ``AWSBENCH_ACCOUNT_CONFIG`` and applies ``cli_display_env``. The environment
+    is held as a ``SecretDict`` throughout, so ``-l`` shows no credential values.
     """
-    env = dict(environ)
+    env = SecretDict(environ)
     real_home = Path(env.get("HOME", str(Path.home())))
     extra = [p.strip() for p in env.get(HOME_LINKS_VAR, "").split(",") if p.strip()]
     for name in (".aws", ".docker", *extra):
@@ -955,6 +1142,7 @@ def build_cli_env(
     return cli_display_env(env)
 
 
+@_masked_repr
 @dataclass(frozen=True)
 class ShownStack:
     """One row of an account's stack table in `env show`."""
@@ -964,6 +1152,7 @@ class ShownStack:
     region: str
 
 
+@_masked_repr
 @dataclass(frozen=True)
 class ShownAccount:
     """One account panel of `env show`."""
@@ -975,6 +1164,7 @@ class ShownAccount:
     stacks: tuple[ShownStack, ...] = ()
 
 
+@_masked_repr
 @dataclass(frozen=True)
 class EnvShow:
     """What `env show` printed: header panel title and count, then one panel per account."""
@@ -996,14 +1186,14 @@ def parse_env_show(output: str) -> EnvShow:
     count: int | None = None
     accounts: list[ShownAccount] = []
     stacks: list[ShownStack] = []
+    output = MaskedStr(output)  # pytest prints this frame's arguments and locals with repr
     panel: str | None = None  # "header", "account" or None (outside / unknown panel)
 
     def close_account() -> None:
         if panel == "account":
             accounts[-1] = replace(accounts[-1], stacks=tuple(stacks))
 
-    for line in plain(output).splitlines():
-        line = line.rstrip()
+    for line in [MaskedStr(raw.rstrip()) for raw in plain(output).splitlines()]:
         title = _PANEL_TITLE_RE.match(line)
         if title:
             close_account()
@@ -1026,7 +1216,7 @@ def parse_env_show(output: str) -> EnvShow:
         body = _PANEL_BODY_RE.match(line)
         if body is None or panel is None:
             continue
-        text = body["body"].strip()
+        text = MaskedStr(body["body"].strip())
         if panel == "header":
             found = _ACCOUNT_COUNT_RE.match(text)
             if found:
@@ -1057,6 +1247,9 @@ def env_show_problems(
     the `env verify` test), nor are the regions stacks are in, nor the
     header's OU row. The env name, count and account triples come from the
     same account config the CLI reads, so they verify rendering and plumbing.
+    Account IDs in the returned messages (the triples, and names read from the
+    output) are masked. Accounts that share their last four digits render
+    identically; compare the raw values when two IDs matter.
 
     The stack check assumes ``env setup`` deployed the scenario's stacks into
     every configured account. aws-bench does not enforce that (each scenario's
@@ -1104,9 +1297,10 @@ def env_show_problems(
             f"configured accounts without a healthy <scenario>-* stack "
             f"({sorted(HEALTHY_STACK_STATUSES)}): {without_stack}"
         )
-    return problems
+    return mask_problems(problems)
 
 
+@_masked_repr
 @dataclass(frozen=True)
 class ListedEnv:
     """One row of the `env list` table (``render_env_list``); ``accounts`` None if "?"."""
@@ -1119,8 +1313,8 @@ class ListedEnv:
 def parse_env_list(output: str) -> tuple[ListedEnv, ...]:
     """Parse the body rows (``│ name │ ou id │ accounts │``) of the `env list` table."""
     rows: list[ListedEnv] = []
-    for line in plain(output).splitlines():
-        line = line.strip()
+    output = MaskedStr(output)  # pytest prints this frame's arguments and locals with repr
+    for line in [MaskedStr(raw.strip()) for raw in plain(output).splitlines()]:
         if not (line.startswith("│") and line.endswith("│")):
             continue
         cells = [c.strip() for c in line[1:-1].split("│")]
@@ -1138,9 +1332,12 @@ def env_list_problems(
 
     Pre-existing mode lists exactly the configured environment: one row named
     ``env_name``, OU id ``PREEXISTING_OU_ID``, counting every configured account.
+    Account IDs in the returned messages (names read from the output) are masked.
     """
     if len(rows) != 1:
-        return [f"expected exactly one environment row, got {len(rows)}: {list(rows)}"]
+        return mask_problems(
+            [f"expected exactly one environment row, got {len(rows)}: {list(rows)}"]
+        )
     row, problems = rows[0], []
     if row.name != env_name:
         problems.append(f"environment {row.name!r} listed, expected {env_name!r}")
@@ -1149,7 +1346,7 @@ def env_list_problems(
     expected = len(_configured(accounts))
     if row.accounts != expected:
         problems.append(f"{row.accounts!r} accounts listed, expected {expected}")
-    return problems
+    return mask_problems(problems)
 
 
 # --------------------------------------------------------------------------- #
@@ -1164,6 +1361,7 @@ SESSION_FOR_ACCOUNT = Callable[[str], Any]
 """Builds a boto3 session for one account ID (the CLI's own credential path)."""
 
 
+@_masked_repr
 @dataclass(frozen=True)
 class StackRecord:
     """One CloudFormation stack as listed by `list_stacks`."""
@@ -1173,6 +1371,7 @@ class StackRecord:
     status: str
 
 
+@_masked_repr
 @dataclass(frozen=True)
 class AccountStacks:
     """The stacks found in one configured account, region by region.
@@ -1189,23 +1388,6 @@ class AccountStacks:
     errors: tuple[str, ...] = ()
 
 
-def mask_account_id(account_id: str) -> str:
-    """Show only the last four digits of a 12-digit account ID (``********3333``)."""
-    if re.fullmatch(r"\d{12}", account_id):
-        return "*" * 8 + account_id[-4:]
-    return "****"
-
-
-def mask_account_ids(text: str) -> str:
-    """Mask every 12-digit run in ``text`` that looks like an account ID."""
-    return re.sub(r"(?<!\d)\d{12}(?!\d)", lambda m: mask_account_id(m.group()), text)
-
-
-def account_label(scenario: str, tag: str, account_id: str) -> str:
-    """Account description for failure messages: scenario/tag plus the masked ID."""
-    return f"{scenario}/{tag} ({mask_account_id(account_id)})"
-
-
 def _error_label(error: BaseException) -> str:
     """Name an error without its message, which may carry ARNs or account IDs."""
     if isinstance(error, ClientError):
@@ -1214,14 +1396,14 @@ def _error_label(error: BaseException) -> str:
     return type(error).__name__
 
 
-def scenario_regions(manifest_paths: Sequence[Path]) -> dict[str, list[str]]:
+def scenario_regions(manifest_paths: Sequence[Path]) -> MaskedDict[list[str]]:
     """Map each readable manifest's scenario name to the regions it declares.
 
     These are the regions the cleanup contract covers and the region
     restriction allows. Unreadable manifests are skipped, so their scenarios
     are missing from the result (``stack_problems`` reports that).
     """
-    regions: dict[str, list[str]] = {}
+    regions: MaskedDict[list[str]] = MaskedDict()
     for path in manifest_paths:
         try:
             manifest = ScenarioManifest.model_validate_toml(path.read_bytes())
@@ -1330,16 +1512,6 @@ def _check_coverage(
     return problems, clean
 
 
-def _masked(problems: Sequence[str]) -> list[str]:
-    """Mask account IDs in every problem string.
-
-    Stack and scenario names can carry an account ID. The strings are masked
-    where they are built, so every place that prints them (an assertion message
-    and pytest's own ``assert ... == []`` explanation) shows only masked IDs.
-    """
-    return [mask_account_ids(p) for p in problems]
-
-
 def stack_problems(
     found: Sequence[AccountStacks],
     *,
@@ -1382,7 +1554,7 @@ def stack_problems(
                 continue
             kind = "CDK bootstrap stack" if is_infra_identifier(stack.name) else "stack"
             problems.append(f"{label}: {stack.region}: {kind} {stack.name} is {stack.status}")
-    return _masked(problems)
+    return mask_problems(problems)
 
 
 def deployed_stack_problems(
@@ -1414,16 +1586,18 @@ def deployed_stack_problems(
                 f"'{scenario}-*' before cleanup, so no deployment was found in this account "
                 "(or it was not listed)"
             )
-    return _masked(problems)
+    return mask_problems(problems)
 
 
 def cleanup_output_problems(output: str, *, accounts: int) -> list[str]:
-    """Check the `env cleanup` summary the CLI prints (``display_cleanup_results``).
+    """Check the `env cleanup` summary the CLI prints on stdout (``display_cleanup_results``).
 
     On success it prints ``Cleanup complete: N account(s) cleaned successfully.``
     with one account per configured account; any failed row makes it print
     ``Cleanup completed with errors`` and exit non-zero instead. The caller has
-    already required exit code 0; this guards the printed summary.
+    already required exit code 0; this guards the printed summary. Pass the
+    masked stdout (``mask_account_ids(result.stdout)``); the checks do not need
+    the IDs.
     """
     text = plain(output)
     problems: list[str] = []

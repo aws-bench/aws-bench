@@ -17,19 +17,25 @@ the tests then skip, except the quickstart test, which errors early if
 
 from __future__ import annotations
 
+import io
 import os
 import uuid
 from pathlib import Path
+from typing import Any
 
 import pytest
+from _pytest._code.code import ReprFileLocation
+from _pytest._io import TerminalWriter
 
 from .helpers import (
     CliResult,
     IntegSettings,
+    MaskedList,
     Secret,
     SecretEnv,
     build_cli_env,
     load_settings,
+    mask_account_ids,
     run_aws_bench,
 )
 
@@ -49,6 +55,76 @@ def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
             item.add_marker(pytest.mark.timeout(0))
 
 
+def _plain_text(longrepr: Any) -> str:
+    """What the terminal prints for ``longrepr`` without colour, with its whitespace.
+
+    ``report.longreprtext`` renders the same way but strips the result, which
+    would drop the blank line and the indentation of the traceback's first line.
+    """
+    out = io.StringIO()
+    writer = TerminalWriter(out)
+    writer.hasmarkup = False
+    if hasattr(longrepr, "toterminal"):
+        longrepr.toterminal(writer)
+        return out.getvalue()
+    return str(longrepr)
+
+
+class _MaskedRepr:
+    """A failure's ``longrepr`` with its text already masked.
+
+    pytest asks a ``longrepr`` for ``toterminal`` (the failure section), ``str``
+    (junit XML) and ``reprcrash`` (the one-line message of the short summary
+    and of the junit ``message`` attribute).
+    """
+
+    def __init__(self, text: str, crash: ReprFileLocation | None) -> None:
+        self.text, self.reprcrash = text, crash
+
+    def toterminal(self, tw: Any) -> None:
+        tw.write(self.text)  # the text keeps its own line breaks and leading whitespace
+
+    def __str__(self) -> str:
+        return self.text.strip()  # as pytest's own ``__str__`` of a traceback
+
+
+@pytest.hookimpl(hookwrapper=True)
+def pytest_runtest_makereport(item: pytest.Item, call: pytest.CallInfo[Any]):
+    """Mask account IDs in everything pytest prints or writes for this test.
+
+    The suite masks the text it builds, but pytest also prints text the suite
+    does not build: exceptions raised by called code, frame arguments and
+    locals, captured logs, skip reasons. Masking at the report is the one place
+    that covers them in every phase (setup, call, teardown) and for every
+    consumer (terminal, ``--tb`` styles, ``-l``, ``--full-trace``, junit XML).
+    Secrets are scrubbed earlier, where the text is built; IDs are masked here.
+
+    This relies on the report's shape (``longrepr``, ``reprcrash``, ``sections``)
+    and on pytest's private ``ReprFileLocation``: a pytest upgrade can break it.
+    ``test_report_hook_masks_every_report_field`` fails if the hook stops running.
+    The tracebacks lose pytest's colour highlighting, because they are rendered
+    to plain text first. The text keeps its layout. A report that is serialized
+    (pytest-xdist, report-log) loses ``reprcrash`` and with it the one-line
+    message of the short summary; its text stays masked.
+    """
+    report = (yield).get_result()
+    longrepr = report.longrepr
+    if isinstance(longrepr, tuple):  # skip: (path, lineno, reason)
+        report.longrepr = (*longrepr[:2], mask_account_ids(str(longrepr[2])))
+    elif isinstance(longrepr, str):
+        report.longrepr = mask_account_ids(longrepr)
+    elif longrepr is not None:
+        crash = getattr(longrepr, "reprcrash", None)
+        if crash is not None:
+            crash = ReprFileLocation(crash.path, crash.lineno, mask_account_ids(crash.message))
+        report.longrepr = _MaskedRepr(mask_account_ids(_plain_text(longrepr)), crash)
+    report.sections = [
+        (mask_account_ids(title), mask_account_ids(text)) for title, text in report.sections
+    ]
+    if isinstance(getattr(report, "wasxfail", None), str):
+        report.wasxfail = mask_account_ids(report.wasxfail)
+
+
 @pytest.fixture(scope="session")
 def run_id() -> str:
     """Unique per-session ID, used to namespace env names, job names and state."""
@@ -57,8 +133,12 @@ def run_id() -> str:
 
 @pytest.fixture(scope="session")
 def integ_settings(run_id: str) -> IntegSettings:
-    """Skip unless opted in and configured; otherwise return the settings."""
-    return load_settings(os.environ, run_id)
+    """Skip unless opted in and configured; otherwise return the settings.
+
+    The environment is passed as a ``SecretEnv``: a settings failure at
+    ``--full-trace`` prints this argument, and it carries the credentials.
+    """
+    return load_settings(SecretEnv(os.environ), run_id)
 
 
 @pytest.fixture(scope="session")
@@ -108,6 +188,8 @@ def run_cli(cli_env: SecretEnv, tmp_path_factory: pytest.TempPathFactory):
     cwd = tmp_path_factory.mktemp("integ-cwd")
 
     def _run(*args: str | Secret, timeout: float | None = 3600, check: bool = True) -> CliResult:
+        # The arguments carry env names and paths: keep account IDs out of this frame's repr.
+        args = MaskedList(args)  # type: ignore[assignment]
         return run_aws_bench(args, cwd=cwd, env=cli_env, timeout=timeout, check=check)
 
     _run.cwd = cwd  # type: ignore[attr-defined]

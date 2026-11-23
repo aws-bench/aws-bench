@@ -16,12 +16,11 @@ from pathlib import Path
 
 import pytest
 
-from aws_bench.account_management.preexisting import load_account_config
-
 from .conftest import REPO_ROOT
 from .helpers import (
     INIT_TIMEOUT_SEC,
     IntegSettings,
+    MaskedDict,
     Secret,
     SecretEnv,
     StepTimeouts,
@@ -30,6 +29,9 @@ from .helpers import (
     env_show_problems,
     expected_trial_count,
     find_scenario_manifests,
+    load_accounts,
+    mask_account_ids,
+    mask_problems,
     parse_env_list,
     parse_env_show,
     resolve_run_tasks,
@@ -87,7 +89,7 @@ def _step_timeouts(settings: IntegSettings, cli_env: SecretEnv) -> StepTimeouts:
             home=Path(cli_env["HOME"]),
         )
     )
-    print(f"step timeouts: {timeouts.describe()}")
+    print(f"step timeouts: {timeouts.describe()}")  # describe() masks account IDs
     return timeouts
 
 
@@ -109,12 +111,11 @@ def deployed_env(integ_settings: IntegSettings, cli_env: SecretEnv, run_cli, bed
     cleanup fails too, the original failure is reported with the cleanup
     failure attached (see ``helpers.deployed``).
     """
-    env, src = integ_settings.env_name, integ_settings.env_source_args()
     with deployed(
         run_cli,
-        init_args=["env", "init", "--env-name", env, *src, "--quiet"],
-        setup_args=["env", "setup", "--env-name", env, *src, "--quiet"],
-        cleanup_args=["env", "cleanup", "--env-name", env, *src, "--yes", "--quiet"],
+        init_args=integ_settings.env_command("init", "--quiet"),
+        setup_args=integ_settings.env_command("setup", "--quiet"),
+        cleanup_args=integ_settings.env_command("cleanup", "--yes", "--quiet"),
         init_timeout=INIT_TIMEOUT_SEC,
         setup_timeout=lambda: _step_timeouts(integ_settings, cli_env).setup,
         cleanup_timeout=lambda: _step_timeouts(integ_settings, cli_env).cleanup,
@@ -138,7 +139,7 @@ def test_quickstart_oracle_earns_full_reward(
     expected = expected_trial_count(deployed_env, resolved=tasks.expected_trials)
     run_timeout = run_timeout_for(tasks.task_dirs)
     note = f"; {tasks.note}" if tasks.note else ""
-    print(f"expected trials: {expected}; timeout: {run_timeout.describe()}{note}")
+    print(mask_account_ids(f"expected trials: {expected}; timeout: {run_timeout.describe()}{note}"))
     run_cli(
         "run",
         *deployed_env.task_filter_args(),
@@ -153,12 +154,17 @@ def test_quickstart_oracle_earns_full_reward(
     )  # fmt: skip
     checker = _load_reward_checker()
     result = json.loads((jobs_dir / job_name / "result.json").read_text())
+    if isinstance(result, dict):
+        result = MaskedDict(result)  # a local that pytest may print with -l
     n_total = result.get("n_total_trials") if isinstance(result, dict) else None
-    assert n_total == expected, (
+    planned = n_total == expected
+    assert planned, mask_account_ids(
         f"job planned {n_total!r} trials, expected {expected} "
         f"for globs {list(deployed_env.task_globs) or 'all tasks'}"
     )
-    assert checker.find_problems(result, expected_trials=expected) == []
+    # Trial and eval names come from task names; the checker prints them as they are.
+    problems = mask_problems(checker.find_problems(result, expected_trials=expected))
+    assert problems == []
 
 
 def test_env_show_happy_path(deployed_env: IntegSettings, run_cli):
@@ -180,11 +186,15 @@ def test_env_show_happy_path(deployed_env: IntegSettings, run_cli):
     """
     result = run_cli("env", "show", "--env-name", deployed_env.env_name, timeout=SHOW_TIMEOUT_SEC)
     shown = parse_env_show(result.stdout)
-    print(f"env show: {len(shown.accounts)} account panel(s), env {shown.env_name!r}")
-    accounts = load_account_config(deployed_env.account_config).accounts
-    assert env_show_problems(shown, env_name=deployed_env.env_name, accounts=accounts) == [], (
-        result.stdout[-4000:]
+    print(
+        mask_account_ids(
+            f"env show: {len(shown.accounts)} account panel(s), env {shown.env_name!r}"
+        )
     )
+    accounts = load_accounts(deployed_env.account_config)
+    # Not `assert f(raw) == []`: pytest would print the raw output as call arguments.
+    problems = env_show_problems(shown, env_name=deployed_env.env_name, accounts=accounts)
+    assert problems == [], result.masked_output(4000)
 
 
 def test_env_list_happy_path(integ_settings: IntegSettings, run_cli):
@@ -194,10 +204,9 @@ def test_env_list_happy_path(integ_settings: IntegSettings, run_cli):
     """
     result = run_cli("env", "list", timeout=LIST_TIMEOUT_SEC)
     rows = parse_env_list(result.stdout)
-    accounts = load_account_config(integ_settings.account_config).accounts
-    assert env_list_problems(rows, env_name=integ_settings.env_name, accounts=accounts) == [], (
-        result.stdout[-4000:]
-    )
+    accounts = load_accounts(integ_settings.account_config)
+    problems = env_list_problems(rows, env_name=integ_settings.env_name, accounts=accounts)
+    assert problems == [], result.masked_output(4000)
 
 
 # --- Placeholders (see BACKLOG.md) -------------------------------------------------

@@ -95,6 +95,126 @@ timeout, unexpected-exception, environment-only-secret and
 setup-plus-cleanup-failure paths. This covers the test's output only. What the
 CLI itself writes to its logs under the scratch `HOME` is not checked here.
 
+**Account IDs in output.** Account IDs are masked in the suite's own failure
+messages, problem lists, status prints and object reprs, and in the pytest
+report of the integration tests (listed below). Each ID appears as
+`********<last 4 digits>`. Any 12-digit run is masked, wherever it comes from:
+a stack, scenario, environment or trial name, a path, an ARN, an error message,
+the account config or the CLI's output. Other digit runs are left alone, and
+the masked text keeps its length and line layout. Accounts that share their
+last four digits render identically, so compare the raw values in a check and
+say so in the message when two IDs are compared.
+
+The suite masks what it builds, where it builds it, because pytest repeats what
+it is given:
+- A CLI failure (non-zero exit, timeout) reports the command line and the last
+  4000 characters of stdout and stderr. The whole text is masked first and cut
+  afterwards, so a cut cannot expose the last digits of an ID. Secrets are
+  scrubbed first, then IDs are masked.
+- `CliResult.stdout` and `stderr` keep the raw text, because the `env show`
+  parser reads the account ID from the panel title. Messages use
+  `CliResult.masked_output()`, the cleanup summary check reads the masked
+  stdout, and the `repr` of a `CliResult` is masked. The fields are `MaskedStr`
+  values, a `str` whose `repr` masks IDs, as are the argument and the lines the
+  `env show` and `env list` parsers work on. pytest cuts a `repr` longer than
+  240 characters in the middle, which can leave a few digits of an ID that no
+  mask matches; the `MaskedStr` `repr` is masked before that cut.
+- The problem lists of the `env show`, `env list`, stack, reward and cleanup
+  checks are masked when they are built. The tests compute the list before they
+  assert on it (`problems == []`, never `f(raw_output) == []`), so pytest's
+  assertion explanation shows only masked text and not the arguments of a call.
+- The leak notice of a failed cleanup, the messages and skip reasons of the
+  settings checks, a failure to load the account config (a validation error
+  quotes the value it rejected), and the `step timeouts:`, `expected trials:`
+  and `env show:` lines are masked too.
+- Objects that hold raw names or output mask their own `repr`, which is what
+  pytest prints for fixtures, frame arguments (`--tb=long`, `-vvv`) and locals
+  (`-l`): the parsed `env show` and `env list` results, stack records,
+  `IntegSettings`, the timeouts, the CLI argument lists and the account mapping.
+- The CLI's environment (`build_cli_env`, `cli_display_env`) is a `SecretDict`,
+  the `cli_env` fixture a `SecretEnv`, and `integ_settings` passes the process
+  environment to `load_settings` as a `SecretEnv`. Their `repr` shows no
+  values, so frame arguments and `-l` locals of these frames show no
+  credentials.
+
+What the suite does not build is masked when pytest builds its report. A
+`pytest_runtest_makereport` hook in `tests/integration/conftest.py` masks, for
+every phase (setup, call, teardown) of the integration tests: the traceback
+text, including frame arguments, locals (`-l`), `--full-trace` frames and the
+chain of exceptions with their causes and notes; the one-line message of the
+short test summary and of the `--junitxml` file; the captured stdout, stderr
+and log sections; and skip and xfail reasons. This is what covers an exception
+raised by code the tests call, such as the dataset resolver or the credential
+provider. The hook renders the traceback to text first, so the terminal shows
+it without pytest's colour highlighting. It renders it the way
+`report.longreprtext` does, but without the final `strip()`, so the blank line
+and the indentation of the first source line stay as pytest prints them (a test
+compares the text of a report without an ID, before and after the hook). It
+depends on the shape of the report and on pytest internals, including the
+private `ReprFileLocation` class, so a pytest upgrade can break it; a test
+fails if it stops running.
+
+`tests/test_integration_helpers.py` checks this with a canary ID in a nested
+pytest:
+- The real acceptance and cleanup test modules run against a fake CLI, with the
+  canary in a stack, scenario, environment and trial name, a path, an ARN in the
+  CLI's output and the account config, at `--tb=long -vvv -rA`, with and
+  without `-l --full-trace`.
+- The called code is made to fail: a dataset resolver that raises with the
+  canary (also with a cause and a note), a credential provider that raises, a
+  log record, a failing fixture (the account config sits in a directory named after the
+  canary), settings and config failures, a skip reason, and the other `--tb`
+  styles (`short`, `native`, `line`, `no`). In each case neither the terminal
+  output nor the junit XML contains the canary or any six consecutive digits of
+  it, nor the credentials set in the session's environment (including the
+  fixture failure at `-l --full-trace`), and the masked text is in the terminal
+  output.
+- A frame argument that is a raw CLI output of about 500 characters with the
+  canary every 13 characters (so every cut falls inside an ID), passed to the
+  real `env show` parser, which then fails: no run of six or more digits from
+  the canary is shown, at the default verbosity, at `-v` and with `-l`.
+- A probe file checks the setup, call and teardown reports of a failure, a
+  setup error, a teardown error, a skip, an xfail, an XPASS and a strict XPASS:
+  the traceback, short summary, stdout, stderr and log sections, skip and xfail
+  reasons and the junit XML, and the outcome counts of the probe.
+- In-process: the terminal text of a report without an ID is unchanged by the
+  hook; a report with an ID is masked in its terminal text, its `str` (junit
+  XML) and its `reprcrash` message. In a nested session, a `conftest.py` that
+  exposes the hook masks the tests below its directory and not those outside
+  it.
+- `-s` with the suite's own prints shows no canary.
+- The nested sessions do not inherit `PYTEST_*` or `AWS_BENCH_INTEG*`
+  variables.
+
+Not covered:
+- Files the CLI writes: the job directory (`result.json`) and the CLI's logs
+  under the scratch `HOME` hold IDs as they are. The CLI's logs are also not
+  checked for secrets.
+- `scripts/check_job_rewards.py` run on its own prints trial names and paths as
+  they are. The suite masks the problems it gets from that script.
+- Output that pytest prints outside the report. A probe with an ID-bearing
+  value showed these channels unmasked; no test pins them: the warnings summary,
+  collection errors, live `log_cli` logging, test node IDs (parametrize IDs,
+  also in the junit `testcase` name), and anything that called code writes to
+  the terminal with `-s`.
+- An ID split by colour codes or inside a longer run of digits.
+- Truncation of long raw strings from called code. pytest cuts the `repr` of a
+  frame argument or local longer than 240 characters in the middle before the
+  hook sees it, so a few digits of an ID can remain when a long raw string that
+  the suite did not wrap is a frame argument or local at a verbosity below
+  `-vvv`. A probe with a 450-character argument showed leaked fragments at
+  some offsets at the default verbosity, `-v`, `-vv` and `-l`, and none at
+  `-vvv`. No test pins this. The CLI output in `CliResult` and the parsers'
+  inputs are `MaskedStr`, and the case above pins the `env show` parser.
+- Serialized reports. A report that is serialized (pytest-xdist, report-log)
+  loses `reprcrash`, so pytest has no one-line message for the short summary
+  line of that test. The restored text stays masked. An in-process test pins
+  this restored behaviour. xdist is not used today.
+- Colour. The hook's traceback text has no colour highlighting.
+- Other pytest versions. The hook uses pytest's private `ReprFileLocation` and
+  `TerminalWriter` classes, and its tests run only against the locked pytest
+  version.
+
 If cleanup fails, how it is reported depends on what failed before it:
 
 - **Init or setup failed**: that failure is reported as
@@ -277,12 +397,11 @@ regions come from the manifest.
 
 **Output.** Failure messages name accounts as `<scenario>/<tag>
 (********<last 4 digits>)` and report API errors by error code only, never by
-message, because messages can contain ARNs and account IDs. The test masks
-12-digit numbers in the tail of the CLI output that it adds to an assertion
-message, and in the stack and scenario names inside the stack problems, since
-a name can carry an account ID. The CLI's own failure output (when `env cleanup` itself exits non-zero,
-or `env init`/`env setup` fails) is shown as the CLI printed it, as for the other
-tests, with only secret values masked.
+message, because messages can contain ARNs and account IDs. Every 12-digit
+number in the messages is masked, including the tail of the CLI output that an
+assertion shows, the stack and scenario names inside the stack problems, and the
+CLI's own failure output when `env cleanup` exits non-zero or `env init` or
+`env setup` fails (see "Account IDs in output" above).
 
 The parsers and checks are in `tests/integration/helpers.py`.
 `tests/test_integration_helpers.py` tests them on output rendered by the CLI's
