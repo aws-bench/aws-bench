@@ -302,13 +302,23 @@ class OrganizationsClient:
         logger.info(f"Attached SCP {policy_id} to OU {ou_id}")
 
     @retry(
-        retry=retry_if_exception(_is_policy_type_not_enabled_error),
-        wait=wait_exponential(multiplier=1, min=2, max=10),
-        stop=stop_after_delay(60),
+        retry=(
+            retry_if_exception(_is_policy_type_not_enabled_error)
+            | retry_if_exception(_is_concurrent_modification_error)
+        ),
+        # Jittered like the other CME retries here so parallel losers don't re-collide.
+        wait=wait_random_exponential(multiplier=1, min=2, max=30),
+        stop=stop_after_delay(180),
         reraise=True,
     )
     def _attach_policy_with_retry(self, policy_id: str, target_id: str) -> None:
-        """Attach policy, retrying on PolicyTypeNotEnabledException for propagation."""
+        """Attach policy, retrying SCP-enablement propagation and Organizations write conflicts.
+
+        env init provisioning and env setup DEPLOY both attach region SCPs for
+        many accounts concurrently. Parallel AttachPolicy calls in one org can
+        conflict even across different policies and accounts, and the loser gets
+        ConcurrentModificationException.
+        """
         try:
             self._client.attach_policy(PolicyId=policy_id, TargetId=target_id)
         except ClientError as e:

@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 import asyncio
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, call, patch
 
 import pytest
 from botocore.exceptions import ClientError
-from tenacity import wait_none
+from tenacity import stop_after_attempt, wait_none
 
 from aws_bench.account_management.exceptions import (
     AccountCreationError,
@@ -494,6 +494,90 @@ def test_ensure_region_restriction_scp_creates_and_attaches_to_accounts(org_clie
     assert mock_boto.attach_policy.call_count == 2
     mock_boto.attach_policy.assert_any_call(PolicyId="p-reg123", TargetId="111")
     mock_boto.attach_policy.assert_any_call(PolicyId="p-reg123", TargetId="222")
+
+
+def _stub_region_scp_prereqs(mock_boto: MagicMock) -> None:
+    """SCPs enabled on the root; no existing policy (created as p-reg123); nothing attached."""
+    mock_boto.get_paginator.return_value.paginate.return_value = [{"Policies": []}]
+    mock_boto.create_policy.return_value = {"Policy": {"PolicySummary": {"Id": "p-reg123"}}}
+    mock_boto.list_targets_for_policy.return_value = {"Targets": []}
+    mock_boto.enable_policy_type.return_value = {}
+    mock_boto.describe_organization.return_value = {
+        "Organization": {
+            "Id": "o-abc",
+            "MasterAccountId": "111111111111",
+            "MasterAccountEmail": "mgmt@example.com",
+        }
+    }
+    mock_boto.list_roots.return_value = {
+        "Roots": [
+            {
+                "Id": "r-root1",
+                "PolicyTypes": [{"Type": "SERVICE_CONTROL_POLICY", "Status": "ENABLED"}],
+            }
+        ]
+    }
+
+
+def test_ensure_region_restriction_scp_retries_attach_on_concurrent_modification(
+    org_client, monkeypatch
+):
+    """A parallel attach in the same org (CME) is retried instead of failing the account."""
+    client, mock_boto = org_client
+    _stub_region_scp_prereqs(mock_boto)
+    conflict = ClientError(
+        {"Error": {"Code": "ConcurrentModificationException", "Message": "busy"}},
+        "AttachPolicy",
+    )
+    mock_boto.attach_policy.side_effect = [conflict, None]
+    monkeypatch.setattr(client._attach_policy_with_retry.retry, "wait", wait_none())
+
+    client.ensure_region_restriction_scp("my-scenario", ["us-east-1"], ["111"])
+
+    assert mock_boto.attach_policy.call_args_list == [
+        call(PolicyId="p-reg123", TargetId="111"),
+        call(PolicyId="p-reg123", TargetId="111"),
+    ]
+    # Retried at the attach call, not by re-running the whole reconciliation.
+    mock_boto.enable_policy_type.assert_called_once()
+    mock_boto.create_policy.assert_called_once()
+
+
+def test_ensure_region_restriction_scp_surfaces_persistent_concurrent_modification(
+    org_client, monkeypatch
+):
+    """A CME that never clears surfaces as the original ClientError once retries run out."""
+    client, mock_boto = org_client
+    _stub_region_scp_prereqs(mock_boto)
+    mock_boto.attach_policy.side_effect = ClientError(
+        {"Error": {"Code": "ConcurrentModificationException", "Message": "busy"}},
+        "AttachPolicy",
+    )
+    monkeypatch.setattr(client._attach_policy_with_retry.retry, "wait", wait_none())
+    monkeypatch.setattr(client._attach_policy_with_retry.retry, "stop", stop_after_attempt(3))
+
+    with pytest.raises(ClientError, match="ConcurrentModificationException"):
+        client.ensure_region_restriction_scp("my-scenario", ["us-east-1"], ["111"])
+
+    assert mock_boto.attach_policy.call_count == 3
+
+
+def test_ensure_region_restriction_scp_does_not_retry_other_attach_errors(org_client, monkeypatch):
+    """Non-transient AttachPolicy errors still fail on the first attempt."""
+    client, mock_boto = org_client
+    _stub_region_scp_prereqs(mock_boto)
+    mock_boto.attach_policy.side_effect = ClientError(
+        {"Error": {"Code": "AccessDeniedException", "Message": "denied"}},
+        "AttachPolicy",
+    )
+    # Bound the loop so an over-broad retry predicate fails fast instead of spinning for 60s.
+    monkeypatch.setattr(client._attach_policy_with_retry.retry, "wait", wait_none())
+    monkeypatch.setattr(client._attach_policy_with_retry.retry, "stop", stop_after_attempt(3))
+
+    with pytest.raises(ClientError, match="AccessDeniedException"):
+        client.ensure_region_restriction_scp("my-scenario", ["us-east-1"], ["111"])
+
+    assert mock_boto.attach_policy.call_count == 1
 
 
 def test_ensure_region_restriction_scp_reuses_existing_policy(org_client):
