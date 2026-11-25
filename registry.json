@@ -128,7 +128,7 @@
   },
   {
     "name": "compute-and-data",
-    "version": "1.0.1",
+    "version": "1.0.2",
     "description": "Mutation scenario (compute-and-data) \u2014 multi-region: us-east-1 (primary deployments), us-east-2 (Image Builder distribution), ap-southeast-1 (EMR cluster creation); 27 aws-introspection tasks against compute-and-data.",
     "tasks": [
       {
@@ -298,7 +298,7 @@
       {
         "name": "compute-and-data",
         "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
-        "git_commit_id": "b1b22256aedd2651d40214764bd17ac13e315d9b",
+        "git_commit_id": "b2c88e7ebb6cd106050fa1f996f5e692bc08e579",
         "path": "scenarios/compute-and-data"
       }
     ],
@@ -1523,7 +1523,7 @@
   },
   {
     "name": "aws-bench-basic",
-    "version": "1.0.2",
+    "version": "1.0.3",
     "description": "Easy-tier launch dataset (phase 1): 78 introspection and mutation tasks across streaming-and-iot, compute-and-data, serverless-apps, and databases-and-storage.",
     "tasks": [
       {
@@ -2005,7 +2005,7 @@
       {
         "name": "compute-and-data",
         "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
-        "git_commit_id": "b1b22256aedd2651d40214764bd17ac13e315d9b",
+        "git_commit_id": "b2c88e7ebb6cd106050fa1f996f5e692bc08e579",
         "path": "scenarios/compute-and-data"
       },
       {
@@ -2046,7 +2046,7 @@
   },
   {
     "name": "all",
-    "version": "1.0.3",
+    "version": "1.0.4",
     "description": "Unified dataset spanning 8 scenario(s) (api-and-observability, compute-and-data, databases-and-storage, ec2-multiregion, reference-architectures, serverless-apps, streaming-and-iot, troubleshooting-multiservice): 8 scenarios, 134 tasks.",
     "tasks": [
       {
@@ -2864,7 +2864,7 @@
       {
         "name": "compute-and-data",
         "git_url": "https://github.com/aws-bench/aws-bench-datasets.git",
-        "git_commit_id": "b1b22256aedd2651d40214764bd17ac13e315d9b",
+        "git_commit_id": "b2c88e7ebb6cd106050fa1f996f5e692bc08e579",
         "path": "scenarios/compute-and-data"
       },
       {
